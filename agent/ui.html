@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fbfbfa;
+        --panel: #ffffff;
+        --ink: #1b1b19;
+        --muted: #6b6a66;
+        --line: #e3e2de;
+        --accent: #3b5bdb;
+        --warn: #b4341f;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #17181a;
+          --panel: #1f2023;
+          --ink: #ececea;
+          --muted: #9a9995;
+          --line: #32333700;
+          --line: #323337;
+          --accent: #8ba2ff;
+          --warn: #ff9b86;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 24px 16px 64px;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          15px/1.55 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          system-ui,
+          sans-serif;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 4px;
+      }
+      .sub {
+        color: var(--muted);
+        margin: 0 0 24px;
+      }
+      section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+      h2 {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        margin: 0 0 12px;
+      }
+      textarea,
+      input {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--bg);
+        color: var(--ink);
+        font: inherit;
+      }
+      textarea {
+        min-height: 88px;
+        resize: vertical;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-top: 10px;
+      }
+      button {
+        padding: 9px 16px;
+        border: 0;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #fff;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: transparent;
+        color: var(--muted);
+        border: 1px solid var(--line);
+        font-weight: 400;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .status {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .status.error {
+        color: var(--warn);
+      }
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      li {
+        border-top: 1px solid var(--line);
+        padding: 12px 0;
+        display: grid;
+        grid-template-columns: 96px 1fr;
+        gap: 12px;
+      }
+      li:first-child {
+        border-top: 0;
+      }
+      .kind {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        padding-top: 2px;
+      }
+      .kind[data-kind="response"] {
+        color: var(--accent);
+      }
+      .kind[data-kind="error"] {
+        color: var(--warn);
+      }
+      .message {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        margin: 0;
+      }
+      .empty {
+        color: var(--muted);
+      }
+      @media (max-width: 520px) {
+        li {
+          grid-template-columns: 1fr;
+          gap: 4px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Agent</h1>
+      <p class="sub">
+        Write a prompt. The agent works one turn at a time and reports back
+        here; the log is yours and survives a refresh.
+      </p>
+
+      <section id="key-panel" hidden>
+        <h2>Your API key</h2>
+        <p class="status">
+          Runs are billed to your own Anthropic key. It is stored against your
+          account, encrypted, and never readable by this page or by the script —
+          the engine substitutes it into the request itself.
+        </p>
+        <div class="row">
+          <input
+            id="key"
+            type="password"
+            placeholder="sk-ant-..."
+            autocomplete="off"
+          />
+        </div>
+        <div class="row">
+          <button id="save-key">Save key</button>
+          <button id="forget-key" class="secondary" hidden>Remove key</button>
+          <span id="key-status" class="status"></span>
+        </div>
+      </section>
+
+      <section>
+        <h2>Prompt</h2>
+        <textarea
+          id="prompt"
+          placeholder="Ask for something, or describe a task."
+        ></textarea>
+        <div class="row">
+          <button id="run">Run</button>
+          <span id="run-status" class="status"></span>
+        </div>
+      </section>
+
+      <section>
+        <h2>Activity</h2>
+        <ul id="activity">
+          <li class="empty">Nothing yet.</li>
+        </ul>
+      </section>
+    </main>
+    <script src="/agent/app.js"></script>
+  </body>
+</html>
