@@ -158,7 +158,7 @@ interface ApiResponse {
 
 interface MessageRow {
   id: number;
-  role: string;
+  speaker: string;
   blocks: string;
 }
 
@@ -173,31 +173,63 @@ interface ActivityRow {
 // Registration
 // ============================================================================
 
+/**
+ * A database answer, or a thrown error if the call failed.
+ *
+ * `database` reports failure as a `{error}` value rather than by throwing, so
+ * an unchecked call is a failure that surfaces somewhere else and much later.
+ * This script shipped with `ensureTable` unchecked and `role` as a column
+ * name — a reserved keyword — so the table was never created, `init()`
+ * registered its routes anyway, and the first symptom was a step answering
+ * "No such run" about a run that had been opened perfectly well.
+ */
+function must(answer: DatabaseAnswer, what: string): unknown {
+  const value = answer.json();
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    "error" in value
+  ) {
+    throw new Error(`${what}: ${String((value as { error: unknown }).error)}`);
+  }
+  return value;
+}
+
 function init(): void {
-  database.ensureTable(
-    "messages",
-    JSON.stringify({
-      columns: [
-        { name: "user_id", type: "text" },
-        { name: "run_id", type: "text" },
-        { name: "role", type: "text" },
-        { name: "blocks", type: "text" },
-        { name: "created_ms", type: "bigint" },
-      ],
-    }),
+  // Column names are validated against `^[a-z][a-z0-9_]*$` *and* refused when
+  // they are SQL reserved words, which is why this is `speaker` rather than
+  // the obvious `role`.
+  must(
+    database.ensureTable(
+      "messages",
+      JSON.stringify({
+        columns: [
+          { name: "user_id", type: "text" },
+          { name: "run_id", type: "text" },
+          { name: "speaker", type: "text" },
+          { name: "blocks", type: "text" },
+          { name: "created_ms", type: "bigint" },
+        ],
+      }),
+    ),
+    'creating the table "messages"',
   );
 
-  database.ensureTable(
-    "activities",
-    JSON.stringify({
-      columns: [
-        { name: "user_id", type: "text" },
-        { name: "run_id", type: "text" },
-        { name: "kind", type: "text" },
-        { name: "message", type: "text" },
-        { name: "created_ms", type: "bigint" },
-      ],
-    }),
+  must(
+    database.ensureTable(
+      "activities",
+      JSON.stringify({
+        columns: [
+          { name: "user_id", type: "text" },
+          { name: "run_id", type: "text" },
+          { name: "kind", type: "text" },
+          { name: "message", type: "text" },
+          { name: "created_ms", type: "bigint" },
+        ],
+      }),
+    ),
+    'creating the table "activities"',
   );
 
   routeRegistry.registerAssetRoute("/agent", "ui.html");
@@ -312,7 +344,7 @@ function runStep(context: HandlerContext): HttpResponse {
     return json(404, { error: "No such run." });
   }
 
-  const taken = history.filter((m) => m.role === "assistant").length;
+  const taken = history.filter((m) => m.speaker === "assistant").length;
   if (taken >= MAX_STEPS) {
     recordActivity(
       userId,
@@ -384,15 +416,16 @@ function readHistory(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
   if (!userId) return json(401, { error: "Sign in first." });
 
-  const rows = database
-    .query(
+  const rows = must(
+    database.query(
       "activities",
       JSON.stringify({ user_id: userId }),
       MAX_HISTORY_ROWS,
       "id",
       "desc",
-    )
-    .json() as ActivityRow[];
+    ),
+    "reading the history",
+  ) as ActivityRow[];
 
   const ordered = Array.isArray(rows) ? rows.slice().reverse() : [];
   return json(200, {
@@ -560,18 +593,21 @@ function runTool(
 function appendMessage(
   userId: string,
   runId: string,
-  role: "user" | "assistant",
+  speaker: "user" | "assistant",
   blocks: ContentBlock[],
 ): void {
-  database.insert(
-    "messages",
-    JSON.stringify({
-      user_id: userId,
-      run_id: runId,
-      role: role,
-      blocks: JSON.stringify(blocks),
-      created_ms: Date.now(),
-    }),
+  must(
+    database.insert(
+      "messages",
+      JSON.stringify({
+        user_id: userId,
+        run_id: runId,
+        speaker: speaker,
+        blocks: JSON.stringify(blocks),
+        created_ms: Date.now(),
+      }),
+    ),
+    "storing a message",
   );
 }
 
@@ -583,21 +619,22 @@ function appendMessage(
  * is a different conversation.
  */
 function loadMessages(userId: string, runId: string): MessageRow[] {
-  const rows = database
-    .query(
+  const rows = must(
+    database.query(
       "messages",
       JSON.stringify({ user_id: userId, run_id: runId }),
       MAX_HISTORY_ROWS,
       "id",
       "asc",
-    )
-    .json() as MessageRow[];
+    ),
+    "reading a run",
+  ) as MessageRow[];
   return Array.isArray(rows) ? rows : [];
 }
 
 function toApiMessage(row: MessageRow): ApiMessage {
   return {
-    role: row.role === "assistant" ? "assistant" : "user",
+    role: row.speaker === "assistant" ? "assistant" : "user",
     content: JSON.parse(row.blocks) as ContentBlock[],
   };
 }
@@ -615,15 +652,18 @@ function recordActivity(
   message: string,
 ): void {
   const at = Date.now();
-  database.insert(
-    "activities",
-    JSON.stringify({
-      user_id: userId,
-      run_id: runId,
-      kind: kind,
-      message: message,
-      created_ms: at,
-    }),
+  must(
+    database.insert(
+      "activities",
+      JSON.stringify({
+        user_id: userId,
+        run_id: runId,
+        kind: kind,
+        message: message,
+        created_ms: at,
+      }),
+    ),
+    "storing an activity",
   );
   routeRegistry.sendStreamMessageFiltered(
     STREAM_PATH,
