@@ -79,14 +79,33 @@ async function api(path, options) {
     // A non-JSON body means something other than this API answered.
   }
   if (!response.ok) {
-    const error = new Error(
-      body.error ?? `Request failed (${response.status})`,
-    );
+    const error = new Error(describe(body, response.status));
     error.status = response.status;
     error.body = body;
+    error.requestId = body.error?.request_id;
     throw error;
   }
   return body;
+}
+
+// Two error shapes reach here. This script answers `{error: "some text"}`; the
+// engine answers its own envelope, `{error: {code, message, request_id, ...}}`
+// — and reading that one as a string is how a stopped handler reported itself
+// as "[object Object]".
+function describe(body, status) {
+  const error = body?.error;
+  if (typeof error === "string") return error;
+  if (error && typeof error.message === "string") {
+    return error.request_id
+      ? `${error.message} (request ${error.request_id})`
+      : error.message;
+  }
+  return `Request failed (${status})`;
+}
+
+/** Whether a failure is the engine stopping a handler at its time budget. */
+function isBudgetError(error) {
+  return /budget|timed out|timeout/i.test(error.message ?? "");
 }
 
 // ---------------------------------------------------------------------------
@@ -156,10 +175,24 @@ el.run.addEventListener("click", async () => {
     // which is the whole reason the loop lives here rather than there.
     for (let step = 0; step < MAX_STEPS; step += 1) {
       setStatus(el.runStatus, `Working (turn ${step + 1})...`);
-      const result = await api("/agent/step", {
-        method: "POST",
-        body: JSON.stringify({ runId }),
-      });
+      let result;
+      try {
+        result = await api("/agent/step", {
+          method: "POST",
+          body: JSON.stringify({ runId }),
+        });
+      } catch (e) {
+        // A turn stopped at the engine's budget wrote nothing, so the run is
+        // exactly where it was and this same step is still the right call.
+        // Once only: a second timeout is the budget being too small for the
+        // work, not bad luck, and retrying forever would just spend tokens.
+        if (!isBudgetError(e)) throw e;
+        setStatus(el.runStatus, `Turn ${step + 1} took too long — retrying...`);
+        result = await api("/agent/step", {
+          method: "POST",
+          body: JSON.stringify({ runId }),
+        });
+      }
       if (result.done) {
         setStatus(
           el.runStatus,
@@ -176,6 +209,13 @@ el.run.addEventListener("click", async () => {
     } else if (e.body?.needsKey) {
       setStatus(el.runStatus, e.message, true);
       showKeyState(false);
+    } else if (isBudgetError(e)) {
+      setStatus(
+        el.runStatus,
+        "The turn ran past the engine's time budget. Try a shorter prompt, or " +
+          "raise javascript.execution_timeout_ms on the engine.",
+        true,
+      );
     } else {
       setStatus(el.runStatus, e.message, true);
     }

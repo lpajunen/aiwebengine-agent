@@ -51,20 +51,33 @@ const API_URL = "https://api.anthropic.com/v1/messages";
 const SECRET_NAME = "ANTHROPIC_API_KEY";
 
 /**
- * One turn's output ceiling. Small on purpose: the whole step has to finish
- * inside `javascript.execution_timeout_ms` (10s by default), `fetch` is
- * synchronous, and its timeout is clamped to whatever is left of that budget.
- * Raise this only alongside the engine's execution timeout.
+ * One turn's output ceiling.
+ *
+ * The whole step — history, one model call, the tools it names — has to finish
+ * inside `javascript.execution_timeout_ms`, 10 s by default. `fetch` is
+ * synchronous and its own timeout is clamped to whatever is left of that, so
+ * the engine stops the handler rather than the request coming back slow.
+ *
+ * 2048 measurably did not fit: a real turn was killed at the budget with
+ * `Handler 'runStep' exceeded its 10000ms budget`. Generation is the part that
+ * scales with this number, so this is the dial that buys headroom. Raise it
+ * only alongside the engine's execution timeout.
  */
-const MAX_TOKENS = 2048;
+const MAX_TOKENS = 1024;
 
 /** Assistant turns one run may take before the script stops it. */
 const MAX_STEPS = 12;
 
 const STREAM_PATH = "/agent/events";
 
-/** Rows one run may accumulate; also the history window sent to the model. */
-const MAX_HISTORY_ROWS = 200;
+/**
+ * Rows one run may accumulate; also the history window sent to the model.
+ *
+ * Every turn resends the run so far, so this bounds both the time a step
+ * spends and what it costs. A run reaching it is one `MAX_STEPS` should have
+ * stopped long before.
+ */
+const MAX_HISTORY_ROWS = 60;
 
 const SYSTEM_PROMPT = [
   "You are an assistant embedded in a web page.",
