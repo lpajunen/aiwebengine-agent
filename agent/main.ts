@@ -24,8 +24,20 @@
 // Configuration
 // ============================================================================
 
-/** The model every run uses. */
-const MODEL = "claude-opus-5";
+/**
+ * The model every run uses.
+ *
+ * Haiku for now, on cost: an agent turn resends the whole conversation, so the
+ * bill grows with the length of a run rather than with the prompt. It also
+ * suits the 10-second budget, being the fastest of the family.
+ *
+ * Changing this is not only the string. Haiku 4.5 rejects
+ * `output_config.effort`, and takes thinking as
+ * `{type: "enabled", budget_tokens: N}` rather than adaptive; the server-side
+ * refusal fallback below belongs to the Opus 5 / Fable tier. Moving up to
+ * `claude-opus-5` means putting all three back.
+ */
+const MODEL = "claude-haiku-4-5";
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 
@@ -321,7 +333,8 @@ function runStep(context: HandlerContext): HttpResponse {
   }
 
   // A refusal is an HTTP 200 with no usable content, so this has to be read
-  // before `content` is touched.
+  // before `content` is touched. This model tier does not produce one, but the
+  // branch is what makes moving up a tier a one-line change.
   if (answer.stop_reason === "refusal") {
     const why = answer.stop_details?.explanation ?? "The model declined.";
     recordActivity(userId, runId, "error", why);
@@ -453,9 +466,6 @@ function callModel(messages: ApiMessage[]): ApiResponse {
     headers: {
       "x-api-key": "{{secret:" + SECRET_NAME + "}}",
       "anthropic-version": "2023-06-01",
-      // Server-side fallback: if a safety classifier declines this request,
-      // the API re-runs it on a fallback model within the same call.
-      "anthropic-beta": "server-side-fallback-2026-07-01",
       "content-type": "application/json",
     },
     body: JSON.stringify({
@@ -464,11 +474,9 @@ function callModel(messages: ApiMessage[]): ApiResponse {
       system: SYSTEM_PROMPT,
       messages: messages,
       tools: TOOLS,
-      // Thinking stays on (the default for this model) and effort is lowered
-      // instead: disabling it makes the model occasionally write a tool call
-      // into its visible text, where nothing executes it.
-      output_config: { effort: "low" },
-      fallbacks: "default",
+      // No `output_config.effort` and no `thinking`: this model rejects the
+      // first and does not take the adaptive form of the second. Both come
+      // back if the model moves up a tier.
     }),
   });
 

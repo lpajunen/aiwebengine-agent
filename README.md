@@ -17,6 +17,11 @@ for anybody's tokens.
 The model gets three tools: `write_response` (the only way the person sees
 anything), `remember` and `recall` (notes in that person's `personalStorage`).
 
+The model is `claude-haiku-4-5`, chosen on cost and on fitting the turn budget.
+Moving up a tier is more than the `MODEL` string — `output_config.effort`, the
+`thinking` form and the server-side refusal fallback all differ by tier, and
+the comment above the constant says which go back.
+
 ## The one structural decision
 
 **The browser drives the loop.** The page posts `/agent/step` repeatedly until
@@ -70,8 +75,8 @@ which does not work — see `TODO-agent.md` item 7.)
 | Streaming      | None — `fetch` buffers. The log updates per turn, not per token                 |
 | Concurrency    | Each in-flight turn holds one of `max_concurrent_executions` slots and a thread |
 
-The 10 seconds is the real pressure, which is why `MAX_TOKENS` is 2048 and
-`effort` is `low`. An engine hosting agents wants a longer
+The 10 seconds is the real pressure, which is why `MAX_TOKENS` is 2048 and the
+model is `claude-haiku-4-5`. An engine hosting agents wants a longer
 `javascript.execution_timeout_ms` — but it is global, so raising it affects
 every script on the instance.
 
