@@ -25,6 +25,81 @@ Nothing below is a decision that has been made. It is the map.
    it: this and permission prompts are one primitive, not two.
 6. **Usage display** — people spending their own key should see what it cost.
 
+## Where the work lands
+
+Most of this list is `main.ts`. A few items are not, and the difference is
+worth knowing before picking one up, because two of the more interesting ideas
+here are blocked on the engine rather than merely helped by it.
+
+Checked against `types/aiwebengine.d.ts` rather than assumed.
+
+### Script only
+
+Prompt caching, skills as assets, slash commands, project instructions,
+compaction, attachments, usage display, per-run model choice, the run list, the
+tool-design rules, mounting other MCP servers (`McpClient` is in the API), the
+event-log consolidation, and the whole suspended-run primitive — cancel,
+interject, plan and act — on a `runs` table beside `personalTasks.cancel`.
+
+Two that looked uncertain and are not:
+
+- **`list_memories` needs nothing.** `Storage` exposes `length` and
+  `key(index)`, so enumerating a person's notes works today.
+- **The heartbeat needs nothing.** `personalTasks.enqueue({ runAt })` already
+  schedules per-person work under the grant. No `schedulerService` change.
+
+### Script works, the engine is the better home
+
+**The lane queue.** A claimed-status table here fixes it. But every script
+queueing per-person work has the same bug, and a lane key belongs on the queue
+rather than in each of its callers. Engine for the fix, script for the stopgap.
+
+**Checkpoints over agent-written files.** Already built: `revisions.rs` wants
+using, not writing.
+
+### Engine, with no way round it
+
+**Streaming.** `fetch` answers with a buffered `FetchResponse` and no
+incremental body. Outbound SSE exists — `sendStreamMessage` — so what is
+missing is precisely a streaming fetch and a bridge between the two.
+
+**Channel adapters.** A webhook arrives with nobody signed in, and
+`personalTasks.enqueue` wants a signed-in person holding a live grant. A script
+cannot enqueue *as* somebody: establishing a `UserContext` is the engine's job
+and deliberately so. Mapping a channel identity onto an engine account and
+acting under that account's existing grant is an engine feature that does not
+exist, and the whole of the channels idea sits behind it.
+
+**Verbs in the delegation vocabulary.** `DelegationState.scopes` is a closed
+union of `"personal_storage"` and `"secrets"`. A script cannot add a read-only
+scope to it, which is what async plan approval and narrowed untrusted runs both
+need.
+
+### One primitive behind two of the best ideas
+
+[Code as the action](#smolagents-and-codeact-code-as-the-action) and
+[plan mode that is enforced rather than offered](#it-would-be-enforced-here-not-merely-offered)
+look like separate items. They are one missing engine primitive: **a script
+asking the engine to run something with fewer capabilities than the script
+itself holds.** Capabilities flow down from the caller, and nothing today lets
+a script voluntarily drop them.
+
+That one primitive would carry code-as-action, a plan mode the model cannot
+argue past, and safe handling of input from a stranger. Without it, plan mode
+here is a filtered tool list and an honour-system prompt — exactly as weak as
+the harnesses this file claims it would beat.
+
+### The engine backlog, then
+
+| Engine work | What it unblocks |
+| --- | --- |
+| Streaming `fetch`, bridged to SSE | Output per token rather than per turn |
+| Capability attenuation — a reduced sub-context | Code as the action, enforced plan mode, untrusted input |
+| Delegation reach — scope verbs, and acting for a person off-request | Channels, async plan approval, narrowed background work |
+| A lane key on the task queue | One run at a time per person (a stopgap exists here) |
+
+Everything else on this list is `main.ts`.
+
 ## Context layer — how the model learns what it is for
 
 ### Project instructions
@@ -189,10 +264,10 @@ the point. Decide that before wiring anything.
 
 ### Streaming
 
-Tokens and visible reasoning as they arrive. **Blocked here**: engine `fetch`
-buffers, so the log updates per turn rather than per token. The partial answer
-is what this already does — an activity row per tool call, so a long turn is
-not silent.
+Tokens and visible reasoning as they arrive. **Blocked here**: `fetch` answers
+with a buffered body, so the log updates per turn rather than per token. The
+partial answer is what this already does — an activity row per tool call, so a
+long turn is not silent. See [where the work lands](#engine-with-no-way-round-it).
 
 ### Interruption and steering
 
@@ -247,6 +322,13 @@ the JavaScript rather than in it.
 
 It is the same argument this file already makes about OpenClaw — the constraint
 belongs in the substrate — and this is the second place it pays.
+
+With one condition attached: capabilities flow down from the caller, and
+nothing lets a script run a turn with fewer of them than it holds. Until that
+primitive exists, a plan mode written here is a filtered tool list and a prompt
+asking nicely — which is to say, exactly the thing this section says it would
+improve on. It is the
+[same primitive code-as-action wants](#one-primitive-behind-two-of-the-best-ideas).
 
 #### It collides with the premise, and the collision is informative
 
@@ -348,10 +430,17 @@ email — normalised into one gateway. Nobody visits a chat page; they message
 their assistant from wherever they already were. That one decision is most of
 why the project spread, and none of it is about the model.
 
-This agent has exactly one channel, the `/agent` page. A webhook route per
-channel, normalised to the inbound shape `startRun` already accepts, is most of
-the work: `messages` gains a `channel` column, and `write_response` delivers to
-wherever the run came from rather than to the SSE stream alone.
+This agent has exactly one channel, the `/agent` page. The shape of the
+addition is a webhook route per channel, normalised to the inbound form
+`startRun` already accepts: `messages` gains a `channel` column, and
+`write_response` delivers to wherever the run came from rather than to the SSE
+stream alone.
+
+**It is not script work, though.** A webhook arrives with nobody signed in, and
+a run has to belong to a person — see
+[where the work lands](#engine-with-no-way-round-it). The engine has to grow a
+way to act for an account that is not the one making the request before any of
+the rest of this can be written.
 
 The discipline that makes it work is the normalisation: platform specifics
 travel as metadata and never reach the reasoning loop. An agent that knows
