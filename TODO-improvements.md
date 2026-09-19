@@ -112,6 +112,79 @@ it is about six lines in `callModel`.
 - **Structured questions.** A typed "pick one of these" tool, rather than the
   model asking in prose and hoping the answer comes back parseable.
 
+## Designing the tools
+
+The section above is *which* tools. This is what the ones that have aged well
+have in common, drawn from the
+[MCP reference servers](https://modelcontextprotocol.io/examples) — fetch,
+filesystem, git — which are deliberately boring and are the set nearly every
+agent turns out to need. Worth reading before the tool list here grows past
+three.
+
+**A few verbs over one noun.** Filesystem is five tools, not forty: one
+resource, a closed verb set, names that do not need explaining. The servers
+that age badly are the ones with a tool per API endpoint. `write_response`,
+`remember` and `recall` already have this shape; keep it when skills arrive —
+`list_skills` and `read_skill`, not a tool per skill.
+
+**Tool count is a cost paid on every request.** Schemas sit in the prompt
+whether or not they are used, and the model's accuracy in picking among them
+falls off somewhere north of a few dozen. That is what deferred schemas are
+for: load names, fetch a schema when a tool is actually wanted. The same
+progressive disclosure as skills, which is not a coincidence — it is the one
+trick that makes any large library affordable.
+
+**The output shape is the real interface.** Fetch returns markdown rather than
+HTML; browser automation returns the accessibility tree rather than pixels;
+search returns `file:line` rather than file contents. Each of those was
+somebody discovering that the smaller representation *also reasons better*,
+because the part they dropped was never signal. It is a modelling decision
+before it is a token-economy one.
+
+**Errors are prompts.** A failure that says "no such key; these exist" turns a
+dead turn into a recovered one, where a bare "not found" spends a step. Every
+error string in `runTool` is free to write and is read by the model as
+instruction.
+
+**Return a handle when the payload is large.** An id or a path the model can
+pass to the next tool, rather than bytes in the transcript. The engine already
+does this where a read can save to a file and answer with its location.
+
+**An edit beats a write.** A diff-shaped tool cuts output tokens by an order of
+magnitude on anything large, which is why the engine grew `edit_asset` and
+`edit_file` beside `write_file` rather than instead of it.
+
+**Writes should be safe to retry.** `maxAttempts: 1` is right for a turn — a
+retry is a second model call on somebody's own key — but it also means a tool
+that half-applied leaves no second pass to finish it. Idempotent writes turn
+that from a correctness problem into a policy choice.
+
+### The engine is already an MCP server
+
+Worth saying out loud, because it is built and unused from here.
+
+The engine exposes `read_file`, `write_file`, `edit_file`, `search_files`,
+`list_files`, `run_tests`, `check_script`, `eval_script` and `read_logs`,
+alongside revisions, deployments and git sync. That is the filesystem
+primitive, a test runner, a checker and a time machine — the whole loop a
+coding agent needs, and `McpClient` is in the JavaScript API, so an agent here
+could mount it.
+
+An agent that can write a solution, check it, test it and revert it, with
+`revisions.rs` underneath making every step undoable, is an unusually complete
+story for how little of it would have to be written.
+
+**The catch is a design question rather than a wiring one.** Those tools are
+gated on ownership and on being an administrator, and `delegation.rs` caps
+background work at `UserContext::authenticated` deliberately — so that a
+delegated task is not the way to obtain a context that can author a solution.
+The two cannot both hold. So this is not a delegated agent working while
+somebody is away: it would have to run inside that person's own request, under
+their own editor rights, with the tools scoped to the scripts they own.
+
+Which is a narrower thing than the agent this already is, and the narrowness is
+the point. Decide that before wiring anything.
+
 ## Run control — mostly what separates a demo from something usable
 
 ### Streaming
@@ -124,18 +197,105 @@ not silent.
 ### Interruption and steering
 
 Stopping a run, or queueing a message that lands at the next turn boundary
-rather than being ignored until the run ends.
+rather than being ignored until the run ends. Worth doing precisely because the
+run no longer belongs to the tab — there is currently no way to stop one.
 
-Cheap: a cancel flag `advanceRun` checks before it calls the model, and an
-interjections table it drains into the history. Worth doing precisely because
-the run no longer belongs to the tab — there is currently no way to stop one.
+Do not build it alone. It is one face of
+[the suspended run](#three-features-one-primitive), along with permission
+prompts and plan mode.
 
 ### Permission modes
 
-Per-tool approval, allowlists, and a read-only plan mode where the agent
-proposes before it touches anything. The engine's delegation scopes are the
-half that says what the agent may ever do; the run-side half is a paused state
-the page can answer.
+Per-tool approval, allowlists, and a read-only mode where the agent proposes
+before it touches anything. The delegation grant is the half that says what the
+agent may ever do; the run-side half is a paused state the page can answer.
+
+Both are treated under [plan mode and act mode](#plan-mode-and-act-mode).
+
+### Plan mode and act mode
+
+A read-only mode in which the agent proposes, and an acting mode it enters once
+a person has agreed. Claude Code, Cline and Cursor all ship some form of it.
+
+It is worth being clear that planning is not really what it is for. It is three
+things at once: a gate on the asymmetry between a wrong read, which costs a
+token, and a wrong write, which costs a rollback; a cheap place to correct a
+misunderstood *premise* before a long run spends money on it; and an answer to
+approval fatigue, since per-tool prompts teach people to click yes and one plan
+replaces forty of them.
+
+**Today the distinction is vacuous here.** This agent's tools are
+`write_response`, `remember` and `recall` — nothing writes anything outside the
+person's own notes, so it is already permanently in plan mode and there is
+nothing for an act mode to unlock. It becomes load-bearing at three moments
+already on this list: when MCP tools mount, when
+[the engine's own tools](#the-engine-is-already-an-mcp-server) are among them,
+and when the first channel adapter arrives.
+
+#### It would be enforced here, not merely offered
+
+Every harness named above implements this as a filtered tool list plus an
+honour-system prompt. The loop offers fewer tools and trusts itself. None of
+them can actually enforce read-only — a model that finds a write path through a
+tool that looked read-only simply takes it.
+
+This engine can, because capabilities are checked at the sandbox boundary
+rather than inside the agent loop. Plan mode here is a turn run under a
+`UserContext` holding the read capabilities and none of the writing ones, and
+the model cannot argue its way past that, because the enforcement is *under*
+the JavaScript rather than in it.
+
+It is the same argument this file already makes about OpenClaw — the constraint
+belongs in the substrate — and this is the second place it pays.
+
+#### It collides with the premise, and the collision is informative
+
+Plan mode assumes somebody is watching. The point of this agent is that the run
+outlives the tab, so a plan awaiting approval blocks on the person coming back,
+which for delegated work may be hours.
+
+The reframe that settles it: **a delegation grant already is a plan approved in
+advance.** Naming scopes, with an expiry, before any run starts is the
+asynchronous form of approving a plan mid-run. The async half is built. The
+interactive half is not, and the two suit different runs, so both should exist:
+a run with the person present proposes and waits, a run with them away treats
+the grant as the approval and its scopes as the ceiling.
+
+What is missing for the second is vocabulary. `DelegationState` offers two
+scopes, `personal_storage` and `secrets` — both nouns. For a grant to say "may
+read, may not write" the vocabulary has to grow verbs.
+
+#### Three features, one primitive
+
+In a queued-turn architecture, plan → act needs a run that **suspends,
+persists, and resumes on a human answer**:
+
+- an `exit_plan` tool that ends the chain *without* enqueuing the next turn
+- a plan row the page renders with approve and reject
+- approval flipping the run's mode and enqueuing the next turn
+
+That is the same machinery as [cancel and
+interject](#interruption-and-steering), and the same as per-tool approval, and
+the same as LangGraph's
+[`interrupt()`](#langgraph-durable-execution-and-the-interrupt). One primitive
+wearing three names. Built separately they end up disagreeing about what a
+suspended run is.
+
+#### Where it pays off most
+
+The channel warning. A message from a stranger is agent input, and the defence
+is not a new mechanism but a mode: **a run from an unknown sender stays
+read-only, and only the account owner's own prompt can promote one to act.**
+Plan mode and the prompt-injection defence turn out to be the same lever, which
+is the strongest argument for building it before the adapters rather than
+after.
+
+#### One caution
+
+Two modes is the floor. Harnesses drift to three or four — plan, auto-accept,
+unattended — because the thing that actually varies is *how often a person is
+asked*, and that is a scalar rather than a toggle. Designing it as one from the
+start avoids re-litigating it every time a tool is added.
 
 ### Checkpoints and rewind
 
