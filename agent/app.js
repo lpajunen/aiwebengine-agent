@@ -62,6 +62,34 @@ function setStatus(node, text, isError) {
   node.classList.toggle("error", Boolean(isError));
 }
 
+/**
+ * A message with something to click on the end of it.
+ *
+ * For the cases where saying what is wrong is not enough, because fixing it
+ * means going somewhere: signing in, or granting the agent permission. The
+ * page used to name the path in prose and leave the person to type it.
+ *
+ * Built rather than assigned as HTML: `label` and `href` end up as text and an
+ * attribute, so nothing here can turn a message into markup.
+ */
+function setStatusWithAction(node, text, label, href, isError) {
+  node.textContent = text;
+  node.classList.toggle("error", Boolean(isError));
+  const link = document.createElement("a");
+  link.className = "action";
+  link.href = href;
+  link.textContent = label;
+  node.appendChild(link);
+}
+
+/** Where to send somebody to sign in and be returned to this page. */
+function signInUrl() {
+  return (
+    "/auth/login?redirect=" +
+    encodeURIComponent(location.pathname + location.search)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
@@ -174,7 +202,13 @@ el.run.addEventListener("click", async () => {
     setStatus(el.runStatus, "Working. You can close this page.");
   } catch (e) {
     if (e.status === 401) {
-      setStatus(el.runStatus, "Sign in to run the agent.", true);
+      setStatusWithAction(
+        el.runStatus,
+        "You have been signed out.",
+        "Sign in",
+        signInUrl(),
+        true,
+      );
     } else if (e.body?.needsAuthorization) {
       showAuthorizationNeeded(e.body);
     } else if (e.body?.needsKey) {
@@ -197,12 +231,13 @@ el.run.addEventListener("click", async () => {
  * them back here.
  */
 function showAuthorizationNeeded(body) {
-  setStatus(el.runStatus, "", false);
-  el.runStatus.textContent = body.error + " ";
-  const link = document.createElement("a");
-  link.href = body.consentUrl + "&redirect=" + encodeURIComponent("/agent");
-  link.textContent = "Give permission";
-  el.runStatus.appendChild(link);
+  setStatusWithAction(
+    el.runStatus,
+    body.error,
+    "Give permission",
+    body.consentUrl + "&redirect=" + encodeURIComponent("/agent"),
+    false,
+  );
 }
 
 el.prompt.addEventListener("keydown", (event) => {
@@ -235,8 +270,18 @@ async function start() {
     }
   } catch (e) {
     if (e.status === 401) {
-      setStatus(el.runStatus, "Sign in at /auth/login to use the agent.", true);
+      setStatusWithAction(
+        el.runStatus,
+        "Sign in to use the agent.",
+        "Sign in",
+        signInUrl(),
+        true,
+      );
+      // The key form is no use signed out either, and leaving it there invites
+      // somebody to paste a key that has nowhere to go.
+      el.keyPanel.hidden = true;
       el.run.disabled = true;
+      el.prompt.disabled = true;
       return;
     }
     setStatus(el.runStatus, e.message, true);

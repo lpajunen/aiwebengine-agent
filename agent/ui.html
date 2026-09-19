@@ -113,6 +113,22 @@
         color: var(--muted);
         font-size: 13px;
       }
+      /* A link the person is meant to act on, rather than one to read. Styled
+         as the buttons are because it does what they do — the difference is
+         that this one navigates, which is a link's job and not a button's. */
+      .status a.action {
+        display: inline-block;
+        margin-left: 8px;
+        padding: 5px 12px;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 600;
+        text-decoration: none;
+      }
+      .status a.action:hover {
+        filter: brightness(1.1);
+      }
       .status.error {
         color: var(--warn);
       }
