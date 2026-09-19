@@ -1,12 +1,15 @@
-// The browser half of the loop.
+// The page.
 //
-// The engine has nowhere to run an agent turn except inside a request from the
-// person it belongs to, so this page is what keeps the run moving: it posts one
-// step, reads whether the run is finished, and posts the next. The SSE stream
-// is how activity arrives — including activity from another tab or device —
-// while the POST responses only say whether to keep going.
-
-const MAX_STEPS = 12;
+// It watches; it does not drive. Posting a prompt queues the run in the engine
+// and returns, and every turn after that is queued by the one before it — so
+// this page's only job is to render what arrives on the SSE stream, and a run
+// goes on whether or not anybody is looking at it.
+//
+// It used to be the other half of the loop, posting one step per turn, because
+// the engine had nowhere to run a turn except inside a request from the person
+// it belonged to. That is no longer true, and the loop that was here is gone
+// rather than kept as a fallback: two ways to advance the same run is how they
+// drift apart.
 
 const el = {
   keyPanel: document.getElementById("key-panel"),
@@ -103,11 +106,6 @@ function describe(body, status) {
   return `Request failed (${status})`;
 }
 
-/** Whether a failure is the engine stopping a handler at its time budget. */
-function isBudgetError(error) {
-  return /budget|timed out|timeout/i.test(error.message ?? "");
-}
-
 // ---------------------------------------------------------------------------
 // The key
 // ---------------------------------------------------------------------------
@@ -162,60 +160,26 @@ el.run.addEventListener("click", async () => {
 
   running = true;
   el.run.disabled = true;
-  setStatus(el.runStatus, "Thinking...");
+  setStatus(el.runStatus, "Starting...");
 
   try {
-    const { runId } = await api("/agent/prompt", {
+    await api("/agent/prompt", {
       method: "POST",
       body: JSON.stringify({ prompt }),
     });
     el.prompt.value = "";
-
-    // One request per turn. Each gets its own execution budget on the engine,
-    // which is the whole reason the loop lives here rather than there.
-    for (let step = 0; step < MAX_STEPS; step += 1) {
-      setStatus(el.runStatus, `Working (turn ${step + 1})...`);
-      let result;
-      try {
-        result = await api("/agent/step", {
-          method: "POST",
-          body: JSON.stringify({ runId }),
-        });
-      } catch (e) {
-        // A turn stopped at the engine's budget wrote nothing, so the run is
-        // exactly where it was and this same step is still the right call.
-        // Once only: a second timeout is the budget being too small for the
-        // work, not bad luck, and retrying forever would just spend tokens.
-        if (!isBudgetError(e)) throw e;
-        setStatus(el.runStatus, `Turn ${step + 1} took too long — retrying...`);
-        result = await api("/agent/step", {
-          method: "POST",
-          body: JSON.stringify({ runId }),
-        });
-      }
-      if (result.done) {
-        setStatus(
-          el.runStatus,
-          result.reason === "error" ? "Stopped." : "Done.",
-          result.reason === "error",
-        );
-        return;
-      }
-    }
-    setStatus(el.runStatus, "Stopped: too many turns.", true);
+    // The engine has it now. Everything from here — each turn, each tool, the
+    // end of the run — arrives on the stream, the same way it arrives in any
+    // other tab this person has open.
+    setStatus(el.runStatus, "Working. You can close this page.");
   } catch (e) {
     if (e.status === 401) {
       setStatus(el.runStatus, "Sign in to run the agent.", true);
+    } else if (e.body?.needsAuthorization) {
+      showAuthorizationNeeded(e.body);
     } else if (e.body?.needsKey) {
       setStatus(el.runStatus, e.message, true);
       showKeyState(false);
-    } else if (isBudgetError(e)) {
-      setStatus(
-        el.runStatus,
-        "The turn ran past the engine's time budget. Try a shorter prompt, or " +
-          "raise javascript.execution_timeout_ms on the engine.",
-        true,
-      );
     } else {
       setStatus(el.runStatus, e.message, true);
     }
@@ -224,6 +188,22 @@ el.run.addEventListener("click", async () => {
     el.run.disabled = false;
   }
 });
+
+/**
+ * The agent needs the person's permission to work while they are away.
+ *
+ * Not an error state: they have simply not been asked yet, or the grant has
+ * lapsed. The engine's consent page says what is being asked for and sends
+ * them back here.
+ */
+function showAuthorizationNeeded(body) {
+  setStatus(el.runStatus, "", false);
+  el.runStatus.textContent = body.error + " ";
+  const link = document.createElement("a");
+  link.href = body.consentUrl + "&redirect=" + encodeURIComponent("/agent");
+  link.textContent = "Give permission";
+  el.runStatus.appendChild(link);
+}
 
 el.prompt.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
@@ -241,6 +221,18 @@ async function start() {
     entries = history.activities ?? [];
     render();
     showKeyState(history.hasKey);
+
+    // Say up front that a run will need permission, rather than letting them
+    // write a prompt and meet the refusal afterwards.
+    const auth = history.authorization;
+    if (auth && auth.authenticated && !auth.granted) {
+      showAuthorizationNeeded({
+        error: auth.expired
+          ? "Your permission for this agent has expired."
+          : "This agent needs your permission to work while you are away.",
+        consentUrl: auth.consentUrl,
+      });
+    }
   } catch (e) {
     if (e.status === 401) {
       setStatus(el.runStatus, "Sign in at /auth/login to use the agent.", true);
@@ -250,13 +242,29 @@ async function start() {
     setStatus(el.runStatus, e.message, true);
   }
 
-  // Activity arrives here rather than from the step responses, so a second tab
-  // — or the same page after a refresh — sees the same run unfold.
+  // Everything arrives here: this page's runs, another tab's, and the turns of
+  // a run that was started before this page was opened at all.
   const events = new EventSource("/agent/events");
   events.addEventListener("message", (event) => {
     try {
       const payload = JSON.parse(event.data);
-      if (payload && typeof payload.message === "string") addEntry(payload);
+      if (!payload || typeof payload.message !== "string") return;
+
+      // The end of a run is an activity like any other now. It used to be the
+      // reply to the step the page was waiting on, and there is nothing to
+      // wait on any more.
+      if (payload.kind === "done") {
+        setStatus(
+          el.runStatus,
+          payload.message === "error" || payload.message === "step-limit"
+            ? "Stopped."
+            : "Done.",
+          payload.message === "error" || payload.message === "step-limit",
+        );
+        return;
+      }
+
+      addEntry(payload);
     } catch {
       // Keep-alives and anything else the engine sends are not activity.
     }

@@ -8,11 +8,12 @@ for anybody's tokens.
 ## What it is
 
 - `GET /agent` — the page: a prompt box, a key form, and the activity log.
-- `POST /agent/prompt` — accepts a prompt and opens a run.
-- `POST /agent/step` — advances one run by exactly one turn.
+- `POST /agent/prompt` — accepts a prompt and queues the run.
 - `GET /agent/events` — SSE; activity as it happens, for this person only.
 - `GET /agent/history` — the log, so a refresh loses nothing.
 - `GET|POST|DELETE /agent/key` — the person's own API key.
+
+There is no endpoint that advances a run. Each turn queues the next.
 
 The model gets three tools: `write_response` (the only way the person sees
 anything), `remember` and `recall` (notes in that person's `personalStorage`).
@@ -24,27 +25,42 @@ the comment above the constant says which go back.
 
 ## The one structural decision
 
-**The browser drives the loop.** The page posts `/agent/step` repeatedly until
-the run reports itself done, instead of the engine looping on its own. That is
-not a stylistic choice — three engine facts rule out every alternative:
+**The run lives in the engine.** `POST /agent/prompt` queues the first turn and
+answers; each turn queues the next; the page watches the SSE stream. Closing
+the tab does not stop anything.
 
-1. `schedulerService.registerOnce` takes effect only during `init()`. A request
-   handler calling it gets back a string saying nothing was registered, so a
-   turn cannot schedule the next one.
-2. A scheduled job runs as `UserContext::admin("scheduler")`, and `fetch`
-   resolves `{{secret:...}}` against the calling user. A background job looking
-   for the person's key would look under a user named `scheduler` and miss it.
-   Per-person keys are reachable only from that person's own request.
-3. `dispatcher.sendMessage` runs listeners inline, on the sender's budget — it
-   is not a way to start background work.
+This used to be the other way round — the browser posted one request per turn —
+because three engine facts left nowhere else for a turn to run: `registerOnce`
+took effect only during `init()`, a scheduled job ran as
+`UserContext::admin("scheduler")` and so could not reach the person's own API
+key, and `dispatcher.sendMessage` ran its listeners inline.
 
-So a turn is an HTTP request under the person's session. Their identity is
-present, their key is reachable, `personalStorage` works, and every turn gets a
-fresh `javascript.execution_timeout_ms` instead of several sharing one.
+All three are gone. `personalTasks` replaces all of them: a durable queue whose
+work runs **as the person who asked for it**, so their key resolves and
+`personalStorage` answers, exactly as they did inside their own request.
 
-The consequence: closing the tab stops the run. `TODO-agent.md` in the engine
-repository lists what the engine would need for a run that continues without
-one.
+Two things follow from running while the person is away.
+
+### It takes their permission
+
+`personalTasks.enqueue` refuses without a live grant. The person gives one on
+the engine's consent page, which names what is being asked for, and withdraws
+it from `/auth/account` — withdrawing also cancels whatever is still queued.
+
+This agent needs both scopes: `secrets` for the model key, `personal_storage`
+for the remember/recall notes. A grant covering only one reaches only that one;
+the engine enforces each at the surface it names.
+
+The page asks for permission before the first run rather than after a refusal,
+and says so again if the grant lapses. Grants expire — 30 days by default, 90
+at most — so a long-lived agent will meet that eventually.
+
+### A turn is attempted exactly once
+
+The queue retries a failed task five times by default. For an agent turn that
+would mean re-sending the whole conversation and paying for another model call
+on somebody's personal key, so every enqueue passes `maxAttempts: 1` and lets
+`MAX_STEPS` do the bounding.
 
 ## Where the key lives
 
@@ -60,25 +76,54 @@ headers: { "x-api-key": "{{secret:ANTHROPIC_API_KEY}}" }
 
 which the engine substitutes host-side for whoever is calling.
 
-⚠️ **The template must be the entire header value.** `http_client.rs` matches
-`starts_with("{{secret:") && ends_with("}}")`, so `"Bearer {{secret:K}}"` is
-sent literally. Anthropic's `x-api-key` header happens to fit; a bearer-token
-API does not. (The published type declarations show `"Bearer {{API_TOKEN}}"`,
-which does not work — see `TODO-agent.md` item 7.)
+The template is substituted anywhere inside a header value, so
+`"Authorization": "Bearer {{secret:K}}"` works as well as the whole-value form
+this script uses. That was not true once — the engine matched only a value that
+was _nothing but_ a template, which put every bearer-token API out of reach of a
+per-person key.
+
+For a queued turn, "whoever is calling" is the person who started the run, by
+their grant. Their key is reachable while they are away, and nobody else's ever
+is.
 
 ## Budgets to design against
 
 |                |                                                                                 |
 | -------------- | ------------------------------------------------------------------------------- |
-| One turn       | `javascript.execution_timeout_ms`, 10 s by default, engine-wide                 |
+| One turn       | `javascript.job_timeout_ms`, 60 s by default — a turn is a job, not a request   |
 | The model call | Synchronous `fetch`, its timeout clamped to what is left of the turn            |
 | Streaming      | None — `fetch` buffers. The log updates per turn, not per token                 |
 | Concurrency    | Each in-flight turn holds one of `max_concurrent_executions` slots and a thread |
 
-The 10 seconds is the real pressure, which is why `MAX_TOKENS` is 2048 and the
-model is `claude-haiku-4-5`. An engine hosting agents wants a longer
-`javascript.execution_timeout_ms` — but it is global, so raising it affects
-every script on the instance.
+A turn is queued work, so it gets the job budget rather than the 10 s a request
+gets. And that can be raised for this script alone, without touching any other
+solution on the instance:
+
+```
+set_script_limits script=<this script> jobTimeoutMs=120000 note="agent turns call a model API"
+```
+
+`MAX_TOKENS` is 1024 and the model is `claude-haiku-4-5` because both were
+chosen when a turn had ten seconds. With a job's budget there is room to raise
+the first and to move up a tier on the second — see the comment above `MODEL`
+for the three things that change with it.
+
+Raise the budget **before** raising either. A turn that runs past its budget
+fails, and with `maxAttempts: 1` it is not retried — the run stops rather than
+quietly costing twice.
+
+## When a run misbehaves
+
+Queued work is visible to an administrator without reading this script's own
+log:
+
+```
+list_tasks   script=<this script>
+cancel_task  script=<this script> task=<id>
+```
+
+A turn that failed keeps its row and the error that ended it. A run that is
+stuck is a pending task with a `runAt` in the future.
 
 ## Layout
 
@@ -106,8 +151,15 @@ pull_from_git  repository=<owner>/aiwebengine-agent
 
 Or push the two files directly with `write_assets` / `write_file`.
 
-The script needs no configuration beyond each person signing in and storing
-their own key at `/agent`.
+Each person signs in, stores their own key at `/agent`, and grants the agent
+permission to work while they are away — all three from that page.
+
+The one thing an administrator may want to set is the turn budget, since the
+default 60 s suits a short turn rather than a long one:
+
+```
+set_script_limits script=<this script> jobTimeoutMs=120000
+```
 
 ## Typechecking
 

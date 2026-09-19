@@ -383,6 +383,29 @@ interface HandlerContext {
 
   /** Additional metadata */
   metadata?: Record<string, any>;
+
+  /**
+   * What this particular kind of invocation was given. A scheduled handler
+   * finds its schedule under `meta.schedule`; a task handler finds `meta.task`.
+   */
+  meta?: {
+    task?: TaskContext;
+    [key: string]: any;
+  };
+}
+
+/**
+ * What a task handler is told about the run it is in — `context.meta.task`.
+ */
+interface TaskContext {
+  /** Stable across retries, so work can be keyed by it. */
+  taskId: string;
+  handler: string;
+  /** The object passed to `scriptTasks.enqueue`. */
+  payload: Record<string, unknown>;
+  /** Counts from one. A value above one means this is a retry. */
+  attempt: number;
+  maxAttempts: number;
 }
 
 // ============================================================================
@@ -795,6 +818,10 @@ declare class DOMException extends Error {
  *
  * Write operations require an authenticated user.
  * The `exists` check looks in `user_secrets` first (when authenticated), then falls back to `script_secrets`.
+ *
+ * Nothing here reads a secret back. What a stored secret is for is `fetch`,
+ * which replaces a `{{secret:NAME}}` in a header value with it — so the value
+ * reaches the API it was stored for without passing through the script.
  */
 interface SecretStorage {
   /**
@@ -845,7 +872,17 @@ interface SecretStorage {
 // ============================================================================
 
 /**
- * Scheduler service for managing scheduled tasks
+ * Scheduler service for managing scheduled tasks.
+ *
+ * A scheduled handler gets {{limits.execution.jobTimeout}} rather than the
+ * {{limits.execution.timeout}} a request handler gets: a job is not answering
+ * a request, so it is not held to a budget chosen to keep pages responsive.
+ * Everything else is the same — the same memory ceiling, and `fetch` still
+ * shortened to whatever is left of that budget.
+ *
+ * A one-off that throws is retried, waiting longer each time, and dropped
+ * after a few failures with a line in the script's log saying so. A recurring
+ * job is not retried: it runs again at its next interval.
  */
 interface SchedulerService {
   /**
@@ -909,6 +946,198 @@ interface SchedulerService {
    * clears nothing and says so in the returned message, and does not throw.
    */
   clearAll(): string;
+}
+
+// ============================================================================
+// Script Tasks API
+// ============================================================================
+
+/**
+ * One queued task.
+ */
+interface ScriptTask {
+  /** Stable across retries. */
+  taskId: string;
+  script: string;
+  handler: string;
+  payload: Record<string, unknown>;
+  /**
+   * `pending` waiting to run, `running` claimed by a worker, `failed` out of
+   * attempts, `cancelled` stopped by a person. There is no `succeeded`: a task
+   * that completes has its row deleted, so `get` answers `null` for one.
+   */
+  state: "pending" | "running" | "failed" | "cancelled";
+  attempts: number;
+  maxAttempts: number;
+  /** Why the last attempt failed. Null until one has. */
+  lastError: string | null;
+  runAt: string;
+  enqueuedBy: string | null;
+  /** Who it acts as. Null for script context, which is the default. */
+  runAs?: string | null;
+  kind?: "task" | "message";
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * A durable queue of work this script enqueued for itself.
+ *
+ * The shape this is for is: start something while handling a request, answer
+ * the request, and let the work finish afterwards. Unlike `schedulerService`,
+ * which registers a *schedule* and only takes effect during `init()`, these
+ * may be called from anywhere — a route handler, another task — because a task
+ * exists in response to something that happened rather than being part of what
+ * the script declares about itself.
+ *
+ * A task survives deployment. Writing a new version of the script does not
+ * discard work already accepted, where a scheduled job is wiped and
+ * re-declared on every `init()`.
+ *
+ * A handler runs with {{limits.execution.jobTimeout}} — the scheduled-handler
+ * budget, not the per-request one — and finds `context.meta.task` carrying the
+ * payload, the attempt number, and the ceiling. It runs in **script context**:
+ * it holds what the script holds, and nothing belonging to whoever enqueued
+ * it, so `personalStorage` and a per-user secret are not reachable from one.
+ *
+ * A task that throws is retried with a widening delay and given up on after
+ * `maxAttempts`, keeping its row and its last error so the failure can be read
+ * back. A task that succeeds has no row: what it did is in the script's log.
+ *
+ * @example
+ * // In a route handler: accept the work, answer now.
+ * function startExport(context) {
+ *   const task = scriptTasks.enqueue({
+ *     handler: "runExport",
+ *     payload: { accountId: context.request.query.account },
+ *   });
+ *   return { status: 202, body: JSON.stringify({ task: task.taskId }) };
+ * }
+ *
+ * // The handler, named by the enqueue above.
+ * function runExport(context) {
+ *   const { accountId } = context.meta.task.payload;
+ *   // ... and enqueue the next step, which is how work longer than one
+ *   // budget is done: a chain of tasks survives a restart, one long run does not.
+ * }
+ */
+interface ScriptTasks {
+  /**
+   * Accept a piece of work.
+   *
+   * @param options.handler - Name of the function to call. 1-{{limits.scheduler.maxJobNameChars}} characters.
+   * @param options.payload - A JSON object describing the work. At most 64KB;
+   *   put the data itself in storage and name it here, so a retry reads what
+   *   is current rather than a copy taken at enqueue time.
+   * @param options.runAt - UTC ISO timestamp to hold it until. Default: now.
+   * @param options.maxAttempts - Attempts before giving up, 1-25. Default 5.
+   * @returns The stored task.
+   * @throws TypeError if the handler or payload is not usable, RangeError if a
+   *   bound is exceeded, Error if the engine could not store it.
+   */
+  enqueue(options: {
+    handler: string;
+    payload?: Record<string, unknown>;
+    runAt?: string;
+    maxAttempts?: number;
+  }): ScriptTask;
+
+  /**
+   * Stop a task that has not started.
+   *
+   * @returns true if it was cancelled; false if it was not pending — already
+   *   running, already failed, or already cancelled.
+   */
+  cancel(taskId: string): boolean;
+
+  /**
+   * Look one up.
+   *
+   * @returns The task, or null if this script has no such task — which is also
+   *   the answer for one that already succeeded, since success keeps no row.
+   */
+  get(taskId: string): ScriptTask | null;
+}
+
+/**
+ * What this person has authorised this script to do as them.
+ */
+interface DelegationState {
+  /** False when nobody is signed in; nothing can be delegated then. */
+  authenticated: boolean;
+  /** True only if a grant exists and has not lapsed. */
+  granted: boolean;
+  expired?: boolean;
+  expiresAt?: string;
+  scopes?: ("personal_storage" | "secrets")[];
+  /** Where to send them to authorise it. Absent when nobody is signed in. */
+  consentUrl?: string;
+}
+
+/**
+ * The same queue as `scriptTasks`, with the work acting as the person who
+ * asked for it.
+ *
+ * `scriptTasks` runs in script context: it holds what the script holds, so
+ * `personalStorage` throws and a `{{secret:...}}` resolves the script's key
+ * rather than anybody's. That is right for work that belongs to the solution
+ * and useless for work that belongs to a person — which is why an agent could
+ * previously only act while its owner's tab was open.
+ *
+ * Acting as somebody while they are away is a grant they have to make. They
+ * make it on a consent page (`authorization().consentUrl`), it names what it
+ * covers, it expires, and they can withdraw it from their account page —
+ * which also cancels whatever it had queued.
+ *
+ * Every one of those is checked again when the task runs, not just when it is
+ * enqueued: a grant withdrawn in between takes effect rather than being
+ * carried forward. A task whose grant has gone is abandoned with a reason,
+ * without spending its retries.
+ *
+ * What a delegated task gets is what an ordinary request of that person's
+ * gets, and never more — `personalStorage` and their own secrets, but not the
+ * ability to author or administer anything, however much the person holds.
+ *
+ * @example
+ * function scheduleDigest(context) {
+ *   const auth = personalTasks.authorization();
+ *   if (!auth.granted) {
+ *     // Not an error — they simply have not been asked yet.
+ *     return { status: 302, headers: { Location: auth.consentUrl } };
+ *   }
+ *   personalTasks.enqueue({ handler: "sendDigest", payload: {} });
+ *   return { status: 202, body: "Scheduled" };
+ * }
+ *
+ * function sendDigest(context) {
+ *   // context.request.auth.userId is the person who authorised this.
+ *   const last = personalStorage.getItem("lastDigest");
+ *   fetch("https://api.example.com/send", {
+ *     method: "POST",
+ *     headers: { Authorization: "Bearer {{secret:their_api_key}}" },
+ *   });
+ * }
+ */
+interface PersonalTasks {
+  /**
+   * Queue work to run as the person making this request.
+   *
+   * @throws SecurityError if nobody is signed in, or if they have not
+   *   authorised this script, or if that authorisation has expired. Check
+   *   `authorization()` first to offer the consent page instead.
+   */
+  enqueue(options: {
+    handler: string;
+    payload?: Record<string, unknown>;
+    runAt?: string;
+    maxAttempts?: number;
+  }): ScriptTask;
+
+  /** What this person has authorised, and where to send them if nothing. */
+  authorization(): DelegationState;
+
+  cancel(taskId: string): boolean;
+  get(taskId: string): ScriptTask | null;
 }
 
 // ============================================================================
@@ -1269,7 +1498,12 @@ interface FetchOptions {
   /** HTTP method (default: GET) */
   method?: string;
 
-  /** Request headers */
+  /**
+   * Request headers.
+   *
+   * A `{{secret:NAME}}` anywhere in a value is replaced by that secret before
+   * the request is sent: `"Authorization": "Bearer {{secret:api_token}}"`.
+   */
   headers?: Record<string, string>;
 
   /** Request body */
@@ -1346,7 +1580,19 @@ interface FetchResponse {
  * coding the engine cannot undo (`br`, `zstd`) is an error rather than an
  * unreadable body, so do not ask for those.
  *
- * @param url - URL to fetch (supports {{SECRET_NAME}} syntax for secret injection)
+ * Secrets are injected into header values, and only into header values. A
+ * `{{secret:NAME}}` anywhere inside one is replaced before the request leaves,
+ * so a bearer token is written as the prefix and the template together. The
+ * name is looked up for the requesting user first (`secretStorage`), then for
+ * the script, and a name nothing resolves fails the call rather than being
+ * sent as itself — a request carrying template text where a credential should
+ * be comes back as a 401 that explains nothing.
+ *
+ * A URL is never substituted. A secret in one would be written to this
+ * engine's logs and to the far end's, which is the one place a credential
+ * should not appear.
+ *
+ * @param url - URL to fetch
  * @param options - Fetch options
  * @returns The response, readable directly or via `await`
  * @example
@@ -1362,7 +1608,7 @@ interface FetchResponse {
  * const response = await fetch("https://api.example.com/endpoint", {
  *   method: "POST",
  *   headers: {
- *     "Authorization": "Bearer {{API_TOKEN}}",
+ *     "Authorization": "Bearer {{secret:API_TOKEN}}",
  *     "Content-Type": "application/json"
  *   },
  *   body: JSON.stringify({ key: "value" })
@@ -2145,6 +2391,37 @@ interface MessageDispatcher {
    * dispatcher.sendMessage("user.created", { userId: "123", email: "user@example.com" });
    */
   sendMessage(messageType: string, messageData?: any): string;
+
+  /**
+   * The same fan-out, queued rather than run.
+   *
+   * `sendMessage` runs every listener inline: in your execution, on your
+   * budget, under your context, and it does not return until they all have.
+   * `post` enqueues one task per listener instead, so this returns at once and
+   * each listener gets a budget of its own ({{limits.execution.jobTimeout}}),
+   * its own retries, and a row in `/engine/tasks` saying how it went.
+   *
+   * The listener is the same registration and the same code either way — it
+   * still reads `context.messageType` and `context.messageData`. A queued one
+   * additionally has `context.meta.task` if it wants to know it is a retry.
+   *
+   * Two differences worth knowing. Listeners are resolved now, so the fan-out
+   * goes to whoever is listening at this moment rather than whenever the queue
+   * gets to it. And a queued listener runs in **script context** — it holds
+   * what its own script holds, not what you hold — because there is no caller
+   * left to borrow authority from by the time it runs.
+   *
+   * @returns What was queued: `{messageType, queued, taskIds}`.
+   * @throws Error if the message type is empty or the queue could not accept
+   *   them. A partial failure says how many were queued before it.
+   * @example
+   * // Answer now; let the listeners do the slow part.
+   * const { queued } = dispatcher.post("order.placed", { orderId });
+   */
+  post(
+    messageType: string,
+    messageData?: any,
+  ): { messageType: string; queued: number; taskIds: string[] };
 }
 
 // ============================================================================
@@ -2206,6 +2483,8 @@ declare var scriptStorage: Storage;
 declare var personalStorage: Storage;
 declare var secretStorage: SecretStorage;
 declare var schedulerService: SchedulerService;
+declare var scriptTasks: ScriptTasks;
+declare var personalTasks: PersonalTasks;
 declare var graphQLRegistry: GraphQLRegistry;
 declare var mcpRegistry: McpRegistry;
 declare var database: Database;

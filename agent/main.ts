@@ -3,21 +3,31 @@
 /**
  * A prompt-driven agent that runs inside aiwebengine.
  *
- * The loop is driven by the browser, one HTTP request per turn, because the
- * engine gives no other place to run it:
+ * The run lives in the engine. `POST /agent/prompt` queues the first turn and
+ * answers; each turn queues the next; the page watches the SSE stream. Closing
+ * the tab does not stop anything.
  *
- * - `schedulerService.registerOnce` only registers during `init()`, so a
- *   handler cannot schedule its own continuation.
- * - A scheduled job runs as `UserContext::admin("scheduler")`, and `fetch`
- *   resolves `{{secret:...}}` against the *calling* user. A background job
- *   therefore cannot reach the person's own API key — it would look for a
- *   secret belonging to a user called `scheduler`.
- * - `dispatcher.sendMessage` runs its listeners inline, on the sender's budget.
+ * This used to be the other way round — the browser posted one request per
+ * turn — because three engine facts left nowhere else for a turn to run:
+ * `registerOnce` took effect only during `init()`, a scheduled job ran as
+ * `UserContext::admin("scheduler")` and so could not reach the person's own
+ * API key, and `dispatcher.sendMessage` ran its listeners inline. All three
+ * are gone. `personalTasks` is the replacement for all of them: a durable
+ * queue whose work runs *as the person who asked for it*, so their key
+ * resolves and `personalStorage` answers.
  *
- * So each turn is a separate `POST /agent/step` under that person's session:
- * their identity is present (their key is reachable, `personalStorage` works),
- * and each turn gets a fresh `javascript.execution_timeout_ms` instead of
- * several turns sharing one. The page posts steps until the run reports done.
+ * Two things that follow from running while the person is away.
+ *
+ * It takes their consent. `personalTasks.enqueue` refuses without a live
+ * grant, which they give on the engine's consent page and can withdraw from
+ * their account page — withdrawing also cancels whatever is still queued. The
+ * grant has to cover both scopes this agent uses: `secrets` for the model key
+ * and `personal_storage` for the remember/recall notes.
+ *
+ * And a turn is attempted exactly once. The queue retries a failed task by
+ * default, which for a turn would mean re-sending the whole conversation and
+ * paying for a second model call on somebody's personal key — so every enqueue
+ * here passes `maxAttempts: 1` and lets `MAX_STEPS` do the bounding.
  */
 
 // ============================================================================
@@ -28,8 +38,9 @@
  * The model every run uses.
  *
  * Haiku for now, on cost: an agent turn resends the whole conversation, so the
- * bill grows with the length of a run rather than with the prompt. It also
- * suits the 10-second budget, being the fastest of the family.
+ * bill grows with the length of a run rather than with the prompt. It was also
+ * the only tier that fitted when a turn had ten seconds; a turn is now a job
+ * with `javascript.job_timeout_ms`, so speed is no longer what decides this.
  *
  * Changing this is not only the string. Haiku 4.5 rejects
  * `output_config.effort`, and takes thinking as
@@ -53,15 +64,19 @@ const SECRET_NAME = "ANTHROPIC_API_KEY";
 /**
  * One turn's output ceiling.
  *
- * The whole step — history, one model call, the tools it names — has to finish
- * inside `javascript.execution_timeout_ms`, 10 s by default. `fetch` is
- * synchronous and its own timeout is clamped to whatever is left of that, so
- * the engine stops the handler rather than the request coming back slow.
+ * A turn now runs as a queued task, so its budget is `javascript.job_timeout_ms`
+ * — 60 s by default rather than the 10 s a request gets, and raisable for this
+ * script alone:
  *
- * 2048 measurably did not fit: a real turn was killed at the budget with
- * `Handler 'runStep' exceeded its 10000ms budget`. Generation is the part that
- * scales with this number, so this is the dial that buys headroom. Raise it
- * only alongside the engine's execution timeout.
+ *     set_script_limits script=<this script> jobTimeoutMs=120000
+ *
+ * That is the dial to turn before this one. 1024 was chosen when a turn had
+ * ten seconds and 2048 measurably did not fit; with a job's budget there is
+ * room to raise it, and room to move up a model tier — see MODEL above for the
+ * three things that change with it.
+ *
+ * `fetch` is still synchronous and its timeout still clamped to what is left
+ * of the budget, so generation remains the part that scales with this number.
  */
 const MAX_TOKENS = 1024;
 
@@ -252,10 +267,6 @@ function init(): void {
     tags: ["Agent"],
     summary: "Accept a prompt and open a run",
   });
-  routeRegistry.registerRoute("/agent/step", "runStep", "POST", {
-    tags: ["Agent"],
-    summary: "Advance one run by a single turn",
-  });
   routeRegistry.registerRoute("/agent/history", "readHistory", "GET", {
     tags: ["Agent"],
     summary: "Everything this person's agent has done",
@@ -272,6 +283,9 @@ function init(): void {
     tags: ["Agent"],
     summary: "Remove this person's stored API key",
   });
+
+  // No route advances a run: `advanceRun` is reached by the queue, named by
+  // the `handler` each enqueue carries.
 
   routeRegistry.registerStreamRoute(STREAM_PATH, "tagConnection", {
     tags: ["Agent"],
@@ -325,36 +339,82 @@ function startRun(context: HandlerContext): HttpResponse {
   }
   if (!prompt) return json(400, { error: "A prompt is required." });
 
+  const authorization = personalTasks.authorization();
+  if (!authorization.granted) {
+    // Not an error: they simply have not been asked yet, or the grant has
+    // lapsed. The page sends them to `consentUrl` and they come back.
+    return json(403, {
+      error: authorization.expired
+        ? "Your authorisation for this agent has expired."
+        : "This agent needs your permission to work while you are away.",
+      needsAuthorization: true,
+      consentUrl: authorization.consentUrl,
+    });
+  }
+
   const runId = newRunId();
   appendMessage(userId, runId, "user", [{ type: "text", text: prompt }]);
   recordActivity(userId, runId, "prompt", prompt);
 
-  return json(200, { runId });
+  // The run is the engine's from here. Queued rather than run inline so this
+  // answers immediately, and `maxAttempts: 1` because a retried turn is a
+  // second model call charged to this person for the same work.
+  try {
+    personalTasks.enqueue({
+      handler: "advanceRun",
+      payload: { runId: runId },
+      maxAttempts: 1,
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    recordActivity(
+      userId,
+      runId,
+      "error",
+      `Could not start the run: ${message}`,
+    );
+    return json(500, { error: message });
+  }
+
+  return json(202, { runId });
 }
 
 /**
- * One turn: read the run, ask the model once, run whatever tools it named.
+ * One turn: read the run, ask the model once, run whatever tools it named, and
+ * queue the next turn if there is one.
  *
- * Returns `done` rather than looping, because looping here would spend one
- * execution budget on several model calls and hit the ceiling mid-run. The
- * page calls this again while `done` is false.
+ * A task handler rather than a route. It runs as the person who started the
+ * run — `context.request.auth.userId` is the identity the engine re-derived
+ * from their grant when the task was claimed — so their key resolves and their
+ * notes answer, exactly as they did when this was a request under their
+ * session.
+ *
+ * One turn per task rather than a loop inside one, for the reason the loop was
+ * never inside a request either: several model calls do not fit one execution
+ * budget. A chain of tasks also survives a restart, which one long run does
+ * not — it would be killed mid-conversation and started again from the top.
  */
-function runStep(context: HandlerContext): HttpResponse {
+function advanceRun(context: HandlerContext): void {
   const userId = signedInUser(context);
-  if (!userId) return json(401, { error: "Sign in first." });
-
-  let runId = "";
-  try {
-    const body = (context.request?.json() ?? {}) as { runId?: string };
-    runId = String(body.runId ?? "");
-  } catch (e) {
-    return json(400, { error: "Expected a JSON body." });
+  if (!userId) {
+    // The engine refuses to run a delegated task whose grant has gone, so
+    // reaching here without a person means something the script cannot fix.
+    console.log("agent: a turn ran with no person; abandoning it");
+    return;
   }
-  if (!runId) return json(400, { error: "A runId is required." });
+
+  const task = context.meta?.task;
+  const payload = (task?.payload ?? {}) as { runId?: string };
+  const runId = String(payload.runId ?? "");
+  if (!runId) {
+    console.log("agent: a turn was queued with no runId");
+    return;
+  }
 
   const history = loadMessages(userId, runId);
   if (history.length === 0) {
-    return json(404, { error: "No such run." });
+    console.log(`agent: no such run ${runId}`);
+    return;
   }
 
   const taken = history.filter((m) => m.speaker === "assistant").length;
@@ -365,7 +425,8 @@ function runStep(context: HandlerContext): HttpResponse {
       "error",
       `Stopped after ${MAX_STEPS} turns without finishing.`,
     );
-    return json(200, { done: true, reason: "step-limit" });
+    finishRun(userId, runId, "step-limit");
+    return;
   }
 
   let answer: ApiResponse;
@@ -374,7 +435,8 @@ function runStep(context: HandlerContext): HttpResponse {
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     recordActivity(userId, runId, "error", message);
-    return json(200, { done: true, reason: "error", error: message });
+    finishRun(userId, runId, "error");
+    return;
   }
 
   // A refusal is an HTTP 200 with no usable content, so this has to be read
@@ -383,7 +445,8 @@ function runStep(context: HandlerContext): HttpResponse {
   if (answer.stop_reason === "refusal") {
     const why = answer.stop_details?.explanation ?? "The model declined.";
     recordActivity(userId, runId, "error", why);
-    return json(200, { done: true, reason: "refusal" });
+    finishRun(userId, runId, "refusal");
+    return;
   }
 
   const blocks = answer.content ?? [];
@@ -419,10 +482,38 @@ function runStep(context: HandlerContext): HttpResponse {
     // Every result in one user message: splitting them teaches the model to
     // stop calling tools in parallel.
     appendMessage(userId, runId, "user", results);
-    return json(200, { done: false });
+
+    // The next turn, queued rather than run here — same reasoning as the
+    // first: one model call per execution budget. Enqueueing is what replaced
+    // the browser posting the next step.
+    try {
+      personalTasks.enqueue({
+        handler: "advanceRun",
+        payload: { runId: runId },
+        maxAttempts: 1,
+      });
+    } catch (e) {
+      // Most likely the grant was withdrawn mid-run, which is the person
+      // saying stop. Recorded so the page shows why it ended.
+      const message = e instanceof Error ? e.message : String(e);
+      recordActivity(userId, runId, "error", `The run stopped: ${message}`);
+      finishRun(userId, runId, "error");
+    }
+    return;
   }
 
-  return json(200, { done: true, reason: answer.stop_reason ?? "end_turn" });
+  finishRun(userId, runId, answer.stop_reason ?? "end_turn");
+}
+
+/**
+ * Tell the person's open tabs that the run is over.
+ *
+ * The page used to learn this from the step response it was waiting on. It no
+ * longer waits on anything, so the end of a run has to arrive the same way
+ * everything else does.
+ */
+function finishRun(userId: string, runId: string, reason: string): void {
+  recordActivity(userId, runId, "done", reason);
 }
 
 function readHistory(context: HandlerContext): HttpResponse {
@@ -449,13 +540,17 @@ function readHistory(context: HandlerContext): HttpResponse {
       at: Number(row.created_ms),
     })),
     hasKey: secretStorage.exists(SECRET_NAME),
+    authorization: personalTasks.authorization(),
   });
 }
 
 function readKeyStatus(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
   if (!userId) return json(401, { error: "Sign in first." });
-  return json(200, { hasKey: secretStorage.exists(SECRET_NAME) });
+  return json(200, {
+    hasKey: secretStorage.exists(SECRET_NAME),
+    authorization: personalTasks.authorization(),
+  });
 }
 
 /**
@@ -501,10 +596,13 @@ function forgetKey(context: HandlerContext): HttpResponse {
  * script's imports resolve through the engine's module loader over its own
  * assets, so the SDK cannot be installed.
  *
- * The key is never in this process. `x-api-key` is the whole-value secret
- * template the engine substitutes host-side — and whole-value is the only form
- * it understands, which is why a `Authorization: Bearer {{secret:...}}` header
- * would be sent literally.
+ * The key is never in this process. `x-api-key` carries the secret template
+ * the engine substitutes host-side, for whoever the execution is running as —
+ * which for a queued turn is the person who started the run, by their grant.
+ *
+ * The template is substituted anywhere inside a header value, so
+ * `Authorization: Bearer {{secret:...}}` works too. It did not once, and this
+ * comment used to say so.
  */
 function callModel(messages: ApiMessage[]): ApiResponse {
   const response = fetch(API_URL, {
