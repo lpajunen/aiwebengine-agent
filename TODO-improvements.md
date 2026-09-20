@@ -8,13 +8,45 @@ skeleton, grouped by layer, each with a note on what it costs here.
 
 Nothing below is a decision that has been made. It is the map.
 
+## What the engine just landed
+
+Five engine changes shipped since this file was first written, and between
+them they clear the whole of what used to be the "engine, with no way round
+it" list. Checked against `types/aiwebengine.d.ts`, refreshed alongside this
+file.
+
+- **A lane on the task queue.** `personalTasks.enqueue` takes a `lane` — what
+  a task must not run beside — and **defaults it to the person**. This was the
+  one correctness bug on this list, and deploying the new engine fixes it with
+  no change to `main.ts`. (`docs/SCRIPT_TASKS.md`)
+- **`fetchStream`.** Status and headers as they arrive, body in pieces,
+  multi-byte characters reassembled across chunk boundaries, and iterable.
+  Bridged to `routeRegistry.sendStreamMessage`, this is per-token output.
+- **`fetchAll`.** Several requests inside one wall-clock window rather than
+  sequenced — `Promise.all` over three fetches did not overlap them, because
+  each had already finished by the time it returned. Not on this list when it
+  was written; it is what makes a fan-out turn fit in one budget.
+  (`docs/FETCH_CONCURRENCY.md`)
+- **`sandbox.run`.** A script evaluating source under a named subset of its
+  own capabilities — the single primitive that code-as-action and an enforced
+  plan mode both wanted. (`docs/CAPABILITY_ATTENUATION.md`)
+- **Delegation grew a verb and a way in.** `DelegationScope` carries `"write"`
+  beside its two nouns, so a grant can say "may read, may not write"; and
+  `personalTasks.enqueueFrom` starts a run as the person a message came
+  *from*, resolved through a linked channel identity rather than an account a
+  script names. (`docs/DELEGATION.md`)
+
+So every row of the engine backlog table is gone, and the items parked behind
+it — streaming, channels, enforced plan mode, code as the action — are script
+work like everything else.
+
 ## Where to start
 
 1. **Prompt caching** — pure cost, no design work, and this loop is built on
    resending the whole conversation every turn.
-2. **One run at a time per person** — the only correctness bug on this list.
-   Two prompts produce two interleaved runs sharing one person's notes. See
-   [the lane queue](#a-serial-queue-per-session).
+2. **Streaming, now that it is possible.** `fetchStream` into
+   `sendStreamMessage` turns a long turn from one late block of text into
+   visible progress, and it is the change a person notices first.
 3. **Skills as assets**, with `list_skills` / `read_skill` — turns a fixed
    system prompt into something a solution developer extends without editing
    `main.ts`.
@@ -27,78 +59,77 @@ Nothing below is a decision that has been made. It is the map.
 
 ## Where the work lands
 
-Most of this list is `main.ts`. A few items are not, and the difference is
-worth knowing before picking one up, because two of the more interesting ideas
-here are blocked on the engine rather than merely helped by it.
+All of this list is `main.ts` now. It was not when the file was written —
+four items were blocked on the engine rather than merely helped by it, and two
+of the more interesting ideas sat behind a primitive that did not exist. That
+section is kept below as a record of what the engine grew and what each piece
+was for, because the shape of a feature is easier to get right knowing which
+constraint it was built against.
 
 Checked against `types/aiwebengine.d.ts` rather than assumed.
 
 ### Script only
 
-Prompt caching, skills as assets, slash commands, project instructions,
-compaction, attachments, usage display, per-run model choice, the run list, the
-tool-design rules, mounting other MCP servers (`McpClient` is in the API), the
-event-log consolidation, and the whole suspended-run primitive — cancel,
-interject, plan and act — on a `runs` table beside `personalTasks.cancel`.
+Which is now everything. Prompt caching, skills as assets, slash commands,
+project instructions, compaction, attachments, usage display, per-run model
+choice, the run list, the tool-design rules, mounting other MCP servers
+(`McpClient` is in the API), the event-log consolidation, streaming, the
+channel adapters, and the whole suspended-run primitive — cancel, interject,
+plan and act — on a `runs` table beside `personalTasks.cancel`.
 
-Two that looked uncertain and are not:
+Three that looked uncertain and are not:
 
 - **`list_memories` needs nothing.** `Storage` exposes `length` and
   `key(index)`, so enumerating a person's notes works today.
 - **The heartbeat needs nothing.** `personalTasks.enqueue({ runAt })` already
   schedules per-person work under the grant. No `schedulerService` change.
+- **One run at a time per person needs nothing.** The queue defaults a personal
+  task's lane to the person. A lane per *conversation* rather than per person
+  is a refinement, not the fix.
 
-### Script works, the engine is the better home
+### Built in the engine, unused from here
 
-**The lane queue.** A claimed-status table here fixes it. But every script
-queueing per-person work has the same bug, and a lane key belongs on the queue
-rather than in each of its callers. Engine for the fix, script for the stopgap.
+**Checkpoints over agent-written files.** `revisions.rs` wants using, not
+writing.
 
-**Checkpoints over agent-written files.** Already built: `revisions.rs` wants
-using, not writing.
+**A reduced sub-context.** `sandbox.run` is installed and uncalled. See
+[code as the action](#smolagents-and-codeact-code-as-the-action) and
+[plan mode](#it-would-be-enforced-here-not-merely-offered) — one call
+underneath both.
 
-### Engine, with no way round it
-
-**Streaming.** `fetch` answers with a buffered `FetchResponse` and no
-incremental body. Outbound SSE exists — `sendStreamMessage` — so what is
-missing is precisely a streaming fetch and a bridge between the two.
-
-**Channel adapters.** A webhook arrives with nobody signed in, and
-`personalTasks.enqueue` wants a signed-in person holding a live grant. A script
-cannot enqueue *as* somebody: establishing a `UserContext` is the engine's job
-and deliberately so. Mapping a channel identity onto an engine account and
-acting under that account's existing grant is an engine feature that does not
-exist, and the whole of the channels idea sits behind it.
-
-**Verbs in the delegation vocabulary.** `DelegationState.scopes` is a closed
-union of `"personal_storage"` and `"secrets"`. A script cannot add a read-only
-scope to it, which is what async plan approval and narrowed untrusted runs both
-need.
+**A way for a message to start a run.** `personalTasks.enqueueFrom`,
+`sender()` and `inviteLink()` are the channel half, built and unwired.
 
 ### One primitive behind two of the best ideas
 
 [Code as the action](#smolagents-and-codeact-code-as-the-action) and
 [plan mode that is enforced rather than offered](#it-would-be-enforced-here-not-merely-offered)
-look like separate items. They are one missing engine primitive: **a script
-asking the engine to run something with fewer capabilities than the script
-itself holds.** Capabilities flow down from the caller, and nothing today lets
-a script voluntarily drop them.
+look like separate items. They are one primitive: **a script asking the engine
+to run something with fewer capabilities than the script itself holds.**
 
-That one primitive would carry code-as-action, a plan mode the model cannot
-argue past, and safe handling of input from a stranger. Without it, plan mode
-here is a filtered tool list and an honour-system prompt — exactly as weak as
-the harnesses this file claims it would beat.
+That is now `sandbox.run(source, { capabilities })`. It evaluates source in
+this script's own sandbox holding only what the call names; `sandbox.held()`
+is the set a narrowing subtracts from. It refuses a subset the caller does not
+itself hold, refuses an unrecognised capability rather than dropping it, and
+nests four deep against a budget shared with the turn that opened it.
 
-### The engine backlog, then
+The part that matters for both features is that it is a separate context
+rather than a mask over the running one: the two share no object graph, so the
+unrestricted parent cannot hand the restricted region a function and have it
+called — a capability leak by reference that no mask catches. A filtered tool
+list can be argued past. This cannot, because the check sits *under* the
+JavaScript rather than in it.
 
-| Engine work | What it unblocks |
-| --- | --- |
-| Streaming `fetch`, bridged to SSE | Output per token rather than per turn |
-| Capability attenuation — a reduced sub-context | Code as the action, enforced plan mode, untrusted input |
-| Delegation reach — scope verbs, and acting for a person off-request | Channels, async plan approval, narrowed background work |
-| A lane key on the task queue | One run at a time per person (a stopgap exists here) |
+### The engine backlog, cleared
 
-Everything else on this list is `main.ts`.
+| Engine work | What it unblocks | Shipped as |
+| --- | --- | --- |
+| Streaming `fetch`, bridged to SSE | Output per token rather than per turn | `fetchStream` |
+| Capability attenuation — a reduced sub-context | Code as the action, enforced plan mode, untrusted input | `sandbox.run` |
+| Delegation reach — scope verbs, and acting for a person off-request | Channels, async plan approval, narrowed background work | `"write"` scope, `enqueueFrom` |
+| A lane key on the task queue | One run at a time per person | `lane`, defaulting to the person |
+
+Everything on this list is `main.ts`.
 
 ## Context layer — how the model learns what it is for
 
@@ -264,10 +295,29 @@ the point. Decide that before wiring anything.
 
 ### Streaming
 
-Tokens and visible reasoning as they arrive. **Blocked here**: `fetch` answers
-with a buffered body, so the log updates per turn rather than per token. The
-partial answer is what this already does — an activity row per tool call, so a
-long turn is not silent. See [where the work lands](#engine-with-no-way-round-it).
+Tokens and visible reasoning as they arrive. **No longer blocked.**
+`fetchStream(url, options)` hands back status and headers as soon as they
+arrive and the body in pieces as it does, and the stream is iterable, so the
+bridge is one loop: `for (const chunk of stream)
+routeRegistry.sendStreamMessage("answer", chunk)`.
+
+Three things a first attempt will hit, all of them stated in the type
+declaration. A chunk is not a line and not an SSE event — boundaries fall
+wherever the network put them, so reassembling the model's event framing is
+this script's job, since only this script knows what it is reading. No content
+coding is requested, which is right for endpoints that stream and wrong for
+anything else. And an abandoned stream holds a socket until the execution
+ends, so `close()` what you stop reading; an execution may hold only a few at
+once.
+
+Multi-byte characters split across chunks are reassembled for you, which is
+the detail that would otherwise show up as `U+FFFD` in exactly the text a
+model is generating.
+
+`fetchAll` is the neighbouring addition, and a different problem: several
+requests inside one wall-clock window rather than sequenced. It matters for a
+fan-out turn — three tool calls that each take a second cost three seconds of
+a budget, not one, without it.
 
 ### Interruption and steering
 
@@ -323,12 +373,21 @@ the JavaScript rather than in it.
 It is the same argument this file already makes about OpenClaw — the constraint
 belongs in the substrate — and this is the second place it pays.
 
-With one condition attached: capabilities flow down from the caller, and
-nothing lets a script run a turn with fewer of them than it holds. Until that
-primitive exists, a plan mode written here is a filtered tool list and a prompt
-asking nicely — which is to say, exactly the thing this section says it would
-improve on. It is the
-[same primitive code-as-action wants](#one-primitive-behind-two-of-the-best-ideas).
+The condition that used to be attached is met. `sandbox.run` runs source
+under a named subset of what this script holds, so a planning turn is that
+call with the writes left out — `sandbox.held()` filtered — and the model
+cannot find a write path through a tool that merely looked read-only, because
+the context it is running in has no write capability to find.
+
+One shape it imposes is worth knowing before building it: what gets narrowed
+is a *string of source*, not the surrounding turn, and the two contexts pass
+nothing but JSON. So the tool-dispatch half of a planning turn has to run
+inside the sub-execution. That is a constraint if the tools stay hand-written
+and it is free if they do not — which is the argument for reading
+[code as the action](#smolagents-and-codeact-code-as-the-action) alongside
+this section rather than after it. It is the
+[same primitive](#one-primitive-behind-two-of-the-best-ideas), and it now
+exists.
 
 #### It collides with the premise, and the collision is informative
 
@@ -343,9 +402,20 @@ interactive half is not, and the two suit different runs, so both should exist:
 a run with the person present proposes and waits, a run with them away treats
 the grant as the approval and its scopes as the ceiling.
 
-What is missing for the second is vocabulary. `DelegationState` offers two
-scopes, `personal_storage` and `secrets` — both nouns. For a grant to say "may
-read, may not write" the vocabulary has to grow verbs.
+The vocabulary the second needed has arrived. `DelegationScope` was two
+nouns, `personal_storage` and `secrets`, naming *what* a delegation reaches
+and nothing naming what it may do with it — so every grant was a grant to
+change as well as to read. It now carries `"write"` beside them, and a grant
+without it resolves to a context holding the reads and none of the writes,
+refused at the same gate every other caller meets rather than by the loop
+asking itself nicely.
+
+Worth knowing when designing against it: reading is the floor rather than a
+scope, since a delegation that could not read would have nothing to act on.
+What `"write"` adds is storage writes, script-data writes, enqueueing and
+sending — so a read-only delegation cannot chain tasks, and therefore cannot
+be a long one. That is a real design constraint on an async plan-approval
+flow, not an incidental one.
 
 #### Three features, one primitive
 
@@ -371,6 +441,15 @@ read-only, and only the account owner's own prompt can promote one to act.**
 Plan mode and the prompt-injection defence turn out to be the same lever, which
 is the strongest argument for building it before the adapters rather than
 after.
+
+Both halves of that lever now exist, which turns this from an argument into a
+task — and the ordering advice still holds, because the adapters are now
+buildable in an afternoon. An unknown sender already resolves to nobody, since
+`enqueueFrom` refuses rather than guessing, so the live question is what a
+*linked* sender's message may do. The grant's scopes answer the standing half:
+a person who granted read and not `"write"` has already said. `sandbox.run`
+answers the per-run half, for when the same person's own prompt should act and
+a message they forwarded should not.
 
 #### One caution
 
@@ -436,11 +515,31 @@ addition is a webhook route per channel, normalised to the inbound form
 `write_response` delivers to wherever the run came from rather than to the SSE
 stream alone.
 
-**It is not script work, though.** A webhook arrives with nobody signed in, and
-a run has to belong to a person — see
-[where the work lands](#engine-with-no-way-round-it). The engine has to grow a
-way to act for an account that is not the one making the request before any of
-the rest of this can be written.
+**It is script work now.** A webhook still arrives with nobody signed in, and
+a script still cannot name an account — anyone able to reach the webhook could
+then start anybody's agent. What the engine grew instead is a resolution step.
+`personalTasks.enqueueFrom({ channel, identity, ... })` names a *sender* as
+that channel names them, and the engine maps it onto whoever linked it, under
+that person's existing grant. An unlinked sender resolves to nobody, so a
+handler that trusts the wrong field in a body can be made to claim the wrong
+sender — not to name a different account or enumerate one.
+
+The linking is a consent flow rather than a URL. `personalTasks.inviteLink()`
+mints a single-use token the bot replies with **into that sender's own chat**,
+because being able to read that sender's messages is the only evidence of
+ownership the engine can have — a link that named the sender would be one
+anybody could construct for anybody, and linking somebody else's id first does
+not merely squat on it, it intercepts every message they send.
+`personalTasks.sender()` answers whether a sender is linked and whether their
+grant is live, so an unknown sender gets the link rather than a run; it
+deliberately never answers with the account id, which would end up in whatever
+the bot logs or echoes back into the chat.
+
+So the first adapter is: a webhook route, a signature check, `sender()`, and
+either `enqueueFrom` or a reply carrying `inviteLink()`. The signature check is
+the script's job and the engine's documentation says so rather than pretending
+otherwise — Telegram and Slack sign their webhooks, email does not, and the
+engine cannot verify that the message came from the sender it claims.
 
 The discipline that makes it work is the normalisation: platform specifics
 travel as metadata and never reach the reasoning loop. An agent that knows
@@ -454,16 +553,20 @@ Read [the warning below](#what-follows-a-channel) before building the first one.
 Every session gets its own queue and runs one task at a time, keyed
 `workspace:channel:userId`.
 
-This is the one that names a bug here rather than a feature. `personalTasks`
-offers `handler`, `payload`, `runAt` and `maxAttempts` — there is no lane key
-and no ordering. So two prompts from one person become two runs interleaving
-turn for turn, sharing that person's `personalStorage` and the same memory
-keys, each overwriting what the other just wrote.
+This named a bug here rather than a feature, and the engine has since fixed
+it. `personalTasks.enqueue` takes a `lane` — at most one task per lane runs at
+a time — and it **defaults to the person**, on the reasoning that every
+solution queueing per-person work had the same bug and the queue is a better
+place to hold the invariant than each of its callers. Two prompts from one
+person no longer interleave, and the `runs` table this section proposed is not
+needed for it.
 
-The script-side fix is a `runs` table carrying a status, claimed at the top of
-`advanceRun` and released when the run ends, so a second run waits rather than
-races. The engine-side fix is a lane key on the queue itself, which would be
-the better place for it.
+What is left is a choice rather than a fix. `lane` takes a name, so one lane
+per *conversation* rather than per person is a one-line change if somebody
+should be able to run two threads at once; `lane: null` opts out entirely.
+`scriptTasks` defaults to no lane, since a script task belongs to the solution
+and defaulting it would serialise the whole queue — worth knowing if this
+agent ever queues work that is not per-person.
 
 ### Skills as markdown, written by the agent
 
@@ -539,11 +642,14 @@ point straight at the budget problem this agent has: `keepAlive()` for work
 measured in minutes, and fibers — `runFiber`, `stash`, `onFiberRecovered` — for
 resuming after eviction.
 
-Two things to take. The **per-session object is the lane queue**: isolation
-falls out of the model rather than needing a claimed-status table beside it.
-And **state sync to the client** — a state table the browser mirrors — is a
-better shape than hand-rolled activity rows, because the page stops being a
-second implementation of what the run is doing.
+Two things to take, and one of them has since arrived from the other
+direction. The **per-session object is the lane queue**: isolation falls out
+of the model rather than needing a claimed-status table beside it — the same
+conclusion the engine reached in putting a lane on the queue rather than
+leaving it to every caller. What remains to take is **state sync to the
+client** — a state table the browser mirrors — a better shape than hand-rolled
+activity rows, because the page stops being a second implementation of what
+the run is doing.
 
 ### LangGraph: durable execution and the interrupt
 
@@ -582,9 +688,18 @@ permission boundary, replaces a growing pile of hand-written tools and widens
 what the model can express in one turn. Nobody else gets the hard half for
 free.
 
+And the half that was missing is missing no longer. `run_js` is
+`sandbox.run(modelWroteThis, { capabilities })` — model-authored source, a
+named subset of what this script holds, and a *result* rather than a thrown
+error when the code does not work. The engine distinguishes "the request was
+wrong" from "the code was wrong" deliberately, because the second is the
+outcome of a turn rather than a failure of the loop running it, which is
+exactly the distinction a CodeAct loop needs in order to feed an error back to
+the model as the next observation.
+
 It is a bigger decision than anything else on this list, and it deserves to be
 considered as an alternative to expanding the tool list rather than as an
-addition to it.
+addition to it. It is now a decision rather than a wish.
 
 ### OpenHands
 
@@ -616,9 +731,10 @@ needs an overview of. And **a commit per change**, which is the same instinct
 ### TypeScript-native loops
 
 The OpenAI Agents SDK for its handoffs, guardrails and sessions vocabulary;
-Mastra for durable workflows; the Vercel AI SDK for streaming patterns, with
-the caveat that streaming is the one thing the engine cannot do here. Relevant
-mostly because this script is TypeScript and the vocabulary transfers.
+Mastra for durable workflows; the Vercel AI SDK for streaming patterns — the
+caveat that used to hang on that last one is gone, since `fetchStream` is
+precisely what the engine was missing. Relevant mostly because this script is
+TypeScript and the vocabulary transfers.
 
 ### The security reading
 

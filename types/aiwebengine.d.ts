@@ -975,6 +975,11 @@ interface ScriptTask {
   enqueuedBy: string | null;
   /** Who it acts as. Null for script context, which is the default. */
   runAs?: string | null;
+  /**
+   * What it will not run beside. Null for no lane. A personal task with no
+   * lane named gets `person:<id>`.
+   */
+  lane?: string | null;
   kind?: "task" | "message";
   createdAt: string;
   updatedAt: string;
@@ -1040,6 +1045,17 @@ interface ScriptTasks {
     payload?: Record<string, unknown>;
     runAt?: string;
     maxAttempts?: number;
+    /**
+     * What this must not run beside. At most one task per lane runs at a
+     * time; the rest stay pending until it finishes.
+     *
+     * No lane by default, which is how every script task behaved before
+     * lanes existed: claimed and run alongside anything else. There is
+     * nothing for the engine to infer one from here — a script task belongs
+     * to the solution rather than to a person — so name one when the work
+     * shares state. `personalTasks` defaults its own.
+     */
+    lane?: string;
   }): ScriptTask;
 
   /**
@@ -1062,6 +1078,15 @@ interface ScriptTasks {
 /**
  * What this person has authorised this script to do as them.
  */
+/**
+ * What a person can authorise a script to do as them while they are away.
+ *
+ * Two nouns and a verb. The nouns say whose things are in scope;
+ * `"write"` says the run may change them rather than only read them — without
+ * it a delegated run holds no write capability at all.
+ */
+type DelegationScope = "personal_storage" | "secrets" | "write";
+
 interface DelegationState {
   /** False when nobody is signed in; nothing can be delegated then. */
   authenticated: boolean;
@@ -1069,7 +1094,7 @@ interface DelegationState {
   granted: boolean;
   expired?: boolean;
   expiresAt?: string;
-  scopes?: ("personal_storage" | "secrets")[];
+  scopes?: DelegationScope[];
   /** Where to send them to authorise it. Absent when nobody is signed in. */
   consentUrl?: string;
 }
@@ -1131,13 +1156,140 @@ interface PersonalTasks {
     payload?: Record<string, unknown>;
     runAt?: string;
     maxAttempts?: number;
+    /**
+     * What this must not run beside.
+     *
+     * **Defaults to the person.** Two prompts from one person otherwise
+     * become two runs interleaving turn for turn, each reading and
+     * overwriting the same `personalStorage` — which is a bug in essentially
+     * every solution that queues per-person work, so the queue holds it
+     * rather than leaving each caller to.
+     *
+     * Name your own for a finer lane (one conversation rather than one
+     * person), or pass `null` to opt out and let this person's tasks run in
+     * parallel.
+     */
+    lane?: string | null;
   }): ScriptTask;
 
   /** What this person has authorised, and where to send them if nothing. */
   authorization(): DelegationState;
 
+  /**
+   * Queue work to run as the person a message came **from**.
+   *
+   * The only way an execution with nobody signed in can act as anybody, and
+   * so the way an agent reaches the places people already are: an inbound
+   * Telegram or Slack webhook has no session, so `enqueue` above has nobody
+   * to act as.
+   *
+   * A script never names a person here. It names a sender as the channel
+   * reports them, and the engine resolves that through the links people have
+   * consented to on `/auth/delegate`. An unlinked sender resolves to nobody
+   * and nothing runs, so a script that trusts the wrong field in a request
+   * body can be made to claim the wrong *sender* — not to name a different
+   * account, and not to enumerate one.
+   *
+   * **Verify the message before calling this.** Telegram and Slack sign
+   * their webhooks; email largely does not. Checking that signature is the
+   * script's job, and the engine cannot do it for you — a handler that takes
+   * the sender straight from an unauthenticated body is a way for anyone who
+   * can reach the route to spend that person's budget.
+   *
+   * @throws SecurityError if nobody has linked that sender, or the person
+   *   has not authorised this script, or that authorisation has expired.
+   *   Check `sender()` first to reply with the link instead.
+   * @throws RangeError if this sender has queued too much too quickly.
+   *
+   * @example
+   * // A Telegram webhook, after checking the secret token Telegram sends.
+   * const from = String(update.message.from.id);
+   * const who = personalTasks.sender({ channel: "telegram", identity: from });
+   * if (!who.granted) {
+   *   return reply(`Authorise me first: ${who.linkUrl}`);
+   * }
+   * personalTasks.enqueueFrom({
+   *   channel: "telegram",
+   *   identity: from,
+   *   handler: "runTurn",
+   *   payload: { text: update.message.text },
+   * });
+   */
+  enqueueFrom(options: {
+    /** Where the message came from: a short slug, lower-cased by the engine. */
+    channel: string;
+    /** The sender as that channel names them. Compared exactly. */
+    identity: string;
+    handler: string;
+    payload?: Record<string, unknown>;
+    runAt?: string;
+    maxAttempts?: number;
+    /**
+     * As `enqueue` above: defaults to the person, which is what stops two
+     * messages arriving a second apart from becoming two interleaved turns.
+     */
+    lane?: string | null;
+  }): ScriptTask;
+
+  /**
+   * Whether a sender is linked and still authorised. A read.
+   *
+   * Deliberately never answers with the account's id: everything a script
+   * can do for that person goes through `enqueueFrom`, which names the
+   * sender, and an id here would end up in whatever the bot logs or echoes
+   * back into the chat.
+   */
+  sender(options: { channel: string; identity: string }): SenderState;
+
+  /**
+   * Mint the one URL that links this sender to whoever opens it, and
+   * **reply with it into that sender's own chat**.
+   *
+   * The URL carries a single-use token rather than the sender's name, and
+   * that is the security of the whole scheme. A link that named the sender
+   * would be one anybody could construct for anybody — and linking somebody
+   * else's id before they do does not merely squat on it, it *intercepts*
+   * them: every message they send the bot would be processed as the
+   * squatter's turn, with their text landing in the squatter's storage.
+   *
+   * Being able to read the sender's messages is the only evidence of
+   * ownership the engine can have, so posting this link anywhere that sender
+   * cannot read gives exactly that away.
+   *
+   * Minting invalidates any link still outstanding for the same sender, so
+   * call it where a bot decides to send one — not in a loop that polls
+   * `sender()`.
+   *
+   * @throws TypeError if the sender is not usable, RangeError if this sender
+   *   has asked too often, SecurityError in a turn that may not write.
+   */
+  inviteLink(options: { channel: string; identity: string }): LinkInvitation;
+
   cancel(taskId: string): boolean;
   get(taskId: string): ScriptTask | null;
+}
+
+/** What `personalTasks.sender()` answers. */
+interface SenderState {
+  /** Whether anybody has linked this sender to this script. */
+  linked: boolean;
+  /** True only if it is linked *and* that person's grant is live. */
+  granted: boolean;
+  expired?: boolean;
+  scopes?: DelegationScope[];
+  /** The pair as the engine normalised it — the channel is lower-cased. */
+  channel: string;
+  identity: string;
+}
+
+/** What `personalTasks.inviteLink()` answers. */
+interface LinkInvitation {
+  /** Send this into the sender's own chat, and nowhere else. */
+  linkUrl: string;
+  channel: string;
+  identity: string;
+  /** How long it stays usable. */
+  expiresInMinutes: number;
 }
 
 // ============================================================================
@@ -1618,6 +1770,109 @@ declare function fetch(
   url: string,
   options?: FetchOptions,
 ): FetchResponse & PromiseLike<FetchResponse>;
+
+/** One request of a `fetchAll` batch. A bare string is a GET of that URL. */
+type ParallelFetchRequest = string | { url: string; options?: FetchOptions };
+
+/**
+ * Several requests at once.
+ *
+ * `Promise.all([fetch(a), fetch(b)])` gives the right answers and runs them
+ * one after another — each `fetch` has already finished by the time it
+ * returns, so the wall clock is the sum. That is fine for two quick calls and
+ * is the difference between fitting inside the execution budget and not for
+ * an agent running three tool calls.
+ *
+ * These run together: one thread waits on the batch rather than one per
+ * request in series, and the wall clock becomes the slowest rather than the
+ * sum. Each request gets the same validation, redirects and secret
+ * substitution a single `fetch` gets.
+ *
+ * Answers are **positional** — the nth answer belongs to the nth request,
+ * whatever order they arrived in.
+ *
+ * A failure is per request. A refused URL answers with `ok: false` and throws
+ * from *that* response when you read its body, so the answers that arrived
+ * are still usable. Check `ok` first, or let the throw happen where you touch
+ * the one that failed.
+ *
+ * More requests than the engine runs at once are run in waves rather than
+ * refused.
+ *
+ * @example
+ * const [weather, news, mail] = fetchAll([
+ *   "https://api.example.com/weather",
+ *   { url: "https://api.example.com/news", options: { method: "POST", body } },
+ *   "https://api.example.com/mail",
+ * ]);
+ * if (weather.ok) { use(weather.json()); }
+ */
+declare function fetchAll(requests: ParallelFetchRequest[]): FetchResponse[];
+
+/** What a `fetchStream` read answers with. */
+interface StreamChunk {
+  done: boolean;
+  /** Absent once `done`. */
+  value?: string;
+}
+
+/**
+ * A response read a piece at a time.
+ *
+ * Iterable, so the ordinary shape is a `for...of`. The connection stays open
+ * between reads and closes when the stream ends, when `close()` is called, or
+ * when the execution does.
+ */
+interface FetchStream {
+  status: number;
+  ok: boolean;
+  headers: Record<string, string>;
+  /** The next piece, blocking until one arrives. */
+  read(): StreamChunk;
+  /** Everything left, joined — for a caller that wanted the headers early. */
+  text(): string;
+  /** Give the socket back before the end. */
+  close(): boolean;
+  [Symbol.iterator](): Iterator<string>;
+}
+
+/**
+ * Begin a request and read its body as it arrives.
+ *
+ * `fetch` reads the whole body before it returns anything, so a script cannot
+ * consume a model's token stream: an agent's page updates once per turn, and
+ * a turn is as long as the whole model call. This hands back the status and
+ * headers as soon as they arrive and the body in pieces as they do — which,
+ * bridged to `routeRegistry.sendStreamMessage`, turns a silent minute into
+ * visible progress.
+ *
+ * Three things to know:
+ *
+ * - **A chunk is not a line and not an SSE event.** Boundaries fall wherever
+ *   the network put them. Reassembling whatever you are reading is the
+ *   caller's job, because only the caller knows what it is.
+ * - **No content coding is requested.** `fetch` offers gzip and undoes it
+ *   after reading the whole body, which a stream cannot do. Endpoints that
+ *   stream are not compressed in practice.
+ * - **Close what you stop reading.** An abandoned stream holds a socket until
+ *   the execution ends, and an execution may hold only a few at once.
+ *
+ * Multi-byte characters split across chunks are reassembled for you.
+ *
+ * @example
+ * const stream = fetchStream("https://api.example.com/v1/messages", {
+ *   method: "POST",
+ *   headers: { "Authorization": "Bearer {{secret:API_TOKEN}}" },
+ *   body: JSON.stringify({ stream: true, messages }),
+ * });
+ *
+ * let whole = "";
+ * for (const chunk of stream) {
+ *   whole += chunk;
+ *   routeRegistry.sendStreamMessage("answer", chunk);
+ * }
+ */
+declare function fetchStream(url: string, options?: FetchOptions): FetchStream;
 
 // ============================================================================
 // Database API (Script-Scoped Table Management)
@@ -2475,6 +2730,155 @@ interface Convert {
 
 // ============================================================================
 // Global Objects
+/**
+ * A capability, named the way `sandbox` names it.
+ *
+ * The list is closed: an unrecognised name is refused rather than ignored,
+ * because silently dropping one would hand code a context the script believed
+ * it had checked.
+ */
+type Capability =
+  | "read_scripts"
+  | "write_scripts"
+  | "delete_scripts"
+  | "read_assets"
+  | "write_assets"
+  | "delete_assets"
+  | "delete_logs"
+  | "view_logs"
+  | "manage_streams"
+  | "manage_graphql"
+  | "read_script_data"
+  | "write_script_data"
+  | "manage_script_database"
+  | "administer_engine"
+  | "use_network"
+  | "read_secrets"
+  | "write_secrets"
+  | "read_storage"
+  | "write_storage"
+  | "enqueue_tasks"
+  | "send_messages";
+
+/** One line the sub-execution wrote through `console`. */
+interface SandboxConsoleLine {
+  level: string;
+  message: string;
+  timestampMs: number;
+}
+
+/** What one narrowed sub-execution produced. */
+interface SandboxResult {
+  /**
+   * The value the source evaluated to, run through `JSON.stringify` and
+   * re-parsed. Absent when it has no JSON form — `undefined`, a function, a
+   * symbol — which `valueType` tells apart from a value that really was null.
+   */
+  value?: unknown;
+  /** `undefined`, `null`, `boolean`, `number`, `string`, `symbol`, `function`, `array`, `object`. */
+  valueType?: string;
+  /**
+   * What it printed, whether or not it succeeded. Usually the most useful
+   * part of a turn that failed.
+   */
+  console: SandboxConsoleLine[];
+  /** Lines dropped after the capture limit, so a truncated capture is not mistaken for the whole. */
+  consoleDropped: number;
+  /** False when the source threw or ran out of budget. */
+  ok: boolean;
+  /**
+   * Why it failed. Returned rather than thrown: code the model wrote that did
+   * not work is the *result* of the turn, not a failure of the loop that ran
+   * it, and an agent's next move is to feed this back rather than to unwind.
+   */
+  error?: string;
+  durationMs: number;
+  rolledBack: boolean;
+}
+
+interface SandboxRunOptions {
+  /**
+   * What the sub-execution may do. Must be a subset of what the calling turn
+   * holds — asking for more throws rather than quietly narrowing, since a
+   * script asking to keep something it never had has a bug.
+   *
+   * Omitted means *none*, not "everything I hold". A typo in the option name
+   * must not hand model-authored code the whole of the caller's authority.
+   */
+  capabilities?: Capability[];
+  /** Handed to the source as `context.args`. Must be JSON-serializable. */
+  input?: unknown;
+  /** Budget in milliseconds, clamped to the engine's own ceiling. */
+  timeoutMs?: number;
+  /**
+   * Roll the sub-execution's database writes back. Off by default, unlike
+   * `/engine/eval`: a turn that may not write holds no write capability,
+   * which is stronger than a transaction that undoes what it did.
+   */
+  rollback?: boolean;
+}
+
+/**
+ * Running part of this script with fewer capabilities than it holds.
+ *
+ * A `UserContext` otherwise only ever flows downward from the caller, so the
+ * smallest thing a script could run something with was everything it had.
+ * This is the way down: a second execution of this same script, in a context
+ * holding a chosen subset, with JSON the only thing that crosses between them.
+ *
+ * Two shapes it is for:
+ *
+ * **Code as the action** — the model writes JavaScript instead of emitting a
+ * tool call. Composition comes free and the tool list stops growing.
+ *
+ * **A plan mode that is enforced** — a planning turn runs holding the reads
+ * and none of the writes. The checks are underneath the JavaScript, so no
+ * arrangement of the transcript reaches past them.
+ *
+ * It costs a fresh runtime and one re-evaluation of the script's program per
+ * call: right for an agent turn, wrong for a loop.
+ *
+ * @example
+ * // A plan turn: everything readable, nothing writable.
+ * const plan = sandbox.run(modelWroteThis, {
+ *   capabilities: ["read_script_data", "read_storage", "read_assets"],
+ *   input: { question },
+ * });
+ * if (plan.error) {
+ *   // Feed the failure back to the model rather than throwing.
+ * }
+ *
+ * @example
+ * // Narrowing from whatever this turn happens to hold, rather than from a
+ * // hard-coded list that drifts as the vocabulary grows.
+ * const readOnly = sandbox.held().filter(c => c.startsWith("read_"));
+ * const out = sandbox.run(source, { capabilities: readOnly });
+ */
+interface Sandbox {
+  /**
+   * Evaluate `source` in this script's sandbox holding only what `options`
+   * names.
+   *
+   * The source runs after the script's own program and in the same realm as
+   * it, so it sees what the script defined — its helpers, and the bindings
+   * its entrypoint imported. It sees nothing of the calling turn: the two are
+   * separate contexts, and a value passed by reference would be a capability
+   * passed by reference.
+   *
+   * @throws TypeError if a capability name is not one, RangeError if
+   *   sub-executions are already nested as deep as they go, and a
+   *   SecurityError if the caller does not hold what it asked to keep. What
+   *   the *source* did comes back in the result instead.
+   */
+  run(source: string, options?: SandboxRunOptions): SandboxResult;
+
+  /** Every capability name the engine has. */
+  capabilities(): Capability[];
+
+  /** What the calling turn holds, sorted. The set a narrowing subtracts from. */
+  held(): Capability[];
+}
+
 // ============================================================================
 
 declare var routeRegistry: RouteRegistry;
@@ -2490,6 +2894,7 @@ declare var mcpRegistry: McpRegistry;
 declare var database: Database;
 declare var console: Console;
 declare var dispatcher: MessageDispatcher;
+declare var sandbox: Sandbox;
 declare var convert: Convert;
 
 // ============================================================================
