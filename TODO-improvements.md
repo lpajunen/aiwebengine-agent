@@ -90,14 +90,11 @@ meant for the model talking to itself.
 Compaction, [code as the action](#smolagents-and-codeact-code-as-the-action),
 [the suspended run](#three-features-one-primitive),
 [memory the person can read](#memory-the-person-can-read) and
-[the first channel](#the-agent-lives-where-the-person-already-is) are built.
+[the first channel](#the-agent-lives-where-the-person-already-is) and
+[skills the agent writes](#skills-as-markdown-written-by-the-agent) are built.
+What is left is the one that is still a design question rather than a task.
 
-1. **Skills the agent writes.** The authoring half shipped; the half worth
-   having is [the agent writing its own](#skills-as-markdown-written-by-the-agent),
-   and `revisions.rs` makes every one of them revertible. It is now a smaller
-   job than it was: `write_assets` is a capability the act set can be given,
-   and the approval it would go behind exists.
-2. **Mounting the engine's own MCP tools** — `McpClient` is in the API and
+1. **Mounting the engine's own MCP tools** — `McpClient` is in the API and
    [the catch is a design question](#the-engine-is-already-an-mcp-server)
    rather than a wiring one.
 
@@ -855,7 +852,31 @@ agent ever queues work that is not per-person.
 Skills are YAML-fronted markdown rather than plugins: anyone can author one, no
 code, hot-reloaded, and the agent can write its own.
 
-The authoring half is [built](#skills). The half worth adding is the agent
+**Both halves are built now.** `write_skill` takes a name, a one-line
+description and a markdown body, and lands at `skills/<name>/SKILL.md` — the
+same shape a hand-written one has, so nothing about reading them changed.
+
+What it turned out to need was not a capability on the act set, which is what
+this section assumed. **`write_assets` is editor-tier and `delegation.rs` caps
+background work at `authenticated` on purpose**, so a delegated turn can never
+hold it — a delegated task must not be the way to get a context that can author
+a solution. The write therefore cannot happen in the turn at all. It happens
+where the _approval_ does, in the person's own request under their own rights,
+which is exactly what the deferred-action plumbing already did for `remember`.
+The third use of that machinery, and the first that could not have been built
+without it.
+
+Two consequences worth keeping. It **always** asks, in both modes, because a
+skill is an asset of the script and so changes the agent for everyone who uses
+it — unlike a note, which is one person's. And a skill approved from the page
+is written while one approved from a **Telegram button is refused**, since that
+runs as a queued task; `performSkillWrite` says so in words rather than passing
+on "Insufficient capabilities".
+
+The original note below is kept because its framing was right even where its
+mechanism was not.
+
+The half worth adding is the agent
 writing them — and that is where this engine is better placed than OpenClaw
 is, because `revisions.rs` makes a skill the agent wrote versioned and
 revertible. A self-modifying agent with no undo is a different proposition
