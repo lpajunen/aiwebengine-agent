@@ -4081,7 +4081,7 @@ function handleTelegram(context: HandlerContext): HttpResponse {
   }
 
   if (update.callback_query) return telegramButton(update.callback_query);
-  if (update.message) return telegramIncoming(update.message);
+  if (update.message) return telegramIncoming(context, update.message);
   // An update this bot does not handle — an edit, a reaction, a join. Taking
   // it off Telegram's queue is the right answer.
   return json(200, { ok: true });
@@ -4119,7 +4119,10 @@ function telegramCallIsGenuine(context: HandlerContext): boolean {
 }
 
 /** A message from a person. */
-function telegramIncoming(message: TelegramMessage): HttpResponse {
+function telegramIncoming(
+  context: HandlerContext,
+  message: TelegramMessage,
+): HttpResponse {
   const from = String(message.from?.id ?? "");
   // `from.id` and not `chat.id`: in a group they differ, and keying on the
   // chat would let anybody in that group start the agent of whoever linked
@@ -4145,7 +4148,7 @@ function telegramIncoming(message: TelegramMessage): HttpResponse {
   }
 
   if (!who.granted) {
-    return telegramOfferLink(from, chatId, who);
+    return telegramOfferLink(context, from, chatId, who);
   }
 
   try {
@@ -4180,6 +4183,7 @@ function telegramIncoming(message: TelegramMessage): HttpResponse {
  * read this chat is the only evidence of ownership the engine can have.
  */
 function telegramOfferLink(
+  context: HandlerContext,
   from: string,
   chatId: string,
   who: SenderState,
@@ -4209,9 +4213,34 @@ function telegramOfferLink(
 
   sendTelegram(
     chatId,
-    `${lead}\n\nOpen this to connect this chat to your account — it works once and lasts ${invitation.expiresInMinutes} minutes:\n${invitation.linkUrl}`,
+    `${lead}\n\nOpen this to connect this chat to your account — it works once and lasts ${invitation.expiresInMinutes} minutes:\n${absoluteUrl(context, invitation.linkUrl)}`,
   );
   return json(200, { ok: true });
+}
+
+/**
+ * Make a link openable from somewhere that is not this site.
+ *
+ * `inviteLink()` answers with a path — `/auth/delegate?link=...` — which is
+ * right for a page that is already on the engine and useless in a chat, where
+ * a tap on it goes nowhere. Found by sending one to a test chat and looking
+ * at what arrived.
+ *
+ * The origin comes from the request rather than from a constant, because the
+ * engine serves several hosts and the one that should appear in the link is
+ * the one Telegram was pointed at. `context.request.url` is the absolute URL
+ * the request arrived on, which is the only thing here that knows that.
+ */
+function absoluteUrl(context: HandlerContext, path: string): string {
+  if (path.indexOf("http://") === 0 || path.indexOf("https://") === 0) {
+    return path;
+  }
+  const here = String(context.request?.url ?? "");
+  const afterScheme = here.indexOf("://");
+  if (afterScheme === -1) return path;
+  const slash = here.indexOf("/", afterScheme + 3);
+  const origin = slash === -1 ? here : here.slice(0, slash);
+  return origin + path;
 }
 
 /**
