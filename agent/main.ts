@@ -565,6 +565,45 @@ interface ActivityRow {
  * registered its routes anyway, and the first symptom was a step answering
  * "No such run" about a run that had been opened perfectly well.
  */
+/**
+ * A read that survives the first failure after a column is added.
+ *
+ * Postgres caches a prepared statement per pooled connection, and adding a
+ * column to a table makes every cached plan for it wrong: the next query on
+ * each of those connections fails once with "cached plan must not change
+ * result type", and the failure is itself what re-prepares it. So the second
+ * attempt succeeds, and one retry is the whole fix.
+ *
+ * Worth doing rather than shrugging at, because of what the failure looks
+ * like when it is swallowed. Every reader here answers "no rows" on error,
+ * and "no rows" from the `runs` table means a run that is not running — a
+ * live run reads as finished, its turns stop being counted, and the page
+ * offers to start a new one. That is the bug this agent already shipped once
+ * from a different cause, and a transient database error is no better a
+ * reason for it than a missing row was.
+ */
+function queryRows(
+  table: string,
+  filter: string,
+  limit: number,
+  orderBy: string,
+  direction: "asc" | "desc",
+): unknown[] {
+  let last: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const rows = must(
+        database.query(table, filter, limit, orderBy, direction),
+        `reading ${table}`,
+      );
+      return Array.isArray(rows) ? rows : [];
+    } catch (e) {
+      last = e;
+    }
+  }
+  throw last instanceof Error ? last : new Error(String(last));
+}
+
 function must(answer: DatabaseAnswer, what: string): unknown {
   const value = answer.json();
   if (
@@ -1755,17 +1794,14 @@ function readErrorMessage(body: string): string {
 function runRow(userId: string, runId: string): RunRow | null {
   if (!runId) return null;
   try {
-    const rows = must(
-      database.query(
-        "runs",
-        JSON.stringify({ user_id: userId, run_id: runId }),
-        1,
-        "id",
-        "desc",
-      ),
-      "reading a run's state",
+    const rows = queryRows(
+      "runs",
+      JSON.stringify({ user_id: userId, run_id: runId }),
+      1,
+      "id",
+      "desc",
     ) as RunRow[];
-    return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+    return rows.length > 0 ? rows[0] : null;
   } catch (e) {
     return null;
   }
@@ -1879,17 +1915,13 @@ function setRunState(
 function takeInterjections(userId: string, runId: string): string[] {
   let rows: InterjectionRow[] = [];
   try {
-    const answer = must(
-      database.query(
-        "interjections",
-        JSON.stringify({ user_id: userId, run_id: runId }),
-        MAX_INTERJECTIONS,
-        "id",
-        "asc",
-      ),
-      "reading what was said mid-run",
+    rows = queryRows(
+      "interjections",
+      JSON.stringify({ user_id: userId, run_id: runId }),
+      MAX_INTERJECTIONS,
+      "id",
+      "asc",
     ) as InterjectionRow[];
-    if (Array.isArray(answer)) rows = answer;
   } catch (e) {
     return [];
   }
@@ -2142,17 +2174,13 @@ function runSpend(userId: string, runId: string): Spend {
 
   let rows: UsageRow[] = [];
   try {
-    const answer = must(
-      database.query(
-        "turn_usage",
-        JSON.stringify({ user_id: userId, run_id: runId }),
-        MAX_STEPS + 1,
-        "id",
-        "asc",
-      ),
-      "reading what a run cost",
+    rows = queryRows(
+      "turn_usage",
+      JSON.stringify({ user_id: userId, run_id: runId }),
+      MAX_STEPS + 1,
+      "id",
+      "asc",
     ) as UsageRow[];
-    if (Array.isArray(answer)) rows = answer;
   } catch (e) {
     // A page that cannot say what a run cost is better than a page that will
     // not load.
@@ -2657,17 +2685,13 @@ function appendMessage(
  * which is the distinction the caller acts on.
  */
 function loadMessages(userId: string, runId: string): MessageRow[] {
-  const rows = must(
-    database.query(
-      "messages",
-      JSON.stringify({ user_id: userId, run_id: runId }),
-      MAX_HISTORY_ROWS + 1,
-      "id",
-      "asc",
-    ),
-    "reading a run",
+  return queryRows(
+    "messages",
+    JSON.stringify({ user_id: userId, run_id: runId }),
+    MAX_HISTORY_ROWS + 1,
+    "id",
+    "asc",
   ) as MessageRow[];
-  return Array.isArray(rows) ? rows : [];
 }
 
 function toApiMessage(row: MessageRow): ApiMessage {
