@@ -37,6 +37,11 @@ const el = {
   planStatus: document.getElementById("plan-status"),
   approve: document.getElementById("approve"),
   reject: document.getElementById("reject"),
+  memoryPanel: document.getElementById("memory-panel"),
+  memoryDetails: document.getElementById("memory-details"),
+  memoryCount: document.getElementById("memory-count"),
+  memoryList: document.getElementById("memory-list"),
+  memoryStatus: document.getElementById("memory-status"),
 };
 
 // Why a run ended, for the reasons that are not "it finished". Named here so
@@ -271,6 +276,122 @@ async function decide(decision) {
 
 el.approve.addEventListener("click", () => decide("approve"));
 el.reject.addEventListener("click", () => decide("reject"));
+
+// ---------------------------------------------------------------------------
+// What the agent believes about you
+// ---------------------------------------------------------------------------
+
+/**
+ * Load the notes and render them.
+ *
+ * Reloaded after every run rather than patched as activity arrives. A run can
+ * write a note, correct one, or be told to forget one, and reconciling each of
+ * those against what is on screen would be a second implementation of the
+ * store — the same mistake the page already avoided by not running the turn
+ * loop itself. One read is cheaper than being subtly wrong.
+ */
+async function loadMemories() {
+  let data;
+  try {
+    data = await api("/agent/memories");
+  } catch (e) {
+    // Signed out, or the endpoint is older than this page. Neither is worth
+    // an error where the notes would be: the rest of the page still works.
+    el.memoryPanel.hidden = true;
+    return;
+  }
+
+  const memories = data.memories ?? [];
+  el.memoryPanel.hidden = false;
+  el.memoryCount.textContent =
+    memories.length === 0
+      ? "Nothing remembered yet"
+      : memories.length === 1
+        ? "1 note about you"
+        : `${memories.length} notes about you`;
+
+  el.memoryList.replaceChildren(...memories.map(memoryNode));
+  setStatus(
+    el.memoryStatus,
+    data.more > 0 ? `${data.more} more not shown.` : "",
+  );
+}
+
+function memoryNode(memory) {
+  const li = document.createElement("li");
+  li.className = "memory-item";
+
+  const key = document.createElement("label");
+  key.className = "memory-key";
+  key.textContent = memory.key;
+
+  const value = document.createElement("textarea");
+  value.className = "memory-value";
+  value.value = memory.value;
+  // A field showing part of a note would save back part of a note, so a
+  // truncated one is readable and not editable. Deleting it is still offered:
+  // wanting it gone does not require being able to see all of it.
+  value.disabled = Boolean(memory.truncated);
+
+  const actions = document.createElement("div");
+  actions.className = "memory-actions";
+
+  const save = document.createElement("button");
+  save.textContent = "Save";
+  save.disabled = Boolean(memory.truncated);
+  save.addEventListener("click", () =>
+    saveMemory(memory.key, value.value, save),
+  );
+
+  const forget = document.createElement("button");
+  forget.className = "secondary";
+  forget.textContent = "Delete";
+  forget.addEventListener("click", () => forgetMemory(memory.key, forget));
+
+  actions.append(save, forget);
+  if (memory.truncated) {
+    const why = document.createElement("span");
+    why.className = "memory-note";
+    why.textContent = `Too long to edit here (${memory.chars} characters).`;
+    actions.append(why);
+  }
+
+  li.append(key, value, actions);
+  return li;
+}
+
+async function saveMemory(key, value, button) {
+  button.disabled = true;
+  setStatus(el.memoryStatus, "Saving...");
+  try {
+    await api("/agent/memories", {
+      method: "POST",
+      body: JSON.stringify({ key, value }),
+    });
+    setStatus(el.memoryStatus, `Saved "${key}".`);
+  } catch (e) {
+    setStatus(el.memoryStatus, e.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function forgetMemory(key, button) {
+  button.disabled = true;
+  setStatus(el.memoryStatus, "Deleting...");
+  try {
+    await api(`/agent/memories?key=${encodeURIComponent(key)}`, {
+      method: "DELETE",
+    });
+    // Reloaded rather than removing the row here, so what is on screen is
+    // what is stored rather than what this page believes it just did.
+    await loadMemories();
+    setStatus(el.memoryStatus, `Deleted "${key}".`);
+  } catch (e) {
+    setStatus(el.memoryStatus, e.message, true);
+    button.disabled = false;
+  }
+}
 
 function setStatus(node, text, isError) {
   node.textContent = text;
@@ -530,6 +651,8 @@ async function start() {
     if (runWorking)
       setStatus(el.runStatus, "Working. You can close this page.");
 
+    loadMemories();
+
     // Say up front that a run will need permission, rather than letting them
     // write a prompt and meet the refusal afterwards.
     const auth = history.authorization;
@@ -632,6 +755,9 @@ async function start() {
       // wait on any more.
       if (payload.kind === "done") {
         hidePlan();
+        // A run that just finished may have written, corrected or removed a
+        // note. Re-read rather than guess from the activity that went past.
+        loadMemories();
         if (wasPending) render();
         setWorking(false);
         const stopped = STOP_REASONS.indexOf(payload.message) !== -1;

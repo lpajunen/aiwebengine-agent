@@ -126,6 +126,49 @@
       #plan-panel {
         border-color: var(--accent);
       }
+      .memory-summary {
+        cursor: pointer;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+      }
+      .memory-help {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 12px 0;
+      }
+      .memory-list {
+        display: grid;
+        gap: 14px;
+      }
+      /* Each note is a row of its own rather than sharing the activity list's
+         grid: the key is a label for something editable, not a column. */
+      .memory-item {
+        border-top: 1px solid var(--line);
+        padding-top: 12px;
+        display: block;
+      }
+      .memory-key {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        margin-bottom: 6px;
+        display: block;
+      }
+      .memory-value {
+        min-height: 60px;
+        resize: vertical;
+      }
+      .memory-actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 8px;
+      }
+      .memory-note {
+        color: var(--warn);
+        font-size: 13px;
+      }
       /* A link the person is meant to act on, rather than one to read. Styled
          as the buttons are because it does what they do — the difference is
          that this one navigates, which is a link's job and not a button's. */
@@ -326,6 +369,23 @@
             <span id="meter-text" class="meter-text"></span>
           </div>
         </div>
+      </section>
+
+      <!-- What the agent believes about you. Collapsed, because it is
+           reference rather than news, and open-on-demand is what stops a
+           hundred notes burying the log. -->
+      <section id="memory-panel" hidden>
+        <details id="memory-details">
+          <summary class="memory-summary">
+            <span id="memory-count">Notes</span>
+          </summary>
+          <p class="memory-help">
+            Everything this agent has written down about you. Correct anything
+            wrong, delete anything you would rather it forgot.
+          </p>
+          <ul id="memory-list" class="memory-list"></ul>
+          <span id="memory-status" class="status"></span>
+        </details>
       </section>
 
       <section>

@@ -235,6 +235,35 @@ interface Memory {
 }
 
 /**
+ * How much of a note the person is shown, and may edit, in one field.
+ *
+ * Generous, because a note is the person's own and a preview is what the
+ * *model* gets. The cap exists for the two ends of the range rather than the
+ * middle: a hundred notes of unbounded length is a page load nobody wants,
+ * and — the reason it is enforced rather than merely applied — a field
+ * showing part of a note would save back part of a note. A value over this
+ * is sent marked, and the page will not let it be edited.
+ */
+const MAX_MEMORY_VALUE_CHARS = 4000;
+
+/**
+ * A note as its owner sees it: the whole thing, not a preview.
+ *
+ * The distinction from [`Memory`] is the entire point of this endpoint.
+ * `list_memories` exists so the *model* can find a key worth reading, so it
+ * carries a first line and a length. A person is not searching an index —
+ * they are checking whether what the agent believes about them is true, and a
+ * preview cannot answer that.
+ */
+interface MemoryView {
+  key: string;
+  value: string;
+  chars: number;
+  /** The value is longer than the field can safely round-trip. */
+  truncated: boolean;
+}
+
+/**
  * What a run has spent so far.
  *
  * Summed over turns, except `largestPrompt`, which is the biggest single
@@ -1016,6 +1045,19 @@ function init(): void {
     tags: ["Agent"],
     summary: "Everything this person's agent has done",
   });
+  routeRegistry.registerRoute("/agent/memories", "readMemories", "GET", {
+    tags: ["Agent"],
+    summary: "Every note this agent has stored about you",
+  });
+  routeRegistry.registerRoute("/agent/memories", "writeMemory", "POST", {
+    tags: ["Agent"],
+    summary: "Correct a note",
+  });
+  routeRegistry.registerRoute("/agent/memories", "forgetMemory", "DELETE", {
+    tags: ["Agent"],
+    summary: "Delete a note",
+  });
+
   routeRegistry.registerRoute("/agent/key", "readKeyStatus", "GET", {
     tags: ["Agent"],
     summary: "Whether this person has stored an API key",
@@ -1755,6 +1797,139 @@ function readHistory(context: HandlerContext): HttpResponse {
     pricing: PRICES,
     contextWindow: CONTEXT_WINDOW,
   });
+}
+
+/**
+ * Everything this agent has written down about the person asking.
+ *
+ * The half of memory that was missing. `list_memories` made the notes
+ * readable by the *model*, which is a different thing and was never the point
+ * — an agent that remembers things about somebody without showing them what
+ * it remembers is one they cannot correct.
+ *
+ * It stopped being only a principle this week. Twice in one afternoon this
+ * agent told its owner it had saved a preference and had not, and both times
+ * the only way to find out was to read the database. A person with this panel
+ * open would have seen it in a second.
+ *
+ * No plan/act gate anywhere in these three handlers, and the reason is worth
+ * being explicit about: the mode governs what the *agent* may do while acting
+ * for somebody. This is the somebody, in their own request, editing their own
+ * store. Asking them to approve their own correction would be theatre.
+ */
+function readMemories(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  const keys: string[] = [];
+  try {
+    const total = personalStorage.length;
+    for (let i = 0; i < total; i++) {
+      const stored = personalStorage.key(i);
+      if (stored === null) continue;
+      if (stored.indexOf(NOTE_PREFIX) !== 0) continue;
+      keys.push(stored);
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return json(500, { error: message });
+  }
+
+  keys.sort();
+  const shown = keys.slice(0, MAX_MEMORIES);
+  const memories: MemoryView[] = [];
+  for (const stored of shown) {
+    const value = personalStorage.getItem(stored);
+    if (value === null) continue;
+    const long = value.length > MAX_MEMORY_VALUE_CHARS;
+    memories.push({
+      key: stored.slice(NOTE_PREFIX.length),
+      value: long ? value.slice(0, MAX_MEMORY_VALUE_CHARS) : value,
+      chars: value.length,
+      truncated: long,
+    });
+  }
+
+  return json(200, {
+    memories: memories,
+    more: keys.length - shown.length,
+    maxChars: MAX_MEMORY_VALUE_CHARS,
+  });
+}
+
+/**
+ * Correct a note, or write one.
+ *
+ * An upsert rather than an update, because refusing an unknown key would buy
+ * nothing: the store is the person's, and a key they typed is as much theirs
+ * as one the model chose. The page only offers to edit notes that exist,
+ * which is a statement about what the panel is for — correcting what the
+ * agent believes — rather than a limit this endpoint needs to enforce.
+ *
+ * A run already in flight will not see the change until it next calls recall:
+ * the turn reading the conversation has already read it. That is the same
+ * rule interjections follow and needs no special handling here, because a
+ * note is read when it is asked for rather than carried in the prompt.
+ */
+function writeMemory(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  let key = "";
+  let value = "";
+  try {
+    const body = (context.request?.json() ?? {}) as {
+      key?: string;
+      value?: string;
+    };
+    key = String(body.key ?? "").trim();
+    value = String(body.value ?? "");
+  } catch (e) {
+    return json(400, { error: "Expected a JSON body." });
+  }
+  if (!key) return json(400, { error: "A key is required." });
+  if (value.length > MAX_MEMORY_VALUE_CHARS) {
+    return json(400, {
+      error: `A note is at most ${MAX_MEMORY_VALUE_CHARS} characters.`,
+    });
+  }
+
+  try {
+    personalStorage.setItem(NOTE_PREFIX + key, value);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return json(500, { error: message });
+  }
+  return json(200, { key: key, chars: value.length });
+}
+
+/**
+ * Delete a note.
+ *
+ * The thing no tool offered and no page offered either, so a note the agent
+ * got wrong could be corrected but never taken back. Removing a key that is
+ * not there is not an error — it is the state the caller asked for.
+ *
+ * The key arrives in the query string rather than a body, because a body on a
+ * DELETE is the kind of thing that works until something between here and the
+ * browser decides otherwise. `/agent/key` already deletes with no body at all;
+ * this one needs to name which note, and a query parameter is the form that
+ * every layer agrees about.
+ */
+function forgetMemory(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  const key = String(context.request?.query?.key ?? "").trim();
+  if (!key) return json(400, { error: "A key is required." });
+
+  try {
+    personalStorage.removeItem(NOTE_PREFIX + key);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return json(500, { error: message });
+  }
+  return json(200, { key: key });
 }
 
 function readKeyStatus(context: HandlerContext): HttpResponse {
