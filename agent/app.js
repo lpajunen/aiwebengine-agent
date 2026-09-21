@@ -432,6 +432,22 @@ async function start() {
         return;
       }
 
+      // What the turn just cost. Carries numbers rather than text, so it is
+      // the one message that is not an activity and must never become a row.
+      if (payload.kind === "spend") {
+        if (payload.spend) {
+          if (payload.runId !== shownRun) {
+            // A run this page has not been following — another tab started
+            // it. Its totals are not ours to add to.
+            shownRun = payload.runId;
+            spend = EMPTY_SPEND;
+          }
+          spend = addSpend(spend || EMPTY_SPEND, payload.spend);
+          renderSpend();
+        }
+        return;
+      }
+
       // Anything the run recorded supersedes what was being written: the table
       // is the record and the deltas were a preview of it. Clearing here
       // rather than on a particular kind is what stops a half-streamed answer
