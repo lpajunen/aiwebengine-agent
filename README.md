@@ -112,6 +112,60 @@ Raise the budget **before** raising either. A turn that runs past its budget
 fails, and with `maxAttempts: 1` it is not retried — the run stops rather than
 quietly costing twice.
 
+## Skills
+
+A skill is a folder of instructions the agent reads when it decides the work
+calls for them. They are assets of this script, so a deployment grows its own
+library without touching `main.ts`:
+
+```
+skills/refunds/SKILL.md
+skills/refunds/policy.md
+skills/invoices/SKILL.md
+```
+
+A `SKILL.md` carries a description in front matter, and the instructions after
+it:
+
+```markdown
+---
+name: refunds
+description: Handling a refund request. Read before promising anything.
+---
+
+Check the order is inside 30 days, then ...
+```
+
+**The folder name is the skill's name** — it is the one identifier that cannot
+disagree with itself, and it is what `read_skill` takes. A `name:` in the front
+matter is allowed and ignored, so a `SKILL.md` written for another harness
+drops in unchanged.
+
+Only the names and descriptions ride in the system prompt; a body is fetched
+when the model asks for it. That is what makes a large library affordable —
+forty skills cost forty lines until one of them is wanted. A `SKILL.md` may
+point at files beside it (`policy.md` above) and `read_skill` will fetch those
+too, from that folder and nowhere else.
+
+Write one with the engine's own asset tools:
+
+```
+write_asset script=<this script> name="skills/refunds/SKILL.md" content="---
+description: Handling a refund request.
+---
+
+Check the order is inside 30 days."
+```
+
+A deployment with no skills gets the system prompt it had before any of this
+existed, byte for byte, and is not offered `read_skill` at all.
+
+Two ceilings: the index names at most 64 skills, and a body is cut at 32,000
+characters. The index is rebuilt only when a skill file changes — it is kept
+in `scriptStorage` under a fingerprint of the skill files and their
+modification times, so the steady state is two asset reads a turn rather than
+one per skill.
+
 ## What a run costs
 
 Every turn resends the run so far, so the bill grows with the length of a run

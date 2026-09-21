@@ -126,6 +126,45 @@ const SYSTEM_PROMPT = [
 ].join(" ");
 
 // ============================================================================
+// Skills
+// ============================================================================
+
+/**
+ * Where a skill lives: `skills/<name>/SKILL.md`, plus whatever files it
+ * references beside it.
+ *
+ * Assets rather than anything in this file, so that a deployment grows its own
+ * library without editing the script — which is the whole point. The folder
+ * name is the skill's name, because it is the one identifier that cannot
+ * disagree with itself; a `name:` in the front matter is allowed and ignored,
+ * so a SKILL.md written for another harness drops in unchanged.
+ */
+const SKILLS_PREFIX = "skills/";
+const SKILL_FILE = "SKILL.md";
+
+/**
+ * How many skills the index will name.
+ *
+ * The index is the part that costs tokens on every single turn, so it is the
+ * part with a ceiling. Bodies are read on demand and are not bounded by this.
+ */
+const MAX_SKILLS = 64;
+
+/** A skill body handed to the model, in characters. */
+const MAX_SKILL_CHARS = 32000;
+
+interface Skill {
+  name: string;
+  description: string;
+}
+
+/** One entry of `assetStorage.listAssets()`. */
+interface AssetInfo {
+  name: string;
+  updatedAt?: number;
+}
+
+// ============================================================================
 // The model's tools
 // ============================================================================
 
@@ -134,7 +173,7 @@ const SYSTEM_PROMPT = [
  * arguments that are guaranteed to match the schema — worth having when the
  * handler below trusts the shape.
  */
-const TOOLS = [
+const TOOLS: ToolSpec[] = [
   {
     name: "write_response",
     description:
@@ -182,9 +221,64 @@ const TOOLS = [
   },
 ];
 
+/**
+ * Offered only when the deployment actually has skills.
+ *
+ * A tool whose every answer is "there are none" is worse than no tool: it
+ * spends a step to learn nothing and invites the model to keep asking. The
+ * tool list is therefore a property of the skill library rather than of the
+ * turn, so it is as stable across a run as the rest of the cached prefix.
+ *
+ * `file` is required rather than optional because `strict: true` wants every
+ * property in `required`, and the description carries the default instead —
+ * which also gives a skill somewhere to send the model next, since a SKILL.md
+ * may name files beside it.
+ */
+const READ_SKILL_TOOL: ToolSpec = {
+  name: "read_skill",
+  description:
+    "Read a skill's instructions before doing the kind of work it covers. Skill names are listed in the system prompt.",
+  input_schema: {
+    type: "object",
+    properties: {
+      name: {
+        type: "string",
+        description: "The skill's name, as listed in the system prompt.",
+      },
+      file: {
+        type: "string",
+        description:
+          "Which file to read from the skill's folder. Use SKILL.md unless that file points you at another one.",
+      },
+    },
+    required: ["name", "file"],
+    additionalProperties: false,
+  },
+  strict: true,
+};
+
 // ============================================================================
 // Shapes
 // ============================================================================
+
+/**
+ * A tool as the API takes it.
+ *
+ * Spelled out rather than inferred from the literals: inference gives each
+ * tool a type describing only the properties *that* tool has, so a list of
+ * them is a union no fourth tool can join.
+ */
+interface ToolSpec {
+  name: string;
+  description: string;
+  input_schema: {
+    type: string;
+    properties: Record<string, { type: string; description: string }>;
+    required: string[];
+    additionalProperties: boolean;
+  };
+  strict: boolean;
+}
 
 interface ContentBlock {
   type: string;
@@ -720,6 +814,7 @@ function callModel(
   runId: string,
   messages: ApiMessage[],
 ): ApiResponse {
+  const skills = loadSkills();
   const stream = fetchStream(API_URL, {
     method: "POST",
     headers: {
@@ -730,9 +825,11 @@ function callModel(
     body: JSON.stringify({
       model: MODEL,
       max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
+      // Both of these follow the skill library rather than the turn, so they
+      // are as stable across a run as anything else in the cached prefix.
+      system: systemPromptFor(skills),
       messages: messages,
-      tools: TOOLS,
+      tools: skills.length > 0 ? TOOLS.concat([READ_SKILL_TOOL]) : TOOLS,
       stream: true,
       // Cache the prompt, which for this loop means the conversation.
       //
@@ -1136,6 +1233,194 @@ function readErrorMessage(body: string): string {
 }
 
 // ============================================================================
+// Skills
+// ============================================================================
+
+function listAssetInfo(): AssetInfo[] {
+  try {
+    const parsed = JSON.parse(assetStorage.listAssets()) as AssetInfo[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/** The skill an asset belongs to, or null if it is not a skill's SKILL.md. */
+function skillNameOf(assetName: string): string | null {
+  if (assetName.indexOf(SKILLS_PREFIX) !== 0) return null;
+  const rest = assetName.slice(SKILLS_PREFIX.length);
+  const cut = rest.indexOf("/");
+  if (cut <= 0) return null;
+  if (rest.slice(cut + 1) !== SKILL_FILE) return null;
+  return rest.slice(0, cut);
+}
+
+/**
+ * Every skill this deployment has, with the one line that says when it
+ * applies.
+ *
+ * Sorted by name, and that is not cosmetic: this list goes into the system
+ * prompt, the system prompt is the front of the cached prefix, and a prefix
+ * whose bytes move between turns is a prefix that never gets a cache hit. An
+ * order that came from whatever the asset listing happened to return would
+ * break caching silently — the one failure mode `logUsage` exists to catch.
+ *
+ * Reading every SKILL.md to learn its description would be one asset read per
+ * skill per turn, which is affordable at three skills and not at forty — and
+ * "affordable at forty" is the entire argument for progressive disclosure. So
+ * the built index is kept in `scriptStorage` under a fingerprint of the skill
+ * files and their modification times: two reads per turn in the steady state,
+ * and a rebuild exactly when a skill is added, edited or removed. The
+ * fingerprint is stored alongside the index and compared in full, so a hash
+ * collision costs a rebuild rather than serving a stale library.
+ */
+function loadSkills(): Skill[] {
+  const files: AssetInfo[] = [];
+  for (const asset of listAssetInfo()) {
+    if (skillNameOf(asset.name) !== null) files.push(asset);
+  }
+  if (files.length === 0) return [];
+
+  files.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const capped = files.slice(0, MAX_SKILLS);
+
+  const marks: string[] = [];
+  for (const file of capped) {
+    marks.push(file.name + "@" + String(file.updatedAt ?? 0));
+  }
+  const mark = marks.join(",");
+  const key = "skills:" + shortHash(mark);
+
+  try {
+    const stored = scriptStorage.getItem(key);
+    if (stored) {
+      const entry = JSON.parse(stored) as { mark?: string; skills?: Skill[] };
+      if (entry.mark === mark && Array.isArray(entry.skills)) {
+        return entry.skills;
+      }
+    }
+  } catch (e) {
+    // A cache that cannot be read is one to rebuild, not to fail over.
+  }
+
+  const skills: Skill[] = [];
+  for (const file of capped) {
+    const name = skillNameOf(file.name);
+    if (name === null) continue;
+    const text = readAssetText(file.name);
+    if (text === null) continue;
+    skills.push({
+      name: name,
+      description: frontMatterValue(text, "description") || "(no description)",
+    });
+  }
+
+  try {
+    scriptStorage.setItem(key, JSON.stringify({ mark: mark, skills: skills }));
+  } catch (e) {
+    // Storing is an optimisation. Failing to store costs a rebuild next turn.
+  }
+  return skills;
+}
+
+/**
+ * A short key for a long fingerprint (djb2).
+ *
+ * Not a security hash and not relied on for correctness — the full
+ * fingerprint is stored in the entry and compared there. This only has to
+ * spread keys well enough that one skill library does not sit on another's.
+ */
+function shortHash(text: string): string {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) {
+    h = ((h << 5) + h + text.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
+}
+
+/** An asset's content as text, or null if it is not there. */
+function readAssetText(name: string): string | null {
+  // `fetchAsset` answers a missing asset with a sentence rather than by
+  // failing, and that sentence is not base64 — so callers check the listing
+  // first and only ask for names they have already seen.
+  const encoded = assetStorage.fetchAsset(name);
+  try {
+    return convert.atob(encoded);
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * One `key: value` out of a leading `---` front-matter block.
+ *
+ * Deliberately not a YAML parser: the format's whole job here is to carry one
+ * description line, and a parser that accepted more would be promising a
+ * fidelity nothing downstream honours.
+ */
+function frontMatterValue(text: string, key: string): string {
+  if (text.indexOf("---") !== 0) return "";
+  const close = text.indexOf("\n---", 3);
+  if (close === -1) return "";
+
+  for (const line of text.slice(3, close).split("\n")) {
+    const colon = line.indexOf(":");
+    if (colon === -1) continue;
+    if (line.slice(0, colon).trim().toLowerCase() !== key) continue;
+
+    let value = line.slice(colon + 1).trim();
+    const quoted =
+      value.length >= 2 &&
+      ((value[0] === '"' && value[value.length - 1] === '"') ||
+        (value[0] === "'" && value[value.length - 1] === "'"));
+    if (quoted) value = value.slice(1, -1);
+    return value;
+  }
+  return "";
+}
+
+/** What is left of a SKILL.md once the front matter is taken off. */
+function skillBody(text: string): string {
+  if (text.indexOf("---") !== 0) return text;
+  const close = text.indexOf("\n---", 3);
+  if (close === -1) return text;
+  const lineEnd = text.indexOf("\n", close + 1);
+  if (lineEnd === -1) return "";
+  return text.slice(lineEnd + 1).replace(/^\n+/, "");
+}
+
+/**
+ * The system prompt for a turn, with the skill index appended.
+ *
+ * Names and descriptions ride in the prompt while bodies are fetched on
+ * demand, which is the whole of progressive disclosure: forty skills cost
+ * forty lines until one of them is actually wanted. Putting the index here
+ * rather than behind a `list_skills` tool is a deliberate trade — the model
+ * has to be told that skills exist at all, and once the prompt is saying that
+ * much, naming them costs a line each and saves a round trip out of the
+ * twelve a run gets.
+ *
+ * A deployment with no skills gets the prompt it had before this existed,
+ * byte for byte, and no extra tool.
+ */
+function systemPromptFor(skills: Skill[]): string {
+  if (skills.length === 0) return SYSTEM_PROMPT;
+
+  const lines = [
+    SYSTEM_PROMPT,
+    "",
+    "Skills are instructions for particular kinds of work. When one covers " +
+      "what you have been asked to do, call read_skill and follow it before " +
+      "you start. Read at most the ones you need.",
+    "",
+  ];
+  for (const skill of skills) {
+    lines.push("- " + skill.name + ": " + skill.description);
+  }
+  return lines.join("\n");
+}
+
+// ============================================================================
 // Tools
 // ============================================================================
 
@@ -1186,9 +1471,94 @@ function runTool(
       return { content: value, isError: false };
     }
 
+    case "read_skill": {
+      return readSkillTool(
+        String(input.name ?? "").trim(),
+        String(input.file ?? "").trim() || SKILL_FILE,
+      );
+    }
+
     default:
       return { content: `No tool called "${name}".`, isError: true };
   }
+}
+
+/**
+ * Hand the model a skill's instructions.
+ *
+ * Every refusal names what would have worked. An error is the one piece of
+ * text the model is guaranteed to read closely, so "no such skill; these
+ * exist" turns a wasted step into a recovered one, where a bare "not found"
+ * spends the step and teaches nothing.
+ */
+function readSkillTool(
+  name: string,
+  file: string,
+): { content: string; isError: boolean } {
+  const skills = loadSkills();
+  const known = skills.map((s) => s.name);
+
+  if (!name) {
+    return {
+      content: `A skill name is required. These exist: ${known.join(", ")}.`,
+      isError: true,
+    };
+  }
+
+  // Matched case-insensitively, since the model is copying a name out of prose.
+  let resolved = "";
+  for (const candidate of known) {
+    if (candidate.toLowerCase() === name.toLowerCase()) resolved = candidate;
+  }
+  if (!resolved) {
+    return {
+      content: `No skill called "${name}". These exist: ${known.join(", ")}.`,
+      isError: true,
+    };
+  }
+
+  // A skill may only offer its own folder. The listing check below would
+  // refuse an escape anyway — nothing outside this script's assets is in it —
+  // but a traversal is worth naming rather than reporting as "not found".
+  if (file.indexOf("..") !== -1 || file.indexOf("/") === 0) {
+    return {
+      content: `"${file}" is not a file inside a skill.`,
+      isError: true,
+    };
+  }
+
+  const assetName = SKILLS_PREFIX + resolved + "/" + file;
+  const siblings: string[] = [];
+  const folder = SKILLS_PREFIX + resolved + "/";
+  let exists = false;
+  for (const asset of listAssetInfo()) {
+    if (asset.name === assetName) exists = true;
+    if (asset.name.indexOf(folder) === 0) {
+      siblings.push(asset.name.slice(folder.length));
+    }
+  }
+  if (!exists) {
+    return {
+      content: `"${resolved}" has no file "${file}". It has: ${siblings.join(", ")}.`,
+      isError: true,
+    };
+  }
+
+  const text = readAssetText(assetName);
+  if (text === null) {
+    return { content: `"${file}" could not be read.`, isError: true };
+  }
+
+  const content = file === SKILL_FILE ? skillBody(text) : text;
+  if (content.length > MAX_SKILL_CHARS) {
+    return {
+      content:
+        content.slice(0, MAX_SKILL_CHARS) +
+        `\n\n[cut here: "${file}" is longer than ${MAX_SKILL_CHARS} characters]`,
+      isError: false,
+    };
+  }
+  return { content: content, isError: false };
 }
 
 // ============================================================================
