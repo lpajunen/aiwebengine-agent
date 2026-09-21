@@ -2999,11 +2999,13 @@ function systemPromptFor(skills: Skill[], mode: RunMode): string {
         "would do and nothing wider — the approval was for that plan."
       : SYSTEM_PROMPT +
         " You can read, fetch and compute, but you cannot change anything " +
-        "yet, and that includes remember. If what you have been asked for " +
-        "needs writing, work out what you intend to do and call " +
-        "request_approval with it; the run stops until the person answers. " +
-        "Anything that only reads — including recall and list_memories — " +
-        "just do.";
+        "yet. If what you have been asked for needs writing, work out what " +
+        "you intend to do and call request_approval with it; the run stops " +
+        "until the person answers. Never tell the person you have saved or " +
+        "changed something you have not. remember counts as a change: " +
+        "calling it here pauses the run and asks on your behalf, so use it " +
+        "normally and expect to be interrupted. Anything that only reads — " +
+        "recall and list_memories included — just do.";
 
   if (skills.length === 0) return preamble;
 
@@ -3055,11 +3057,26 @@ function runTool(
       // true. A person reading "Waiting for you" takes it to mean nothing
       // has been written, and a plan mode that stopped arbitrary code while
       // leaving a note-writing tool open would be telling them so falsely.
+      //
+      // It *asks* rather than refusing, and that is the part worth keeping.
+      // Refusing and naming the recovery is the shape every other error in
+      // this file takes, and it is the one place that shape failed: asked to
+      // remember a preference, the model met the refusal, decided out loud
+      // that "no approval needed since I'll just act on it directly", and
+      // told the person it had noted something it had not. A refusal is an
+      // instruction and an instruction can be argued with. Raising the
+      // request from inside the tool cannot be, because by the time the
+      // model reads an answer the run is already suspended.
+      //
+      // It also produces a better plan than the model would have written:
+      // the key and the value are known exactly here, so the person is shown
+      // the note itself rather than a paraphrase of an intention.
       if (runModeOf(userId, runId) === "plan") {
-        return {
-          content: `Not yet — storing a note changes something, and this run has not been approved. Call request_approval and say that you want to remember "${key}" and roughly what you would put in it. If you were only checking what you already know, recall and list_memories need no approval.`,
-          isError: true,
-        };
+        return requestApprovalTool(
+          userId,
+          runId,
+          `Remember "${key}":\n\n${value}`,
+        );
       }
 
       try {
