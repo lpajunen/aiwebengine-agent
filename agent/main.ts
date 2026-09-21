@@ -604,6 +604,30 @@ function queryRows(
   throw last instanceof Error ? last : new Error(String(last));
 }
 
+/**
+ * A write that survives the first failure after a column is added, for the
+ * same reason `queryRows` does — an `UPDATE` has a cached plan too, and this
+ * was found by watching four turns in five go uncounted.
+ *
+ * The retry is safe because every caller writes a value it computed before
+ * asking, rather than one derived from what it read: applying it twice leaves
+ * the same row. That is a property of these callers and not of writes in
+ * general, so it belongs in this comment rather than being assumed.
+ */
+function writeRow(run: () => DatabaseAnswer, what: string): boolean {
+  let last: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      must(run(), what);
+      return true;
+    } catch (e) {
+      last = e;
+    }
+  }
+  console.log(`agent: ${what} failed: ${String(last)}`);
+  return false;
+}
+
 function must(answer: DatabaseAnswer, what: string): unknown {
   const value = answer.json();
   if (
@@ -1842,8 +1866,11 @@ function runIsLive(userId: string, runId: string): boolean {
 }
 
 function openRun(userId: string, runId: string, taskId: string): void {
-  try {
-    must(
+  // A run without a row still runs; it just cannot be cancelled or counted.
+  // Losing the answer to keep the bookkeeping would be the wrong way round,
+  // so a failure here is logged and not raised.
+  writeRow(
+    () =>
       database.insert(
         "runs",
         JSON.stringify({
@@ -1856,13 +1883,8 @@ function openRun(userId: string, runId: string, taskId: string): void {
           updated_ms: Date.now(),
         }),
       ),
-      "opening a run",
-    );
-  } catch (e) {
-    // A run without a row still runs; it just cannot be cancelled. Losing the
-    // answer to keep the bookkeeping would be the wrong way round.
-    console.log("agent: could not record a run: " + String(e));
-  }
+    "opening a run",
+  );
 }
 
 /**
@@ -1891,16 +1913,10 @@ function setRunState(
   };
   if (taskId !== undefined) patch.task_id = taskId;
 
-  try {
-    must(
-      database.update("runs", Number(row.id), JSON.stringify(patch)),
-      "moving a run along",
-    );
-    return true;
-  } catch (e) {
-    console.log("agent: could not move a run along: " + String(e));
-    return false;
-  }
+  return writeRow(
+    () => database.update("runs", Number(row.id), JSON.stringify(patch)),
+    "moving a run along",
+  );
 }
 
 /**
@@ -1970,18 +1986,15 @@ function stepsTaken(
 function countStep(userId: string, runId: string, taken: number): void {
   const row = runRow(userId, runId);
   if (!row) return;
-  try {
-    must(
+  writeRow(
+    () =>
       database.update(
         "runs",
         Number(row.id),
         JSON.stringify({ steps: taken + 1, updated_ms: Date.now() }),
       ),
-      "counting a turn",
-    );
-  } catch (e) {
-    console.log("agent: could not count a turn: " + String(e));
-  }
+    "counting a turn",
+  );
 }
 
 /** Whether this run's conversation should be folded up before the next turn. */
