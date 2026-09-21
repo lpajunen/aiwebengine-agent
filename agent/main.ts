@@ -361,6 +361,20 @@ const MAX_SKILLS = 64;
 /** A skill body handed to the model, in characters. */
 const MAX_SKILL_CHARS = 32000;
 
+/**
+ * What a skill may be called.
+ *
+ * The folder name *is* the skill's name, so this is a directory segment as
+ * much as an identifier: no dots, no slashes, nothing that could climb out of
+ * `skills/`. Lower case because the model copies the name out of prose and a
+ * library that distinguishes `Email` from `email` is one that will eventually
+ * hold both.
+ */
+const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
+
+/** A description sits in the prompt on every turn, so it stays one line. */
+const MAX_SKILL_DESCRIPTION_CHARS = 200;
+
 interface Skill {
   name: string;
   description: string;
@@ -648,6 +662,54 @@ const REQUEST_APPROVAL_TOOL: ToolSpec = {
       },
     },
     required: ["plan"],
+    additionalProperties: false,
+  },
+  strict: true,
+};
+
+/**
+ * Offered in both modes, and **always** asking.
+ *
+ * Unlike `remember`, which writes straight through once a run is approved,
+ * this defers every time and the asymmetry is deliberate. A note is one
+ * person's, and wrong costs them a wrong answer. A skill is an *asset of the
+ * script*, so it changes how this agent behaves for everyone who uses it, and
+ * it keeps doing so until somebody notices. That is not a thing to hand a run
+ * a standing licence for.
+ *
+ * The second reason is that it could not work otherwise. `write_assets` is an
+ * editor-tier capability and [`delegation`] caps background work at
+ * `authenticated` on purpose — a delegated task must not be the way to get a
+ * context that can author a solution. So the write cannot happen in the turn
+ * at all. It happens where the approval does, in the person's own request,
+ * under their own rights, which is exactly what the deferred-action plumbing
+ * already does for `remember`.
+ */
+const WRITE_SKILL_TOOL: ToolSpec = {
+  name: "write_skill",
+  description:
+    "Write down how to do a kind of work, so you and every future run do it the same way. Reach for this when you have just worked out a procedure worth repeating — the steps, the gotchas, the thing you got wrong the first time — not for facts about the person, which are remember's job. " +
+    "Writing one always pauses the run and asks, in both modes, because a skill changes this agent for everyone who uses it and keeps doing so. Name an existing skill to replace it; read it first with read_skill so you are editing rather than overwriting. " +
+    "The body is markdown and is read by you, not by the person: write it as instructions to yourself.",
+  input_schema: {
+    type: "object",
+    properties: {
+      name: {
+        type: "string",
+        description:
+          'Lower-case, digits and hyphens, e.g. "weekly-report". This is the folder it lives in and how you will ask for it later.',
+      },
+      description: {
+        type: "string",
+        description:
+          "One line saying when this applies. It sits in your instructions on every turn, so it has to be enough to decide by and no longer.",
+      },
+      body: {
+        type: "string",
+        description: "The instructions themselves, as markdown.",
+      },
+    },
+    required: ["name", "description", "body"],
     additionalProperties: false,
   },
   strict: true,
@@ -3251,6 +3313,10 @@ function toolsFor(skills: Skill[], mode: RunMode): ToolSpec[] {
   let tools = TOOLS;
   if (mode === "plan") tools = tools.concat([REQUEST_APPROVAL_TOOL]);
   if (skills.length > 0) tools = tools.concat([READ_SKILL_TOOL]);
+  // Not conditional on the library existing, unlike reading: the first skill
+  // has to come from somewhere, and a deployment with none is exactly where
+  // writing one is most useful.
+  tools = tools.concat([WRITE_SKILL_TOOL]);
   return tools;
 }
 
@@ -3271,14 +3337,26 @@ function systemPromptFor(skills: Skill[], mode: RunMode): string {
         "normally and expect to be interrupted. Anything that only reads — " +
         "recall and list_memories included — just do.";
 
-  if (skills.length === 0) return preamble;
+  // Said whether or not any exist, because the first one has to come from
+  // somewhere and a deployment with none is where writing one pays most.
+  const authoring =
+    "If you work out a procedure worth repeating — the steps, the gotchas, " +
+    "the thing you got wrong first — write it down with write_skill so every " +
+    "future run does it the same way. That is for how to do work, not for " +
+    "facts about the person, which are remember's job. It always pauses and " +
+    "asks, because a skill changes this agent for everyone.";
+
+  if (skills.length === 0) {
+    return preamble + "\n\n" + authoring;
+  }
 
   const lines = [
     preamble,
     "",
     "Skills are instructions for particular kinds of work. When one covers " +
       "what you have been asked to do, call read_skill and follow it before " +
-      "you start. Read at most the ones you need.",
+      "you start. Read at most the ones you need. " +
+      authoring,
     "",
   ];
   for (const skill of skills) {
@@ -3408,6 +3486,16 @@ function runTool(
       return requestApprovalTool(userId, runId, String(input.plan ?? ""));
     }
 
+    case "write_skill": {
+      return writeSkillTool(
+        userId,
+        runId,
+        String(input.name ?? "").trim(),
+        String(input.description ?? "").trim(),
+        String(input.body ?? ""),
+      );
+    }
+
     case "read_skill": {
       return readSkillTool(
         String(input.name ?? "").trim(),
@@ -3418,6 +3506,70 @@ function runTool(
     default:
       return { content: `No tool called "${name}".`, isError: true };
   }
+}
+
+/**
+ * Propose a skill, and stop until somebody agrees to it.
+ *
+ * Every refusal names what would have worked, as everywhere else here; the
+ * difference is that the accepted path also stops, because this tool cannot
+ * do the thing it is for. See [`WRITE_SKILL_TOOL`] for why the write happens
+ * at the approval rather than here.
+ */
+function writeSkillTool(
+  userId: string,
+  runId: string,
+  name: string,
+  description: string,
+  body: string,
+): { content: string; isError: boolean } {
+  const lower = name.toLowerCase();
+  if (!SKILL_NAME_PATTERN.test(lower)) {
+    return {
+      content: `"${name}" is not a usable skill name. Use lower case letters, digits and hyphens, starting with a letter or digit, up to 40 characters — the name is the folder it lives in.`,
+      isError: true,
+    };
+  }
+  if (!description) {
+    return {
+      content:
+        "A description is required: one line saying when this skill applies, which is all you will see of it on a future turn when deciding whether to read it.",
+      isError: true,
+    };
+  }
+  if (description.length > MAX_SKILL_DESCRIPTION_CHARS) {
+    return {
+      content: `That description is ${description.length} characters and sits in your instructions on every turn. Keep it under ${MAX_SKILL_DESCRIPTION_CHARS}.`,
+      isError: true,
+    };
+  }
+  if (!body.trim()) {
+    return { content: "A skill with no body teaches nothing.", isError: true };
+  }
+  if (body.length > MAX_SKILL_CHARS) {
+    return {
+      content: `That body is ${body.length} characters, and a skill is capped at ${MAX_SKILL_CHARS}. Put the detail in the skill and the length somewhere else.`,
+      isError: true,
+    };
+  }
+  // A description spanning lines would break the front matter it goes into,
+  // and silently: the parser reads one line per key.
+  const oneLine = description.replace(/\s+/g, " ").trim();
+
+  const known = loadSkills().map((s) => s.name);
+  const replacing = known.indexOf(lower) !== -1;
+
+  return requestApprovalTool(
+    userId,
+    runId,
+    (replacing
+      ? `Replace the skill "${lower}"`
+      : `Write a new skill "${lower}"`) +
+      ` — this changes what this agent does for everyone who uses it.\n\n` +
+      `When it applies: ${oneLine}\n\n${body.trim()}`,
+    "write_skill",
+    { name: lower, description: oneLine, body: body.trim() },
+  );
 }
 
 /**
@@ -3663,6 +3815,81 @@ function requestApprovalTool(
 }
 
 /**
+ * Write the skill a person approved.
+ *
+ * The one deferred action that can fail for a reason worth explaining rather
+ * than logging. `write_assets` is editor-tier and ownership-checked, and a
+ * delegated task is capped below it — so this succeeds when the approval came
+ * from the page, in the person's own request, and is **refused when it came
+ * from a Telegram button**, which runs as a queued task.
+ *
+ * That is the engine's rule holding rather than a gap: authoring a solution
+ * is not something background work may do, and approving from a phone is
+ * background work. Saying so beats a refusal the person cannot place.
+ *
+ * `upsertAsset` reports refusal by *returning* a message rather than throwing,
+ * which is why the answer is inspected rather than merely awaited.
+ */
+function performSkillWrite(
+  userId: string,
+  runId: string,
+  plan: PlanRow,
+): string | null {
+  let args: { name?: string; description?: string; body?: string } = {};
+  try {
+    args = JSON.parse(String(plan.payload ?? "{}")) as typeof args;
+  } catch (e) {
+    return null;
+  }
+  const name = String(args.name ?? "").trim();
+  if (!SKILL_NAME_PATTERN.test(name)) return null;
+
+  const file =
+    "---\n" +
+    "name: " +
+    name +
+    "\n" +
+    "description: " +
+    String(args.description ?? "") +
+    "\n" +
+    "---\n\n" +
+    String(args.body ?? "") +
+    "\n";
+
+  let answer = "";
+  try {
+    answer = assetStorage.upsertAsset(
+      SKILLS_PREFIX + name + "/" + SKILL_FILE,
+      "text/markdown",
+      convert.btoa(file),
+    );
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    recordActivity(
+      userId,
+      runId,
+      "error",
+      `Could not write the skill: ${message}`,
+    );
+    return `it could not be written: ${message}`;
+  }
+
+  // "Asset '...' upserted successfully" on the way through; anything else is
+  // a refusal wearing a return value.
+  if (answer.indexOf("successfully") === -1) {
+    const why =
+      answer.indexOf("Insufficient capabilities") !== -1
+        ? "writing a skill needs the rights to author this script, which a queued approval does not have — approve it on the agent page instead"
+        : answer;
+    recordActivity(userId, runId, "error", `The skill was not written: ${why}`);
+    return `it was not written: ${why}`;
+  }
+
+  recordActivity(userId, runId, "tool", `Wrote the skill "${name}".`);
+  return `the skill "${name}" is written`;
+}
+
+/**
  * Do the thing a person just approved.
  *
  * The reason this exists rather than letting the resumed model repeat its own
@@ -3691,6 +3918,10 @@ function performApproved(
 ): string | null {
   const action = String(plan.action ?? "");
   if (!action) return null;
+
+  if (action === "write_skill") {
+    return performSkillWrite(userId, runId, plan);
+  }
 
   if (action !== "remember") {
     // A plan naming something this version does not know how to do. Better to
