@@ -278,6 +278,96 @@ cancel_task  script=<this script> task=<id>
 A turn that failed keeps its row and the error that ended it. A run that is
 stuck is a pending task with a `runAt` in the future.
 
+## Telegram
+
+The agent answers on Telegram as well as on its page, with the same run, the
+same log and the same approvals — a plan arrives as a message with **Approve**
+and **Reject** under it.
+
+### Who can message it, and whose agent runs
+
+Anyone can message a Telegram bot, so the question that matters is whose agent
+a message starts. **This script cannot decide that**, and that is the design
+rather than an omission: there is no call here that takes a user id.
+`personalTasks.enqueueFrom` names a _sender_ — a channel and an identity as
+that channel spells it — and the engine resolves it against the links people
+have consented to. An unlinked sender resolves to nobody and throws.
+
+So the worst a bug in the webhook can do is claim the wrong _sender_. It
+cannot name a different account, and it cannot enumerate one.
+
+Linking is a consent flow, not a URL. A stranger gets a single-use invitation
+replied **into their own chat**, because being able to read that chat is the
+only evidence of ownership the engine can have. A link that named the sender
+would be one anybody could build for anybody — and linking somebody else's id
+first does not merely squat on it, it intercepts them.
+
+A run started from Telegram begins in plan mode like every other, so nothing
+is written until a button is pressed.
+
+### Setting it up
+
+Three things, none of which the script can do for itself.
+
+**1. A bot, and its token as a script secret.** Get one from
+[@BotFather](https://t.me/BotFather), then store the token — never in
+`scriptStorage`, which `run_js` can read:
+
+```text
+write_secret uri=<this script> name=TELEGRAM_BOT_TOKEN value=<token> scope=script
+```
+
+**2. A webhook secret**, which Telegram echoes back on every call so the
+script can tell a real delivery from a forged one. It lives in `scriptStorage`
+because checking it means _comparing_ it, and the engine never returns a
+secret's value to JavaScript. Generate something long and random, then:
+
+```js
+// eval_script, as an administrator
+scriptStorage.setItem("telegram:webhook_secret", "<a long random string>");
+```
+
+**3. Point Telegram at the route**, passing the same secret:
+
+```js
+// eval_script, as an administrator
+fetch("https://api.telegram.org/bot{{secret:TELEGRAM_BOT_TOKEN}}/setWebhook", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    url: "https://<your host>/agent/telegram",
+    secret_token: "<the same long random string>",
+    allowed_updates: ["message", "callback_query"],
+  }),
+});
+```
+
+The webhook refuses every call until step 2 is done: unconfigured means
+closed, rather than accepting anyone who omits the header.
+
+### What it needs from the engine
+
+A token in a URL. Telegram takes its bot token as a path segment and offers no
+header form, and this engine substitutes `{{secret:...}}` into header values
+only — deliberately, since a URL reaches the audit line, the engine's logs and
+the far end's access log. That is why `http_client.rs` grew `resolve_url`: a
+secret may now fill in a **path**, the template keeps carrying the scheme and
+host so every check runs against a string with no credential in it, and every
+line that writes the URL down keeps writing the template.
+
+**An engine older than that change cannot run this.** The bot token would be
+sent to Telegram as the literal text `{{secret:TELEGRAM_BOT_TOKEN}}` and every
+call would fail.
+
+### What the engine still cannot do
+
+Verify that a message came from the sender it names. Telegram's shared secret
+proves the _call_ came from Telegram; nothing proves the body was not edited
+by whoever holds that secret. Which is why `telegramCallIsGenuine` refusing is
+the only place this script returns a non-2xx, and why losing that secret is
+bounded: it buys forged messages from a sender who already trusts this bot,
+not access to the bot and not access to anybody's account.
+
 ## Layout
 
 ```

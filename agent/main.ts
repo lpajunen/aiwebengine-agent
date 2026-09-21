@@ -309,6 +309,8 @@ interface RunRow {
   run_id: string;
   run_state: string;
   run_mode?: string;
+  channel?: string;
+  chat_id?: string;
   task_id: string;
   steps?: number;
 }
@@ -941,6 +943,11 @@ function init(): void {
           // through. Added after the table existed, which the read retry in
           // `queryRows` is there for.
           { name: "run_mode", type: "text" },
+          // Where this run came from and where its answer goes. Empty for a
+          // run started on the page, which is why nothing about the web path
+          // had to change to add a channel.
+          { name: "channel", type: "text" },
+          { name: "chat_id", type: "text" },
           { name: "task_id", type: "text" },
           { name: "steps", type: "bigint" },
           { name: "created_ms", type: "bigint" },
@@ -1045,6 +1052,13 @@ function init(): void {
     tags: ["Agent"],
     summary: "Everything this person's agent has done",
   });
+  // The one route nobody signs in to reach. See `handleTelegram` for what
+  // that costs and what stands in for a session.
+  routeRegistry.registerRoute("/agent/telegram", "handleTelegram", "POST", {
+    tags: ["Agent"],
+    summary: "Telegram webhook",
+  });
+
   routeRegistry.registerRoute("/agent/memories", "readMemories", "GET", {
     tags: ["Agent"],
     summary: "Every note this agent has stored about you",
@@ -1317,6 +1331,12 @@ function advanceRun(context: HandlerContext): void {
   for (const block of blocks) {
     if (block.type === "text" && block.text) {
       recordActivity(userId, runId, proseKind, block.text);
+      // Narration stays on the page; an answer follows the run. A turn that
+      // called no tool has answered in prose, and a person on Telegram is
+      // owed that as much as one watching the stream.
+      if (proseKind === "response") {
+        notifyChannel(userId, runId, block.text);
+      }
       said = true;
       continue;
     }
@@ -1476,6 +1496,13 @@ function finishRun(userId: string, runId: string, reason: string): void {
   // run ended by itself and the row would say the same.
   setRunState(userId, runId, "done", undefined, "running");
   recordActivity(userId, runId, "done", reason);
+
+  // A run that ended badly is worth saying out loud on a channel, where there
+  // is no activity log to notice it in. A run that simply finished has
+  // already said whatever it had to say.
+  if (reason !== "end_turn") {
+    notifyChannel(userId, runId, `The run stopped: ${reason}.`);
+  }
 }
 
 /**
@@ -1528,30 +1555,11 @@ function cancelRun(context: HandlerContext): HttpResponse {
 }
 
 /**
- * Answer the plan a run is waiting on, and let it go again.
+ * The page's way of answering a plan: parse, hand to [`decide`], report.
  *
- * The resuming half, and the ordering is the whole of it. The transition out
- * of `waiting` is taken **first and conditionally**, before any message is
- * written or any task is queued, because that single write is the mutex: two
- * tabs pressing approve, or one person double-clicking, both reach here and
- * exactly one moves the run. The loser changes nothing and is answered as
- * though it had won, since from the person's side it did.
- *
- * Doing it the other way round — queue, then set the state — is what
- * `advanceRun` does, and it is wrong here for a reason that does not apply
- * there: a second caller would have queued a second turn before discovering
- * it lost, and the run would take two turns for one approval, each paid for
- * on somebody's own key.
- *
- * Then the message, then the task. The message has to be in the conversation
- * before anything can read it, and the queued turn is exactly a thing that
- * reads it — enqueue first and the turn can start against a history that does
- * not yet say it was approved.
- *
- * A rejection resumes the run rather than ending it. The model is told what
- * was wrong and gets to propose something else, which is the difference
- * between a decision and a stop — and `MAX_STEPS` bounds how many times that
- * can go round. Somebody who wants it to stop has the stop button.
+ * Everything that moves the run lives there rather than here, because a
+ * decision now arrives two ways — this, and a button under a Telegram
+ * message — and the second has no request to answer.
  */
 function decideRun(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
@@ -1577,21 +1585,70 @@ function decideRun(context: HandlerContext): HttpResponse {
     return json(400, { error: 'Decision must be "approve" or "reject".' });
   }
 
+  const outcome = decide(userId, runId, decision, note);
+  return json(outcome.status, outcome.body);
+}
+
+/**
+ * Answer the plan a run is waiting on, and let it go again.
+ *
+ * The resuming half, and the ordering is the whole of it. The transition out
+ * of `waiting` is taken **first and conditionally**, before any message is
+ * written or any task is queued, because that single write is the mutex: two
+ * tabs pressing approve, a tab and a Telegram button, or one person
+ * double-tapping, all reach here and exactly one moves the run. The loser
+ * changes nothing and is answered as though it had won, since from the
+ * person's side it did.
+ *
+ * Doing it the other way round — queue, then set the state — is what
+ * `advanceRun` does, and it is wrong here for a reason that does not apply
+ * there: a second caller would have queued a second turn before discovering
+ * it lost, and the run would take two turns for one approval, each paid for
+ * on somebody's own key.
+ *
+ * Then the message, then the task. The message has to be in the conversation
+ * before anything can read it, and the queued turn is exactly a thing that
+ * reads it.
+ *
+ * A rejection resumes the run rather than ending it. The model is told what
+ * was wrong and gets to propose something else, which is the difference
+ * between a decision and a stop — and `MAX_STEPS` bounds how many times that
+ * can go round.
+ *
+ * Separate from the HTTP handler because a decision arrives two ways now: a
+ * button on the page, and a button under a Telegram message. One of them has
+ * no request to answer and no JSON to parse, and both must move the run
+ * identically — building that twice is how they come to disagree.
+ */
+function decide(
+  userId: string,
+  runId: string,
+  decision: string,
+  note: string,
+): { ok: boolean; status: number; detail: string; body: unknown } {
   // Scoped to this person in the query, so another account's run id finds
   // nothing rather than being decided.
   const row = runRow(userId, runId);
-  if (!row) return json(404, { error: "No such run." });
+  if (!row) {
+    return {
+      ok: false,
+      status: 404,
+      detail: "That run is not one of yours.",
+      body: { error: "No such run." },
+    };
+  }
 
   const plan = pendingPlan(userId, runId);
 
   // The mutex. Everything below this line happens once.
   if (!setRunState(userId, runId, "running", undefined, "waiting")) {
     const state = String(row.run_state ?? "running");
-    return json(200, {
-      runId: runId,
-      state: state,
-      alreadyDecided: true,
-    });
+    return {
+      ok: true,
+      status: 200,
+      detail: "That was already answered.",
+      body: { runId: runId, state: state, alreadyDecided: true },
+    };
   }
 
   const approved = decision === "approve";
@@ -1674,14 +1731,20 @@ function decideRun(context: HandlerContext): HttpResponse {
     const message = e instanceof Error ? e.message : String(e);
     recordActivity(userId, runId, "error", `The run stopped: ${message}`);
     finishRun(userId, runId, "error");
-    return json(500, { error: message });
+    return {
+      ok: false,
+      status: 500,
+      detail: `The run stopped: ${message}`,
+      body: { error: message },
+    };
   }
 
-  return json(200, {
-    runId: runId,
-    state: "running",
-    mode: approved ? "act" : "plan",
-  });
+  return {
+    ok: true,
+    status: 200,
+    detail: approved ? "Approved." : "Rejected.",
+    body: { runId: runId, state: "running", mode: approved ? "act" : "plan" },
+  };
 }
 
 /**
@@ -3238,6 +3301,9 @@ function runTool(
     case "write_response": {
       const text = String(input.text ?? "");
       recordActivity(userId, runId, "response", text);
+      // And to the chat it came from, when it came from one. A no-op for a
+      // run started on the page.
+      notifyChannel(userId, runId, text);
       return { content: "Delivered.", isError: false };
     }
 
@@ -3573,6 +3639,19 @@ function requestApprovalTool(
 
   recordActivity(userId, runId, "plan", body);
 
+  // The same question, in the place the person actually is. Two buttons
+  // rather than a link back to the page, because a plan that can only be
+  // answered at a browser defeats the point of reaching somebody on their
+  // phone — and `decide` moves the run identically either way.
+  notifyChannel(userId, runId, body, {
+    inline_keyboard: [
+      [
+        { text: "Approve", callback_data: `approve:${runId}` },
+        { text: "Reject", callback_data: `reject:${runId}` },
+      ],
+    ],
+  });
+
   return {
     content: action
       ? "Paused. The person has been shown exactly what this would do and the run stops here until they answer. " +
@@ -3808,6 +3887,497 @@ function consoleBlock(result: SandboxResult): string {
 function cut(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max) + ` [cut here: ${text.length - max} more]`;
+}
+
+// ============================================================================
+// Telegram
+// ============================================================================
+
+const TELEGRAM_CHANNEL = "telegram";
+
+/**
+ * The bot token, as a *script* secret rather than a person's.
+ *
+ * It belongs to the deployment: every person messaging the bot is answered
+ * through the same credential. `resolve_secret_db` reads user secrets first
+ * and script secrets second, so a name nobody has stored personally resolves
+ * to this one.
+ *
+ * It is a secret rather than a `scriptStorage` value, and that distinction is
+ * the reason the engine grew URL substitution for this. `scriptStorage` is
+ * readable by `run_js` — which holds `read_storage` — so a bot token kept
+ * there could be lifted by three lines of model-authored code and posted
+ * anywhere. Kept here it is never handed to JavaScript at all.
+ */
+const TELEGRAM_TOKEN_SECRET = "TELEGRAM_BOT_TOKEN";
+
+/**
+ * The token Telegram echoes back in `X-Telegram-Bot-Api-Secret-Token`.
+ *
+ * In `scriptStorage`, and not in `secretStorage`, for a reason that is a
+ * limitation rather than a preference: the engine never returns a secret's
+ * value to JavaScript, and checking this one means *comparing* it. There is
+ * no primitive for "is the header equal to the stored secret", so a value
+ * that must be compared has to be one the script can read.
+ *
+ * What it is worth is bounded, which is what makes that acceptable. It
+ * authenticates inbound calls and unlocks nothing outbound: somebody holding
+ * it can pretend to be Telegram, but `enqueueFrom` still refuses a sender
+ * nobody has linked, the run still belongs to whoever linked it, and the
+ * per-link budget still applies. Losing it means forged messages from a
+ * sender who already trusts this bot — not access to the bot, and not access
+ * to anybody's account.
+ */
+const TELEGRAM_WEBHOOK_SECRET_KEY = "telegram:webhook_secret";
+
+/**
+ * The API base, with the token where Telegram insists on having it.
+ *
+ * This line is the reason `http_client.rs` grew URL substitution. Telegram
+ * takes its token as a path segment and offers no header form, so before that
+ * change this API was not reachable from a script holding the token safely.
+ */
+const TELEGRAM_API =
+  "https://api.telegram.org/bot{{secret:" + TELEGRAM_TOKEN_SECRET + "}}/";
+
+/** Telegram refuses a message over 4096 characters. */
+const MAX_TELEGRAM_CHARS = 3500;
+
+interface TelegramChat {
+  id?: number | string;
+}
+
+interface TelegramFrom {
+  id?: number | string;
+}
+
+interface TelegramMessage {
+  text?: string;
+  chat?: TelegramChat;
+  from?: TelegramFrom;
+}
+
+interface TelegramCallback {
+  id?: string;
+  data?: string;
+  from?: TelegramFrom;
+  message?: TelegramMessage;
+}
+
+interface TelegramUpdate {
+  message?: TelegramMessage;
+  callback_query?: TelegramCallback;
+}
+
+/**
+ * Log, if this execution is allowed to.
+ *
+ * The webhook runs anonymously — nobody is signed in when Telegram calls —
+ * and the anonymous tier does not hold `view_logs`, so `console.log` is
+ * refused there. Every other path in this file logs normally; this exists so
+ * the shared Telegram helpers can be called from both without the webhook
+ * failing on a diagnostic.
+ */
+function quietLog(message: string): void {
+  try {
+    console.log(message);
+  } catch (e) {
+    // No `view_logs` in this context. The message is not worth the turn.
+  }
+}
+
+/** Send a message to a chat, optionally with buttons under it. */
+function sendTelegram(
+  chatId: string,
+  text: string,
+  keyboard?: unknown,
+): boolean {
+  if (!chatId || !text.trim()) return false;
+
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    text: cut(text, MAX_TELEGRAM_CHARS),
+  };
+  if (keyboard) body.reply_markup = keyboard;
+
+  try {
+    const answer = fetch(TELEGRAM_API + "sendMessage", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!answer.ok) {
+      // The body names the reason — a bad token, a chat the bot was removed
+      // from — and none of it contains the token, which stayed in the URL the
+      // engine substituted and never wrote down.
+      quietLog(
+        `agent: telegram refused a message: ${String(answer.body).slice(0, 200)}`,
+      );
+      return false;
+    }
+    return true;
+  } catch (e) {
+    quietLog(`agent: could not reach telegram: ${String(e).slice(0, 200)}`);
+    return false;
+  }
+}
+
+/**
+ * Stop the spinner on a button the person just pressed.
+ *
+ * Telegram shows a loading state on an inline button until the bot
+ * acknowledges the callback, so skipping this leaves the button looking stuck
+ * whatever else went right.
+ */
+function answerCallback(callbackId: string, text: string): void {
+  if (!callbackId) return;
+  try {
+    fetch(TELEGRAM_API + "answerCallbackQuery", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ callback_query_id: callbackId, text: text }),
+    });
+  } catch (e) {
+    quietLog("agent: could not answer a telegram callback");
+  }
+}
+
+/**
+ * The webhook. Telegram calls this, and nobody is signed in when it does.
+ *
+ * Which is the whole difficulty, and the engine answers it rather than this
+ * script: **a script cannot name whose agent runs.** There is no call here
+ * that takes a user id. `personalTasks.enqueueFrom` names a *sender* — a
+ * channel and an identity as that channel spells it — and the engine resolves
+ * that against the links people have consented to. An unlinked sender
+ * resolves to nobody and throws.
+ *
+ * So the worst this handler can do by trusting the wrong field of a body a
+ * stranger posted is claim the *wrong sender*. It cannot name a different
+ * account, and it cannot enumerate one.
+ *
+ * What this context holds is worth knowing before editing: the anonymous tier
+ * has `use_network`, `read_secrets`, `read_storage` and `enqueue_tasks`, and
+ * has **no database access and no `view_logs`**. That is why everything here
+ * is a queue-and-reply and why the run itself is created by a task rather
+ * than inline — creating it needs to write rows, and this execution cannot.
+ *
+ * Almost everything answers 200. Telegram retries anything that is not 2xx,
+ * and a retry loop over a message this bot has already refused helps nobody;
+ * what went wrong is said in the chat instead.
+ */
+function handleTelegram(context: HandlerContext): HttpResponse {
+  if (!telegramCallIsGenuine(context)) {
+    // The one non-2xx. A caller that cannot present the token is not
+    // Telegram, and there is no chat to explain that in.
+    return json(403, { error: "Bad secret token." });
+  }
+
+  let update: TelegramUpdate;
+  try {
+    update = (context.request?.json() ?? {}) as TelegramUpdate;
+  } catch (e) {
+    return json(200, { ok: true });
+  }
+
+  if (update.callback_query) return telegramButton(update.callback_query);
+  if (update.message) return telegramIncoming(update.message);
+  // An update this bot does not handle — an edit, a reaction, a join. Taking
+  // it off Telegram's queue is the right answer.
+  return json(200, { ok: true });
+}
+
+/**
+ * Whether this really came from Telegram.
+ *
+ * The only authentication Telegram offers a webhook, and the engine's
+ * documentation is explicit that checking it is the script's job: it cannot
+ * verify that a message came from the sender it names.
+ *
+ * Compared whole rather than in constant time. The comparison is against a
+ * value an attacker cannot see and must guess in full, over a network path
+ * whose jitter dwarfs the difference a short-circuiting compare leaks; and
+ * the string comes out of `scriptStorage` on every call, so the timing is not
+ * dominated by the compare in any case.
+ */
+function telegramCallIsGenuine(context: HandlerContext): boolean {
+  let expected = "";
+  try {
+    expected = String(scriptStorage.getItem(TELEGRAM_WEBHOOK_SECRET_KEY) ?? "");
+  } catch (e) {
+    return false;
+  }
+  // Unconfigured means closed. An engine with no secret stored must not
+  // accept every caller that omits the header.
+  if (!expected) return false;
+
+  const headers = context.request?.headers;
+  const offered = headers
+    ? String(headers["x-telegram-bot-api-secret-token"] ?? "")
+    : "";
+  return offered !== "" && offered === expected;
+}
+
+/** A message from a person. */
+function telegramIncoming(message: TelegramMessage): HttpResponse {
+  const from = String(message.from?.id ?? "");
+  // `from.id` and not `chat.id`: in a group they differ, and keying on the
+  // chat would let anybody in that group start the agent of whoever linked
+  // it. The identity is the person; the chat is only where to reply.
+  const chatId = String(message.chat?.id ?? "");
+  const text = String(message.text ?? "").trim();
+  if (!from || !chatId) return json(200, { ok: true });
+
+  if (!text) {
+    sendTelegram(chatId, "I can only read text messages.");
+    return json(200, { ok: true });
+  }
+
+  let who: SenderState;
+  try {
+    who = personalTasks.sender({
+      channel: TELEGRAM_CHANNEL,
+      identity: from,
+    });
+  } catch (e) {
+    sendTelegram(chatId, "Something went wrong looking you up. Try again.");
+    return json(200, { ok: true });
+  }
+
+  if (!who.granted) {
+    return telegramOfferLink(from, chatId, who);
+  }
+
+  try {
+    personalTasks.enqueueFrom({
+      channel: TELEGRAM_CHANNEL,
+      identity: from,
+      handler: "startTelegramRun",
+      payload: { text: text, chatId: chatId },
+      maxAttempts: 1,
+    });
+  } catch (e) {
+    // Most likely the per-link budget, which is the one rate limit in the
+    // engine whose spender is chosen by whoever sent the message.
+    sendTelegram(
+      chatId,
+      "That is more than I can take at once. Give me a minute.",
+    );
+    return json(200, { ok: true });
+  }
+
+  return json(200, { ok: true });
+}
+
+/**
+ * Reply with the link that would connect this sender to an account.
+ *
+ * Sent **into the sender's own chat and nowhere else**, which is the security
+ * of the whole scheme: a link that named the sender would be one anybody
+ * could build for anybody, and linking somebody else's id first does not
+ * merely squat on it — every message they send this bot would become the
+ * squatter's turn, with their text in the squatter's storage. Being able to
+ * read this chat is the only evidence of ownership the engine can have.
+ */
+function telegramOfferLink(
+  from: string,
+  chatId: string,
+  who: SenderState,
+): HttpResponse {
+  let invitation: LinkInvitation;
+  try {
+    invitation = personalTasks.inviteLink({
+      channel: TELEGRAM_CHANNEL,
+      identity: from,
+    });
+  } catch (e) {
+    sendTelegram(
+      chatId,
+      "I could not make you a link just now. Try again shortly.",
+    );
+    return json(200, { ok: true });
+  }
+
+  // Three different situations, and saying "authorise me" to all of them
+  // would be wrong for two: a person whose grant lapsed has done this before,
+  // and one who never linked has not.
+  const lead = who.linked
+    ? who.expired
+      ? "Your permission for me has expired."
+      : "I need your permission again."
+    : "We have not met yet.";
+
+  sendTelegram(
+    chatId,
+    `${lead}\n\nOpen this to connect this chat to your account — it works once and lasts ${invitation.expiresInMinutes} minutes:\n${invitation.linkUrl}`,
+  );
+  return json(200, { ok: true });
+}
+
+/**
+ * A button press on a plan.
+ *
+ * Queued rather than acted on, for the same reason a message is: deciding
+ * writes rows, and this execution holds no database access at all. The
+ * delegated task that follows runs as whoever linked this sender, so a person
+ * can only ever answer their own run — `decide` is scoped by user id, and the
+ * callback carries no account of its own to be forged.
+ */
+function telegramButton(callback: TelegramCallback): HttpResponse {
+  const from = String(callback.from?.id ?? "");
+  const chatId = String(callback.message?.chat?.id ?? "");
+  const callbackId = String(callback.id ?? "");
+  const data = String(callback.data ?? "");
+
+  // `approve:<runId>` or `reject:<runId>`.
+  const split = data.indexOf(":");
+  const decision = split === -1 ? "" : data.slice(0, split);
+  const runId = split === -1 ? "" : data.slice(split + 1);
+
+  if (!from || (decision !== "approve" && decision !== "reject") || !runId) {
+    answerCallback(callbackId, "I did not understand that button.");
+    return json(200, { ok: true });
+  }
+
+  try {
+    personalTasks.enqueueFrom({
+      channel: TELEGRAM_CHANNEL,
+      identity: from,
+      handler: "decideFromTelegram",
+      payload: { runId: runId, decision: decision, chatId: chatId },
+      maxAttempts: 1,
+    });
+    answerCallback(
+      callbackId,
+      decision === "approve" ? "Approved." : "Rejected.",
+    );
+  } catch (e) {
+    answerCallback(callbackId, "I could not record that. Try again.");
+  }
+  return json(200, { ok: true });
+}
+
+/**
+ * Open a run for a message that arrived from Telegram.
+ *
+ * Runs as the person who linked the sender, so it can do what the webhook
+ * could not: write the run, write the prompt, and queue the first turn. It is
+ * `startRun` with the session replaced by the link, and the chat recorded so
+ * the answer knows where to go.
+ */
+function startTelegramRun(context: HandlerContext): void {
+  const userId = signedInUser(context);
+  if (!userId) {
+    quietLog("agent: a telegram run resolved to nobody; abandoning it");
+    return;
+  }
+
+  const task = context.meta?.task;
+  const payload = (task?.payload ?? {}) as { text?: string; chatId?: string };
+  const text = String(payload.text ?? "").trim();
+  const chatId = String(payload.chatId ?? "");
+  if (!text || !chatId) return;
+
+  if (!secretStorage.exists(SECRET_NAME)) {
+    sendTelegram(
+      chatId,
+      "You have not stored an API key yet — runs are billed to your own. Add one on the agent page first.",
+    );
+    return;
+  }
+
+  const runId = newRunId();
+
+  // Everything from here writes, and a delegated task that may not write
+  // throws rather than returning — which without this would be silence in
+  // the chat, since a failed task has no other way to reach the person. A
+  // grant covering reading and not writing is the likeliest cause, and it is
+  // worth naming rather than leaving them to guess.
+  try {
+    appendMessage(userId, runId, "user", [{ type: "text", text: text }]);
+    recordActivity(userId, runId, "prompt", text);
+
+    const next = personalTasks.enqueue({
+      handler: "advanceRun",
+      payload: { runId: runId },
+      maxAttempts: 1,
+    });
+    openRun(userId, runId, next.taskId);
+    // Written after opening rather than as part of it, so `openRun` stays the
+    // one shape every run starts in and the page path is untouched.
+    const row = runRow(userId, runId);
+    if (row) {
+      writeRow(
+        () =>
+          database.update(
+            "runs",
+            Number(row.id),
+            JSON.stringify({
+              channel: TELEGRAM_CHANNEL,
+              chat_id: chatId,
+              updated_ms: Date.now(),
+            }),
+          ),
+        "recording where a run came from",
+      );
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    quietLog(`agent: could not start a telegram run: ${message}`);
+    sendTelegram(chatId, `I could not start: ${message}`);
+  }
+}
+
+/** Carry out a button press, as the person who pressed it. */
+function decideFromTelegram(context: HandlerContext): void {
+  const userId = signedInUser(context);
+  if (!userId) return;
+
+  const task = context.meta?.task;
+  const payload = (task?.payload ?? {}) as {
+    runId?: string;
+    decision?: string;
+    chatId?: string;
+  };
+  const runId = String(payload.runId ?? "");
+  const decision = String(payload.decision ?? "");
+  const chatId = String(payload.chatId ?? "");
+  if (!runId || (decision !== "approve" && decision !== "reject")) return;
+
+  const outcome = decide(userId, runId, decision, "");
+  if (!outcome.ok && chatId) {
+    sendTelegram(chatId, outcome.detail);
+  }
+}
+
+/** Where this run's answers go, if not only to the page. */
+function channelFor(
+  userId: string,
+  runId: string,
+): { channel: string; chatId: string } | null {
+  const row = runRow(userId, runId);
+  if (!row) return null;
+  const channel = String(row.channel ?? "");
+  const chatId = String(row.chat_id ?? "");
+  if (channel !== TELEGRAM_CHANNEL || !chatId) return null;
+  return { channel: channel, chatId: chatId };
+}
+
+/**
+ * Send something to the chat a run came from, if it came from one.
+ *
+ * A no-op for a run started on the page, which is what keeps every caller
+ * from having to know which kind of run it is in.
+ */
+function notifyChannel(
+  userId: string,
+  runId: string,
+  text: string,
+  keyboard?: unknown,
+): void {
+  const to = channelFor(userId, runId);
+  if (!to) return;
+  sendTelegram(to.chatId, text, keyboard);
 }
 
 // ============================================================================
