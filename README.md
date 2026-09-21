@@ -227,6 +227,54 @@ in `scriptStorage` under a fingerprint of the skill files and their
 modification times, so the steady state is two asset reads a turn rather than
 one per skill.
 
+### The agent writes them too
+
+`write_skill` lets the agent write down a procedure it has just worked out.
+It **always** pauses and asks, in both modes, because a skill is an asset of
+the script — it changes what this agent does for everyone who uses it, and
+keeps doing so until somebody notices. A note is one person's; a skill is not.
+
+It also cannot write one itself. `write_assets` is editor-tier and
+`delegation.rs` caps background work at `authenticated` on purpose, so a
+delegated turn can never hold it. The write happens where the _approval_ does,
+in your own request under your own rights — which is why a skill approved on
+the page is written, and one approved from a **Telegram button is refused**.
+That is the engine's rule holding rather than a gap, and the refusal says so.
+
+### Promoting one into the repository
+
+**A skill the agent writes does not survive the next `pull_from_git`.** Git
+sync is a sync rather than an append — a file the repository does not have is
+a file the engine should not keep — so a deploy removes anything the agent
+wrote into the asset store. Nothing is wrong when that happens; it is the
+deployment model doing what it says.
+
+So treat an agent-written skill as a **proposal**. Keep the ones worth keeping
+by committing them:
+
+```bash
+# 1. Read what the agent wrote
+read_asset script=<this script> asset="skills/<name>/SKILL.md"
+
+# 2. Put it in the repository, editing it on the way through
+agent/skills/<name>/SKILL.md
+
+# 3. Commit, push, pull — the pull now preserves it rather than deleting it
+```
+
+The layout needs no configuration: `agent/` is the script because it holds
+`main.ts`, so everything under it lands as an asset at the same relative path,
+and `agent/skills/<name>/SKILL.md` becomes `skills/<name>/SKILL.md`.
+
+Editing on the way through is the point rather than a chore. The first skill
+this agent wrote for itself instructed it to run `git log` — which it cannot
+do, having no shell — and that was only going to be caught by a person reading
+it.
+
+`agent/skills/.markdownlint.json` turns off `MD041` for this directory: a
+`SKILL.md` opens with front matter rather than a heading, and that rule is
+about documents for people.
+
 ## What a run costs
 
 Every turn resends the run so far, so the bill grows with the length of a run
