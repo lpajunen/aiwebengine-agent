@@ -142,8 +142,8 @@ since the run is not the tab's.
 
 A run is `running`, `cancelled` or `done` — and `waiting`, which nothing sets
 yet. That last one is the seam for plan approval and per-tool permission:
-those are not separate features but the same question, *may this run take
-another turn*, and the half that stops a run is already written once for all
+those are not separate features but the same question, _may this run take
+another turn_, and the half that stops a run is already written once for all
 of them. What is missing is the half that resumes one.
 
 ## Skills
