@@ -87,28 +87,27 @@ meant for the model talking to itself.
 
 ## Where to start next
 
-Compaction and [code as the action](#smolagents-and-codeact-code-as-the-action)
-are both built, which took the first and the largest off this list.
+Compaction, [code as the action](#smolagents-and-codeact-code-as-the-action)
+and [the suspended run](#three-features-one-primitive) are built, which takes
+the first, the largest and the one everything else was waiting on off this
+list.
 
-1. **Resuming a suspended run.** The half that stops one is built and every
-   kind of stop goes through it; `RunState` already names `waiting`. What is
-   missing is the half that resumes, which is
-   [plan mode, permission prompts and approval all at once](#three-features-one-primitive).
-   It moved to the top the moment `run_js` landed: the tool holds only reads
-   today **because there is nowhere to put an approval**, so this is what
-   decides whether model-written code is ever allowed to write anything.
-2. **Memory the person can read.** `list_memories` made the notes readable by
+1. **Memory the person can read.** `list_memories` made the notes readable by
    the model. [The person still cannot see them](#memory-the-person-can-read),
    and an agent that remembers things about somebody without showing them is
    one they cannot correct. The smallest item here and the one with the most
    trust in it.
-3. **Skills the agent writes.** The authoring half shipped; the half worth
+2. **Skills the agent writes.** The authoring half shipped; the half worth
    having is [the agent writing its own](#skills-as-markdown-written-by-the-agent),
-   and `revisions.rs` makes every one of them revertible.
-4. **The first channel adapter.** Buildable in an afternoon now, and
-   deliberately behind item 1: an inbound message is the third leg of the
-   trifecta and [the defence is a mode](#what-follows-a-channel), not a list.
-5. **Mounting the engine's own MCP tools** — `McpClient` is in the API and
+   and `revisions.rs` makes every one of them revertible. It is now a smaller
+   job than it was: `write_assets` is a capability the act set can be given,
+   and the approval it would go behind exists.
+3. **The first channel adapter.** Buildable in an afternoon, and the thing
+   that was blocking it is gone — an inbound message is the third leg of the
+   trifecta and [the defence is a mode](#what-follows-a-channel), which is now
+   a mode that exists. A run started by a linked sender stays in `plan`; only
+   the account owner's own prompt can approve one into `act`.
+4. **Mounting the engine's own MCP tools** — `McpClient` is in the API and
    [the catch is a design question](#the-engine-is-already-an-mcp-server)
    rather than a wiring one.
 
@@ -129,7 +128,8 @@ Which is now everything. Built so far: prompt caching, streaming, skills as
 assets, `list_memories`, the usage display, and cancel and interject on a
 `runs` table beside `personalTasks.cancel`.
 
-Also built since: compaction, and `run_js` over `sandbox.run`.
+Also built since: compaction, `run_js` over `sandbox.run`, and plan/act with
+the approval that moves between them.
 
 Still ahead: slash commands, project instructions, attachments,
 per-run model choice, the run list, mounting other MCP servers (`McpClient`
@@ -602,17 +602,57 @@ the same as LangGraph's
 wearing three names. Built separately they end up disagreeing about what a
 suspended run is.
 
-**Half built, on purpose.** Cancel and interject needed the stopping half, so
-it was written once and every kind of stop goes through it: a run has a state
-and `advanceRun` proceeds only from `running`. `RunState` already names
-`waiting` — a run suspended for an answer only a person can give — and nothing
-sets it.
+**Built**, and the bet on writing the stopping half once paid in the most
+direct way available: **the suspending half needed no new code at all.**
 
-So what is left is genuinely only the resuming half, and it is the same three
-pieces this section already lists: a tool that ends the chain without
-enqueuing the next turn, a row the page renders with approve and reject, and
-approval enqueuing the turn. Nothing has to be unpicked first, which was the
-point of not building them apart.
+`advanceRun` already re-read the run's state after its tools had run, and
+declined to queue a successor unless it was still `running` — written for a
+cancel landing during a model call. So `request_approval` setting `waiting`
+_is_ the suspend. The turn ends with its `tool_result` stored beside the
+`tool_use` that asked for it, which is a point the conversation can legally
+resume from, and nothing queues the next turn. One gate, three reasons to
+pass through it, exactly as this section predicted.
+
+Four things the resuming half turned out to need.
+
+**The ordering is the whole design.** `/agent/decide` takes the transition out
+of `waiting` **first and conditionally**, before it writes a message or queues
+anything, because that single write is the mutex: two tabs pressing approve
+both arrive and exactly one moves the run. This is the opposite of what
+`advanceRun` does — it queues, then sets the state — and both are right, since
+there the loser of a race has queued nothing, and here it would have queued a
+turn charged to somebody's own key before discovering it lost.
+
+**Then the message, then the task**, for a smaller reason that is just as
+sharp: the queued turn is a thing that reads the conversation, so enqueueing
+before appending lets it start against a history that does not yet say it was
+approved.
+
+**`write_script_data` is not in the act set and should never be.** It is the
+one capability that would let model-written code reach the agent's own control
+plane — `runs` holds the mode the capability set is selected by, `plans` holds
+the row being decided, `messages` holds what the next turn reasons from — so a
+turn holding it could approve its own plan, and the gate would be one the
+thing being gated can open. The same decision blocks the other way in: a
+forged call to the decide handler from inside the sandbox dies at its first
+read, because `read_script_data` is withheld too. Both directions were tested
+rather than argued: the strongest version of the forgery — correct auth shape,
+working `json()`, naming a genuinely waiting run, launched from a run already
+approved into `act` — gets `404 No such run`, and the plan stays pending.
+
+**A rejection resumes rather than ends**, carrying the person's note, so the
+model is told what was wrong and can propose something else. A rejection that
+cannot say why teaches one bit and the next plan is a guess. `MAX_STEPS`
+bounds how many times that goes round.
+
+The mode is stored as a string rather than a boolean, which is this section's
+own caution about drifting to three or four modes taken at face value: a third
+rung is a row value and a branch, not a schema change.
+
+One cost worth knowing: the approval tool is withdrawn in `act`, so the turn
+after an approval rewrites the cached prefix — the tools sit at the front of
+it. Once per run, on the run that has just been given permission to do the
+expensive half of its work.
 
 #### Where it pays off most
 
@@ -959,11 +999,11 @@ resent on every turn after it — so the frames are filtered to the ones naming
 the model's own source. Same argument as every other output-shape decision
 here, just applied to the part nobody looks at.
 
-What it does _not_ do is write anything, and that is the one thing to know
-before reading the code: the tool holds `view_logs`, `use_network`,
-`read_assets` and `read_storage`, and nothing else. Not because writes are
-frightening but because the place to spend a write is an approval step, and
-that is [the next item](#three-features-one-primitive) rather than this one.
+What it does not do is write anything **until somebody says so**. The tool
+holds `view_logs`, `use_network`, `read_assets` and `read_storage` while a run
+is planning, and gains `write_storage` once a plan has been approved — the
+approval step that was the next item when this was written is now
+[built](#three-features-one-primitive), and this is what it buys.
 
 ### OpenHands
 
