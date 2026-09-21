@@ -291,6 +291,9 @@ interface PlanRow {
   body: string;
   decision: string;
   note?: string;
+  /** The tool call this plan defers, if it defers one. */
+  action?: string;
+  payload?: string;
   created_ms: number;
 }
 
@@ -951,6 +954,11 @@ function init(): void {
           { name: "user_id", type: "text" },
           { name: "run_id", type: "text" },
           { name: "body", type: "text" },
+          // What approving this plan actually does, when the plan was raised
+          // by a tool rather than written by the model. Empty for a plan the
+          // model composed itself, which approval can only re-authorise.
+          { name: "action", type: "text" },
+          { name: "payload", type: "text" },
           { name: "decision", type: "text" },
           // What the person said as they decided. A rejection with nothing
           // attached tells the model it was wrong and not how, which spends
@@ -1558,6 +1566,12 @@ function decideRun(context: HandlerContext): HttpResponse {
     );
   }
 
+  // Carried out here rather than left to the resumed model, which does not
+  // reliably do it. Before the mode is widened, because this is the person's
+  // own request and does not need the run to hold anything.
+  const carriedOut =
+    approved && plan ? performApproved(userId, runId, plan) : null;
+
   if (approved) {
     // What the mode is for. Written before the turn is queued, so the turn
     // that reads it cannot see the old one.
@@ -1578,7 +1592,11 @@ function decideRun(context: HandlerContext): HttpResponse {
   const told = approved
     ? "[The person approved your plan." +
       (note ? ' They added: "' + note + '"' : "") +
-      " run_js can now write. Carry it out.]"
+      (carriedOut
+        ? " It has been carried out for you — " +
+          carriedOut +
+          ". Do not repeat the call; tell them briefly and stop.]"
+        : " run_js can now write. Carry it out.]")
     : "[The person rejected your plan." +
       (note ? ' They said: "' + note + '"' : "") +
       " Do not carry it out. Propose something else, or tell them why you cannot.]";
@@ -3076,6 +3094,8 @@ function runTool(
           userId,
           runId,
           `Remember "${key}":\n\n${value}`,
+          "remember",
+          { key: key, value: value },
         );
       }
 
@@ -3319,6 +3339,8 @@ function requestApprovalTool(
   userId: string,
   runId: string,
   plan: string,
+  action?: string,
+  payload?: unknown,
 ): { content: string; isError: boolean } {
   const body = plan.trim();
   if (!body) {
@@ -3355,6 +3377,8 @@ function requestApprovalTool(
           user_id: userId,
           run_id: runId,
           body: body,
+          action: action ?? "",
+          payload: payload === undefined ? "" : JSON.stringify(payload),
           decision: "pending",
           note: "",
           created_ms: Date.now(),
@@ -3367,11 +3391,76 @@ function requestApprovalTool(
   recordActivity(userId, runId, "plan", body);
 
   return {
-    content:
-      "Paused. The person has been shown your plan and the run stops here until they answer. " +
-      "If they approve, your next turn can write; if they reject, you will be told why.",
+    content: action
+      ? "Paused. The person has been shown exactly what this would do and the run stops here until they answer. " +
+        "If they approve it is carried out for you, so do not repeat the call; if they reject, you will be told why."
+      : "Paused. The person has been shown your plan and the run stops here until they answer. " +
+        "If they approve, your next turn can write; if they reject, you will be told why.",
     isError: false,
   };
+}
+
+/**
+ * Do the thing a person just approved.
+ *
+ * The reason this exists rather than letting the resumed model repeat its own
+ * call: it does not repeat it. Asked to remember a preference, the model
+ * raised the request, the person approved, the run resumed — and the next turn
+ * answered "Done. I'll give you concise answers from now on" with no tool call
+ * at all. Nothing was stored, and the person was told otherwise, which is the
+ * same failure as before the approval existed and one step further from being
+ * noticed.
+ *
+ * So a plan that defers a call carries that call, and approving it runs it.
+ * That is also what the button means: the person pressed approve on the words
+ * `Remember "x": y`, not on an intention to try again. Executing the stored
+ * payload guarantees what happens is what was shown — the model cannot
+ * paraphrase it, forget it, or decide it was satisfied by saying so.
+ *
+ * It runs here, in the person's own request, which is the one context where
+ * `personalStorage` resolves to them.
+ *
+ * Returns what to tell the model, or null when there was nothing to do.
+ */
+function performApproved(
+  userId: string,
+  runId: string,
+  plan: PlanRow,
+): string | null {
+  const action = String(plan.action ?? "");
+  if (!action) return null;
+
+  if (action !== "remember") {
+    // A plan naming something this version does not know how to do. Better to
+    // say so than to resume as though it had been carried out.
+    console.log(`agent: approved an unknown action "${action}"`);
+    return null;
+  }
+
+  let args: { key?: string; value?: string } = {};
+  try {
+    args = JSON.parse(String(plan.payload ?? "{}")) as typeof args;
+  } catch (e) {
+    return null;
+  }
+  const key = String(args.key ?? "").trim();
+  if (!key) return null;
+
+  try {
+    personalStorage.setItem(NOTE_PREFIX + key, String(args.value ?? ""));
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    recordActivity(
+      userId,
+      runId,
+      "error",
+      `Could not store the note: ${message}`,
+    );
+    return `it could not be stored: ${message}`;
+  }
+
+  recordActivity(userId, runId, "tool", `Remembered "${key}".`);
+  return `the note "${key}" is stored`;
 }
 
 /**
