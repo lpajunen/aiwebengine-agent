@@ -190,7 +190,17 @@ would never fire once. What crosses 4096 is a long conversation, which is
 exactly the run worth making cheaper. Moving up a tier lowers the threshold
 (512 on `claude-opus-5`), so caching starts paying sooner there, not later.
 
-Every turn logs what it spent, because a prefix that stops matching still
+The page shows what the run on screen has cost — turns, tokens in and out,
+how much of the input came from cache, an estimate in dollars, and a meter for
+the largest prompt against the model's context window. Each person pays with
+their own key, so the bill is theirs to see.
+
+The dollar figure is an estimate at the rates in `PRICES`, **and those move
+with `MODEL`** — a stale price list still renders and still looks
+authoritative. The rates are kept apart rather than averaged because caching
+is most of what a run costs or saves.
+
+Every turn also logs what it spent, because a prefix that stops matching still
 answers and is simply billed in full:
 
 ```

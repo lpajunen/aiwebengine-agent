@@ -25,6 +25,10 @@ const el = {
   prompt: document.getElementById("prompt"),
   run: document.getElementById("run"),
   runStatus: document.getElementById("run-status"),
+  spend: document.getElementById("spend"),
+  spendText: document.getElementById("spend-text"),
+  meterFill: document.getElementById("meter-fill"),
+  meterText: document.getElementById("meter-text"),
   activity: document.getElementById("activity"),
 };
 
@@ -44,6 +48,14 @@ let running = false;
 // task a lane and defaults it to the person, so two prompts wait for each
 // other instead of interleaving.
 let pending = "";
+
+// What the run on screen has cost. Loaded whole with the history, then added
+// to as each turn lands — the totals are the script's, not this page's
+// arithmetic on something it might have missed.
+let spend = null;
+let pricing = null;
+let contextWindow = 0;
+let shownRun = "";
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -82,6 +94,89 @@ function entryNode(entry, live) {
 function addEntry(entry) {
   entries.push(entry);
   render();
+}
+
+// ---------------------------------------------------------------------------
+// What it cost
+// ---------------------------------------------------------------------------
+
+const EMPTY_SPEND = {
+  turns: 0,
+  cached: 0,
+  wrote: 0,
+  fresh: 0,
+  output: 0,
+  largestPrompt: 0,
+};
+
+function addSpend(into, delta) {
+  return {
+    turns: into.turns + (delta.turns || 0),
+    cached: into.cached + (delta.cached || 0),
+    wrote: into.wrote + (delta.wrote || 0),
+    fresh: into.fresh + (delta.fresh || 0),
+    output: into.output + (delta.output || 0),
+    largestPrompt: Math.max(into.largestPrompt, delta.largestPrompt || 0),
+  };
+}
+
+// Dollars, at the rates the script costed the model with. Approximate on
+// purpose and labelled as such: it is the right order of magnitude for
+// somebody deciding whether to keep going, and it is not an invoice.
+function estimateCost(s) {
+  if (!pricing) return null;
+  return (
+    (s.fresh * pricing.freshPerM +
+      s.wrote * pricing.cacheWritePerM +
+      s.cached * pricing.cacheReadPerM +
+      s.output * pricing.outputPerM) /
+    1000000
+  );
+}
+
+function money(amount) {
+  if (amount >= 0.01) return "$" + amount.toFixed(2);
+  if (amount > 0) return "<$0.01";
+  return "$0.00";
+}
+
+function thousands(n) {
+  return n.toLocaleString();
+}
+
+function renderSpend() {
+  if (!spend || spend.turns === 0) {
+    el.spend.hidden = true;
+    return;
+  }
+  el.spend.hidden = false;
+
+  const promptTokens = spend.cached + spend.wrote + spend.fresh;
+  const parts = [
+    spend.turns === 1 ? "1 turn" : spend.turns + " turns",
+    thousands(promptTokens) + " in",
+    thousands(spend.output) + " out",
+  ];
+  // Only worth saying when it happened. Below the model's minimum cacheable
+  // prefix nothing is cached, and a permanent "0 from cache" would read as a
+  // fault rather than as a short run.
+  if (spend.cached > 0) {
+    const saved = Math.round((spend.cached / promptTokens) * 100);
+    parts.push(thousands(spend.cached) + " from cache (" + saved + "%)");
+  }
+  const cost = estimateCost(spend);
+  if (cost !== null) parts.push("≈ " + money(cost));
+  el.spendText.textContent = parts.join(" · ");
+
+  if (contextWindow > 0) {
+    const used = Math.min(spend.largestPrompt / contextWindow, 1);
+    el.meterFill.style.width = (used * 100).toFixed(1) + "%";
+    el.meterText.textContent =
+      thousands(spend.largestPrompt) +
+      " / " +
+      thousands(contextWindow) +
+      " context";
+  }
 }
 
 function setStatus(node, text, isError) {
@@ -284,6 +379,12 @@ async function start() {
     render();
     showKeyState(history.hasKey);
 
+    pricing = history.pricing ?? null;
+    contextWindow = history.contextWindow ?? 0;
+    shownRun = history.runId ?? "";
+    spend = history.spend ?? EMPTY_SPEND;
+    renderSpend();
+
     // Say up front that a run will need permission, rather than letting them
     // write a prompt and meet the refusal afterwards.
     const auth = history.authorization;
@@ -337,6 +438,15 @@ async function start() {
       // outliving the turn that was writing it.
       const wasPending = pending !== "";
       pending = "";
+
+      // A new run starts its own tally. Keyed on the prompt rather than on
+      // the run id changing, so a stray message from an older run cannot
+      // reset what is on screen.
+      if (payload.kind === "prompt") {
+        shownRun = payload.runId;
+        spend = EMPTY_SPEND;
+        renderSpend();
+      }
 
       // The end of a run is an activity like any other now. It used to be the
       // reply to the step the page was waiting on, and there is nothing to

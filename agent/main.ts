@@ -61,6 +61,30 @@
  */
 const MODEL = "claude-haiku-4-5";
 
+/**
+ * What the model costs, in dollars per million tokens.
+ *
+ * **These move with `MODEL`.** A price list is the one constant here that goes
+ * wrong quietly: the wrong number still renders, still looks authoritative,
+ * and tells somebody spending their own money something false. So it sits
+ * against the model above rather than anywhere more convenient, and the four
+ * rates are kept apart rather than folded into one — caching is most of what
+ * this run costs or saves, and an average would hide exactly the thing the
+ * display exists to show.
+ *
+ * The multipliers are the API's, not this script's: a cache read is a tenth
+ * of the input rate and a cache write is a quarter more than it.
+ */
+const PRICES = {
+  freshPerM: 1.0,
+  cacheWritePerM: 1.25,
+  cacheReadPerM: 0.1,
+  outputPerM: 5.0,
+};
+
+/** What the model can hold, for the meter on the page. */
+const CONTEXT_WINDOW = 200000;
+
 const API_URL = "https://api.anthropic.com/v1/messages";
 
 /**
@@ -152,6 +176,29 @@ interface Memory {
   key: string;
   preview: string;
   chars: number;
+}
+
+/**
+ * What a run has spent so far.
+ *
+ * Summed over turns, except `largestPrompt`, which is the biggest single
+ * prompt the run sent — the sum of prompts is not a context measurement,
+ * because every turn resends the one before it.
+ */
+interface Spend {
+  turns: number;
+  cached: number;
+  wrote: number;
+  fresh: number;
+  output: number;
+  largestPrompt: number;
+}
+
+interface UsageRow {
+  cached_tokens: number;
+  wrote_tokens: number;
+  fresh_tokens: number;
+  out_tokens: number;
 }
 
 // ============================================================================
@@ -481,6 +528,27 @@ function init(): void {
     'creating the table "activities"',
   );
 
+  // Column names avoid anything SQL might claim: `output` and `usage` are
+  // both words a database has opinions about, and a rejected ensureTable is
+  // the failure this script has already shipped once.
+  must(
+    database.ensureTable(
+      "turn_usage",
+      JSON.stringify({
+        columns: [
+          { name: "user_id", type: "text" },
+          { name: "run_id", type: "text" },
+          { name: "cached_tokens", type: "bigint" },
+          { name: "wrote_tokens", type: "bigint" },
+          { name: "fresh_tokens", type: "bigint" },
+          { name: "out_tokens", type: "bigint" },
+          { name: "created_ms", type: "bigint" },
+        ],
+      }),
+    ),
+    'creating the table "turn_usage"',
+  );
+
   routeRegistry.registerAssetRoute("/agent", "ui.html");
   routeRegistry.registerAssetRoute("/agent/app.js", "app.js");
 
@@ -766,6 +834,12 @@ function readHistory(context: HandlerContext): HttpResponse {
   ) as ActivityRow[];
 
   const ordered = Array.isArray(rows) ? rows.slice().reverse() : [];
+
+  // The run the page is about to show the tail of — its spend is the one
+  // worth loading, and it is the only one bounded by `MAX_STEPS`.
+  const latestRun =
+    ordered.length > 0 ? String(ordered[ordered.length - 1].run_id ?? "") : "";
+
   return json(200, {
     activities: ordered.map((row) => ({
       runId: row.run_id,
@@ -775,6 +849,12 @@ function readHistory(context: HandlerContext): HttpResponse {
     })),
     hasKey: secretStorage.exists(SECRET_NAME),
     authorization: personalTasks.authorization(),
+    runId: latestRun,
+    spend: runSpend(userId, latestRun),
+    // Sent rather than duplicated in the page, so the rates the numbers were
+    // costed with cannot drift away from the model that produced them.
+    pricing: PRICES,
+    contextWindow: CONTEXT_WINDOW,
   });
 }
 
@@ -969,6 +1049,7 @@ function readModelStream(
   flush(turn, userId, runId);
 
   logUsage(turn);
+  recordUsage(userId, runId, turn.usage);
 
   if (!turn.sawStop) {
     // The body ended early. Saying so is better than returning a turn that
@@ -1271,6 +1352,122 @@ function readErrorMessage(body: string): string {
   } catch (e) {
     return body.slice(0, 200);
   }
+}
+
+// ============================================================================
+// What a run costs
+// ============================================================================
+
+/**
+ * Keep what this turn spent, and tell the person's open tabs.
+ *
+ * Written as one row per turn rather than a running total updated in place.
+ * Appending cannot lose an earlier turn to a read-modify-write, and the sum
+ * of twelve rows is not worth a column — `MAX_STEPS` is the bound on how many
+ * there can be.
+ *
+ * Sent as a delta rather than a total because the page is already keeping one:
+ * it loads the authoritative sum with its history and adds each turn as it
+ * lands, so a message that never arrives is corrected by the next reload
+ * rather than being wrong forever.
+ *
+ * Failing to record is not failing the turn. The model has already answered
+ * and the person has already paid; losing the bookkeeping is worth strictly
+ * less than losing the answer.
+ */
+function recordUsage(userId: string, runId: string, usage: StreamUsage): void {
+  const cached = usage.cache_read_input_tokens ?? 0;
+  const wrote = usage.cache_creation_input_tokens ?? 0;
+  const fresh = usage.input_tokens ?? 0;
+  const output = usage.output_tokens ?? 0;
+  if (cached + wrote + fresh + output === 0) return;
+
+  try {
+    must(
+      database.insert(
+        "turn_usage",
+        JSON.stringify({
+          user_id: userId,
+          run_id: runId,
+          cached_tokens: cached,
+          wrote_tokens: wrote,
+          fresh_tokens: fresh,
+          out_tokens: output,
+          created_ms: Date.now(),
+        }),
+      ),
+      "storing what a turn cost",
+    );
+  } catch (e) {
+    console.log("agent: could not record what a turn cost: " + String(e));
+    return;
+  }
+
+  routeRegistry.sendStreamMessageFiltered(
+    STREAM_PATH,
+    {
+      runId: runId,
+      kind: "spend",
+      message: "",
+      at: Date.now(),
+      spend: {
+        turns: 1,
+        cached: cached,
+        wrote: wrote,
+        fresh: fresh,
+        output: output,
+        largestPrompt: cached + wrote + fresh,
+      },
+    },
+    JSON.stringify({ userId: userId }),
+    "subset",
+  );
+}
+
+/** What one run has spent, read back from the rows its turns wrote. */
+function runSpend(userId: string, runId: string): Spend {
+  const spend: Spend = {
+    turns: 0,
+    cached: 0,
+    wrote: 0,
+    fresh: 0,
+    output: 0,
+    largestPrompt: 0,
+  };
+  if (!runId) return spend;
+
+  let rows: UsageRow[] = [];
+  try {
+    const answer = must(
+      database.query(
+        "turn_usage",
+        JSON.stringify({ user_id: userId, run_id: runId }),
+        MAX_STEPS + 1,
+        "id",
+        "asc",
+      ),
+      "reading what a run cost",
+    ) as UsageRow[];
+    if (Array.isArray(answer)) rows = answer;
+  } catch (e) {
+    // A page that cannot say what a run cost is better than a page that will
+    // not load.
+    return spend;
+  }
+
+  for (const row of rows) {
+    const cached = Number(row.cached_tokens ?? 0);
+    const wrote = Number(row.wrote_tokens ?? 0);
+    const fresh = Number(row.fresh_tokens ?? 0);
+    spend.turns += 1;
+    spend.cached += cached;
+    spend.wrote += wrote;
+    spend.fresh += fresh;
+    spend.output += Number(row.out_tokens ?? 0);
+    const prompt = cached + wrote + fresh;
+    if (prompt > spend.largestPrompt) spend.largestPrompt = prompt;
+  }
+  return spend;
 }
 
 // ============================================================================
