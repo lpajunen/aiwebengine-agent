@@ -266,6 +266,31 @@ The layout needs no configuration: `agent/` is the script because it holds
 `main.ts`, so everything under it lands as an asset at the same relative path,
 and `agent/skills/<name>/SKILL.md` becomes `skills/<name>/SKILL.md`.
 
+### Knowing there is one to promote
+
+**Neither the revision history nor the git status will tell you**, and that is
+worth knowing before you go looking. An asset written from JavaScript records
+no revision and does not move the binding off `in_sync` — written one and
+watched both report nothing — so a skill sitting only in the asset store is
+invisible to `list_revisions` and `get_git_status` alike, right up to the pull
+that deletes it.
+
+What does tell you is the asset list, compared against the repository:
+
+```bash
+# what the engine has
+list_assets script=<this script>     # skills/<name>/SKILL.md entries
+
+# what the repository has
+ls agent/skills/
+```
+
+Anything in the first and not the second is unpromoted, and will go on the
+next deploy. The agent also says so when it writes one — the activity reads
+`Wrote the skill "x". It lives in this engine's assets — commit it to
+agent/skills/x/SKILL.md to keep it` — which is the moment you are most likely
+to be looking.
+
 Editing on the way through is the point rather than a chore. The first skill
 this agent wrote for itself instructed it to run `git log` — which it cannot
 do, having no shell — and that was only going to be caught by a person reading

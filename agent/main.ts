@@ -3915,7 +3915,19 @@ function performSkillWrite(
     return `it was not written: ${why}`;
   }
 
-  recordActivity(userId, runId, "tool", `Wrote the skill "${name}".`);
+  // Said where the person is looking, because nothing else will tell them.
+  // An asset written from JavaScript records **no revision** and does not move
+  // the git binding off `in_sync` — verified by writing one and watching both
+  // report nothing — so a skill sitting only in the asset store is invisible
+  // to `list_revisions` and to `get_git_status` alike, right up until a pull
+  // deletes it for not being in the repository.
+  recordActivity(
+    userId,
+    runId,
+    "tool",
+    `Wrote the skill "${name}". It lives in this engine's assets — commit it to ` +
+      `agent/skills/${name}/SKILL.md to keep it, if this deployment syncs from a repository.`,
+  );
   return `the skill "${name}" is written`;
 }
 
