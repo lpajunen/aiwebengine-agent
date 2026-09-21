@@ -115,7 +115,19 @@ const SECRET_NAME = "ANTHROPIC_API_KEY";
  */
 const MAX_TOKENS = 1024;
 
-/** Assistant turns one run may take before the script stops it. */
+/**
+ * Assistant turns one run may take before the script stops it.
+ *
+ * This is now the only thing bounding the length of a run: compaction keeps
+ * the conversation from growing without limit, so a run ends because it has
+ * taken enough turns rather than because it ran out of room. Raising it is
+ * therefore a decision about money rather than about correctness — every turn
+ * is a model call on somebody's own key.
+ *
+ * Counted on the run's row rather than by scanning the history, which stopped
+ * working when compaction started throwing the history away: a compacted run
+ * has no assistant messages left to count.
+ */
 const MAX_STEPS = 12;
 
 const STREAM_PATH = "/agent/events";
@@ -143,6 +155,39 @@ const MAX_HISTORY_ROWS = 60;
 
 /** Asides delivered to one turn. Beyond this they wait for the next. */
 const MAX_INTERJECTIONS = 10;
+
+/**
+ * When a run's conversation is folded into a summary and carried on.
+ *
+ * Either trigger is enough. Tokens are the real measure and come from the
+ * last turn's `usage`; rows are the backstop that keeps `MAX_HISTORY_ROWS`
+ * from ever being reached, since hitting it stops the run outright.
+ *
+ * The token figure is the dial worth turning. Too low and a run pays for a
+ * summary it did not need; too high and every turn carries a conversation
+ * nobody is reading. It is well under the model's 200k window on purpose —
+ * what makes a long run expensive here is resending it every turn, not
+ * running out of room.
+ */
+const COMPACT_AT_TOKENS = 30000;
+const COMPACT_AT_ROWS = Math.floor(MAX_HISTORY_ROWS * 0.7);
+
+/**
+ * What the summariser is told to keep.
+ *
+ * Everything before the summary is discarded, so this is all the model will
+ * have of its own earlier work — which is why the instruction is about what
+ * to retain rather than about being brief.
+ */
+const COMPACT_PROMPT = [
+  "You are compacting a conversation so it can continue in less space.",
+  "Write a summary that lets the assistant carry on as if it still",
+  "remembered everything. Keep: what the person originally asked for, in",
+  "their words where it matters; what has been established or decided;",
+  "what tools were used and what they returned that still matters; what is",
+  "left to do. Drop: pleasantries, restatements, and anything already",
+  "superseded. Write it as notes to yourself, not as a reply to anyone.",
+].join(" ");
 
 const SYSTEM_PROMPT = [
   "You are an assistant embedded in a web page.",
@@ -229,6 +274,7 @@ interface RunRow {
   run_id: string;
   run_state: string;
   task_id: string;
+  steps?: number;
 }
 
 interface InterjectionRow {
@@ -391,6 +437,11 @@ const READ_SKILL_TOOL: ToolSpec = {
  * tool a type describing only the properties *that* tool has, so a list of
  * them is a union no fourth tool can join.
  */
+/** What makes one model call differ from the ordinary kind. */
+interface CallOptions {
+  summarise?: boolean;
+}
+
 interface ToolSpec {
   name: string;
   description: string;
@@ -575,6 +626,7 @@ function init(): void {
           { name: "run_id", type: "text" },
           { name: "run_state", type: "text" },
           { name: "task_id", type: "text" },
+          { name: "steps", type: "bigint" },
           { name: "created_ms", type: "bigint" },
           { name: "updated_ms", type: "bigint" },
         ],
@@ -822,7 +874,7 @@ function advanceRun(context: HandlerContext): void {
     return;
   }
 
-  const taken = history.filter((m) => m.speaker === "assistant").length;
+  const taken = stepsTaken(userId, runId, history);
   if (taken >= MAX_STEPS) {
     recordActivity(
       userId,
@@ -833,6 +885,34 @@ function advanceRun(context: HandlerContext): void {
     finishRun(userId, runId, "step-limit");
     return;
   }
+
+  // Folded up before the turn rather than after it, and then the turn is
+  // queued rather than taken here: a summary is a model call, the turn is
+  // another, and one execution gets one — the same reason the loop was never
+  // inside a single request. The next turn reads the summary as its whole
+  // conversation.
+  if (needsCompacting(userId, runId, history)) {
+    if (compactRun(userId, runId, history)) {
+      try {
+        const task = personalTasks.enqueue({
+          handler: "advanceRun",
+          payload: { runId: runId },
+          maxAttempts: 1,
+        });
+        setRunState(userId, runId, "running", task.taskId, "running");
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        recordActivity(userId, runId, "error", `The run stopped: ${message}`);
+        finishRun(userId, runId, "error");
+      }
+      return;
+    }
+    // Could not summarise. Carrying on with the conversation as it stands is
+    // better than stopping, and the ceiling still catches a run that grows
+    // past what can be sent at all.
+  }
+
+  countStep(userId, runId, taken);
 
   let answer: ApiResponse;
   try {
@@ -1224,8 +1304,17 @@ function callModel(
   userId: string,
   runId: string,
   messages: ApiMessage[],
+  options?: CallOptions,
 ): ApiResponse {
-  const skills = loadSkills();
+  // A summarising call is a different request in three ways, and each of them
+  // would be a quiet mistake left alone. It offers no tools, because it is not
+  // a turn and must not start one. Its text is not streamed, because the
+  // person is waiting for an answer and a summary of the conversation is not
+  // it. And it asks for no cache entry: its system prompt differs, so the
+  // prefix cannot match anything already stored, and writing one pays the
+  // premium on bytes nothing will ever read back.
+  const summarising = options?.summarise === true;
+  const skills = summarising ? [] : loadSkills();
   const stream = fetchStream(API_URL, {
     method: "POST",
     headers: {
@@ -1238,9 +1327,13 @@ function callModel(
       max_tokens: MAX_TOKENS,
       // Both of these follow the skill library rather than the turn, so they
       // are as stable across a run as anything else in the cached prefix.
-      system: systemPromptFor(skills),
+      system: summarising ? COMPACT_PROMPT : systemPromptFor(skills),
       messages: messages,
-      tools: skills.length > 0 ? TOOLS.concat([READ_SKILL_TOOL]) : TOOLS,
+      tools: summarising
+        ? undefined
+        : skills.length > 0
+          ? TOOLS.concat([READ_SKILL_TOOL])
+          : TOOLS,
       stream: true,
       // Cache the prompt, which for this loop means the conversation.
       //
@@ -1266,7 +1359,7 @@ function callModel(
       // TTL is deliberate: a turn is queued the moment the one before it
       // ends, so every turn refreshes the entry, and the 1-hour TTL would
       // double the write price to buy a gap this loop does not have.
-      cache_control: { type: "ephemeral" },
+      cache_control: summarising ? undefined : { type: "ephemeral" },
       // No `output_config.effort` and no `thinking`: this model rejects the
       // first and does not take the adaptive form of the second. Both come
       // back if the model moves up a tier.
@@ -1282,7 +1375,7 @@ function callModel(
   }
 
   try {
-    return readModelStream(stream, userId, runId);
+    return readModelStream(stream, userId, runId, summarising);
   } finally {
     // An abandoned stream holds a socket until the execution ends, and an
     // execution may hold only a few. Closing one that already finished is a
@@ -1299,6 +1392,7 @@ function readModelStream(
   stream: FetchStream,
   userId: string,
   runId: string,
+  silent?: boolean,
 ): ApiResponse {
   const turn: Turn = {
     blocks: [],
@@ -1330,13 +1424,16 @@ function readModelStream(
     // sends text in pieces far smaller than anything a person can perceive,
     // and every send is a host call; the network has already done the
     // coalescing, so this borrows its framing rather than inventing a size.
-    flush(turn, userId, runId);
+    if (!silent) flush(turn, userId, runId);
   }
 
   // A last frame that arrived without its blank line. `applyEvent` ignores a
   // remainder holding no data line, which is the usual case.
   applyEvent(turn, buffer);
-  flush(turn, userId, runId);
+  if (!silent) flush(turn, userId, runId);
+  // Whatever was held back is dropped rather than sent: a silent call's text
+  // is going into the conversation, not onto the page.
+  turn.outbound = "";
 
   logUsage(turn);
   recordUsage(userId, runId, turn.usage);
@@ -1718,6 +1815,7 @@ function openRun(userId: string, runId: string, taskId: string): void {
           run_id: runId,
           run_state: "running",
           task_id: taskId,
+          steps: 0,
           created_ms: Date.now(),
           updated_ms: Date.now(),
         }),
@@ -1811,6 +1909,153 @@ function takeInterjections(userId: string, runId: string): string[] {
     }
   }
   return said;
+}
+
+// ============================================================================
+// Compaction
+// ============================================================================
+
+/**
+ * How many turns this run has taken.
+ *
+ * Counted on the row rather than by scanning the history, because compaction
+ * throws the history away: a compacted run has no assistant messages left, so
+ * counting them would hand every compacted run a fresh budget and a run could
+ * never end. A run with no row falls back to counting, which is right for the
+ * runs that predate the column — none of them can have been compacted.
+ */
+function stepsTaken(
+  userId: string,
+  runId: string,
+  history: MessageRow[],
+): number {
+  const row = runRow(userId, runId);
+  const counted = history.filter((m) => m.speaker === "assistant").length;
+  if (!row || row.steps === undefined || row.steps === null) return counted;
+  return Math.max(Number(row.steps), counted);
+}
+
+function countStep(userId: string, runId: string, taken: number): void {
+  const row = runRow(userId, runId);
+  if (!row) return;
+  try {
+    must(
+      database.update(
+        "runs",
+        Number(row.id),
+        JSON.stringify({ steps: taken + 1, updated_ms: Date.now() }),
+      ),
+      "counting a turn",
+    );
+  } catch (e) {
+    console.log("agent: could not count a turn: " + String(e));
+  }
+}
+
+/** Whether this run's conversation should be folded up before the next turn. */
+function needsCompacting(
+  userId: string,
+  runId: string,
+  history: MessageRow[],
+): boolean {
+  if (history.length < 4) return false;
+  if (history.length >= COMPACT_AT_ROWS) return true;
+  return runSpend(userId, runId).largestPrompt >= COMPACT_AT_TOKENS;
+}
+
+/**
+ * Replace a run's conversation with a summary of it, and carry on.
+ *
+ * The whole history goes, not the older half of it. Keeping recent turns
+ * verbatim is the shape that looks obviously better and is not: a kept turn
+ * carries tool results whose `tool_use` sits in a message that was thrown
+ * away, and the API requires the two to be adjacent — so a kept tail has to
+ * begin at a boundary that this conversation, which has exactly one genuine
+ * user message, mostly does not have. Summarise-and-replay-nothing is both
+ * simpler and what the model is trained for.
+ *
+ * Safe at the top of a turn and nowhere else: by then every `tool_use` has
+ * its `tool_result` beside it, because the turn that made the call also ran
+ * the tools. Mid-turn there is a call waiting on an answer, and folding that
+ * away asks the model to continue from a question it can no longer see.
+ *
+ * Returns false when the summary could not be had, and the caller goes on
+ * with the conversation it already had — a run that cannot be compacted is
+ * better than a run that stops.
+ */
+function compactRun(
+  userId: string,
+  runId: string,
+  history: MessageRow[],
+): boolean {
+  let summary = "";
+  try {
+    const answer = callModel(
+      userId,
+      runId,
+      history.map(toApiMessage).concat([
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Summarise everything above, following your instructions.",
+            },
+          ],
+        },
+      ]),
+      { summarise: true },
+    );
+    for (const block of answer.content ?? []) {
+      if (block.type === "text" && block.text) summary += block.text;
+    }
+  } catch (e) {
+    console.log("agent: could not summarise the run: " + String(e));
+    return false;
+  }
+
+  summary = summary.trim();
+  if (!summary) return false;
+
+  // The swap is one transaction: a run left holding neither its conversation
+  // nor a summary of it has lost the thread entirely, and there is nothing to
+  // recover it from.
+  try {
+    must(database.beginTransaction(), "opening the swap");
+    for (const row of history) {
+      must(database.delete("messages", Number(row.id)), "clearing a message");
+    }
+    appendMessage(userId, runId, "user", [
+      {
+        type: "text",
+        text:
+          "[Everything before this point has been summarised to save space. " +
+          "These are your own notes on the run so far.]\n\n" +
+          summary +
+          "\n\n[End of summary. Continue the work from here.]",
+      },
+    ]);
+    must(database.commitTransaction(), "closing the swap");
+  } catch (e) {
+    try {
+      database.rollbackTransaction();
+    } catch (inner) {
+      // Nothing further to do: the handler exiting rolls it back anyway.
+    }
+    console.log("agent: could not swap in the summary: " + String(e));
+    return false;
+  }
+
+  console.log(
+    `agent: compacted ${history.length} messages into ${summary.length} characters`,
+  );
+  recordActivity(
+    userId,
+    runId,
+    "note",
+    `Folded ${history.length} messages into a summary to save space.`,
+  );
+  return true;
 }
 
 // ============================================================================

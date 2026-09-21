@@ -120,6 +120,33 @@ Raise the budget **before** raising either. A turn that runs past its budget
 fails, and with `maxAttempts: 1` it is not retried — the run stops rather than
 quietly costing twice.
 
+## When a run gets long
+
+Every turn resends the run so far, so a long run grows until it is expensive
+and then until it will not fit. When a run passes **30,000 prompt tokens** or
+**42 messages**, the next turn is spent folding the conversation into a
+summary instead: one model call, the whole history replaced by its own notes,
+and the turn after that carries on from there.
+
+The whole history goes, not the older half. Keeping recent turns verbatim is
+the shape that looks obviously better and is not — a kept turn carries tool
+results whose `tool_use` sits in a message that was thrown away, and the API
+requires the two to be adjacent. Summarise-and-replay-nothing is simpler and
+is what the model is trained for.
+
+It happens at the top of a turn and nowhere else, because that is the only
+point where every tool call has its result beside it. Mid-turn there is a call
+waiting on an answer, and folding that away asks the model to continue from a
+question it can no longer see.
+
+Two consequences worth knowing. Compaction resets the prompt cache, which is
+the cost of it. And turns are counted on the run's row rather than by counting
+assistant messages, because a compacted run has none left — counting them
+would hand every compacted run a fresh budget and a run could never end.
+
+`MAX_STEPS` is now the only thing bounding a run's length, which makes raising
+it a decision about money rather than about correctness.
+
 ## Stopping and steering a run
 
 The run lives in the engine, so closing the tab does not stop it — which used
