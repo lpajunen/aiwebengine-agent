@@ -87,21 +87,27 @@ meant for the model talking to itself.
 
 ## Where to start next
 
-1. **Compaction.** The ceiling `loadMessages` now enforces is a stop, not a
-   solution, and it is the only thing standing between this and a long run.
-   [Summarise and replace](#compaction) is one more kind of turn the queue can
-   already run.
-2. **Resuming a suspended run.** The half that stops one is built and every
+Compaction and [code as the action](#smolagents-and-codeact-code-as-the-action)
+are both built, which took the first and the largest off this list.
+
+1. **Resuming a suspended run.** The half that stops one is built and every
    kind of stop goes through it; `RunState` already names `waiting`. What is
    missing is the half that resumes, which is
    [plan mode, permission prompts and approval all at once](#three-features-one-primitive).
+   It moved to the top the moment `run_js` landed: the tool holds only reads
+   today **because there is nowhere to put an approval**, so this is what
+   decides whether model-written code is ever allowed to write anything.
+2. **Memory the person can read.** `list_memories` made the notes readable by
+   the model. [The person still cannot see them](#memory-the-person-can-read),
+   and an agent that remembers things about somebody without showing them is
+   one they cannot correct. The smallest item here and the one with the most
+   trust in it.
 3. **Skills the agent writes.** The authoring half shipped; the half worth
    having is [the agent writing its own](#skills-as-markdown-written-by-the-agent),
    and `revisions.rs` makes every one of them revertible.
-4. **Memory the person can read.** `list_memories` made the notes readable by
-   the model. [The person still cannot see them](#memory-the-person-can-read),
-   and an agent that remembers things about somebody without showing them is
-   one they cannot correct.
+4. **The first channel adapter.** Buildable in an afternoon now, and
+   deliberately behind item 1: an inbound message is the third leg of the
+   trifecta and [the defence is a mode](#what-follows-a-channel), not a list.
 5. **Mounting the engine's own MCP tools** — `McpClient` is in the API and
    [the catch is a design question](#the-engine-is-already-an-mcp-server)
    rather than a wiring one.
@@ -123,7 +129,9 @@ Which is now everything. Built so far: prompt caching, streaming, skills as
 assets, `list_memories`, the usage display, and cancel and interject on a
 `runs` table beside `personalTasks.cancel`.
 
-Still ahead: slash commands, project instructions, compaction, attachments,
+Also built since: compaction, and `run_js` over `sandbox.run`.
+
+Still ahead: slash commands, project instructions, attachments,
 per-run model choice, the run list, mounting other MCP servers (`McpClient`
 is in the API), the event-log consolidation, the channel adapters, and the
 resuming half of the suspended run — plan and act, and per-tool approval.
@@ -144,7 +152,9 @@ Three that looked uncertain and are not:
 **Checkpoints over agent-written files.** `revisions.rs` wants using, not
 writing.
 
-**A reduced sub-context.** `sandbox.run` is installed and uncalled. See
+**A reduced sub-context.** ~~`sandbox.run` is installed and uncalled.~~ Called
+now, by `run_js`. What is still unused is the _second_ narrowing — a planning
+turn holding fewer capabilities than `run_js` already holds. See
 [code as the action](#smolagents-and-codeact-code-as-the-action) and
 [plan mode](#it-would-be-enforced-here-not-merely-offered) — one call
 underneath both. It is also what
@@ -910,6 +920,50 @@ the model as the next observation.
 It is a bigger decision than anything else on this list, and it deserves to be
 considered as an alternative to expanding the tool list rather than as an
 addition to it. It is now a decision rather than a wish.
+
+**Built**, as `run_js`. Five things it turned out to need, four of which the
+obvious implementation gets wrong.
+
+**The capability list _is_ the feature, and the interesting half is what is
+withheld.** Granting `read_secrets` would have been the natural thing — the
+agent holds it, and the tool is narrowing from what the turn has. It is also a
+two-line exfiltration of the person's API key, because `{{secret:...}}` is
+substituted host-side inside a `fetch` and `use_network` is the one capability
+the tool cannot do without. The engine refuses that pairing explicitly, with a
+comment naming this exact case, which was reassuring to find rather than to
+have to argue for. `read_script_data` goes for a quieter reason: `database` is
+scoped to the _script_, so one person's turn could read every other person's
+conversation out of `messages` and hand it back as a tool result.
+
+**The list has to be intersected with `sandbox.held()`, not asserted.** `run`
+throws when asked to keep something the caller does not hold, and a delegation
+grant is free to be narrower than the list. Asking for what is wanted and
+taking what is given is what keeps a read-only grant working instead of
+failing every call.
+
+**`ok: true` does not mean nothing was refused.** A refusal reaches the code
+however that API already reports failure, and `database` reports it by
+answering `{ error }` rather than by throwing — so a narrowed `database.query`
+comes back as a _successful_ run whose value happens to be a refusal. Nothing
+had to special-case it, since the message names the capability either way, but
+a branch on `ok` that assumed otherwise would have been wrong and silent.
+
+**The snippet is block-wrapped and evaluated as a script**, so the result is
+the completion value of the last expression and `return` at the top level is a
+syntax error. Both are in the tool description, because they are what a model
+gets wrong on its first call and a wasted turn out of twelve is expensive.
+
+**Errors arrive with QuickJS frames pointing into the engine's own preludes.**
+A tool result is not paid for once — it is stored in the conversation and
+resent on every turn after it — so the frames are filtered to the ones naming
+the model's own source. Same argument as every other output-shape decision
+here, just applied to the part nobody looks at.
+
+What it does _not_ do is write anything, and that is the one thing to know
+before reading the code: the tool holds `view_logs`, `use_network`,
+`read_assets` and `read_storage`, and nothing else. Not because writes are
+frightening but because the place to spend a write is an approval step, and
+that is [the next item](#three-features-one-primitive) rather than this one.
 
 ### OpenHands
 

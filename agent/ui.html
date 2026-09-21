@@ -163,6 +163,19 @@
       .kind[data-kind="writing"] {
         color: var(--accent);
       }
+      /* The code the model wrote, shown before it runs rather than with its
+         result. Monospaced because it is read as code, and on the page at all
+         because an agent that runs something nobody was shown is the thing
+         people object to. Selected through the sibling rather than the row:
+         the kind is the only element carrying what this entry is. */
+      .kind[data-kind="code"] + .message {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12.5px;
+        line-height: 1.5;
+        border-left: 2px solid var(--line);
+        padding: 2px 0 2px 10px;
+        overflow-x: auto;
+      }
       .message {
         white-space: pre-wrap;
         overflow-wrap: anywhere;

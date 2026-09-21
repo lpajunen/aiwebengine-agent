@@ -198,6 +198,10 @@ const SYSTEM_PROMPT = [
   "ends there — so never end a turn having said nothing at all.",
   "Use remember for anything worth keeping between runs, list_memories to see",
   "what you already know about this person, and recall to read one back.",
+  "When the work is more than one step — fetching something, trying each of",
+  "several things, shaping data before you can answer — write it as code and",
+  "call run_js. One call does what a tool call each would have taken a turn",
+  "apiece to do, and you have twelve turns.",
 ].join(" ");
 
 // ============================================================================
@@ -322,6 +326,110 @@ interface AssetInfo {
 }
 
 // ============================================================================
+// Code as the action
+// ============================================================================
+
+/**
+ * What model-written code is allowed to do.
+ *
+ * This is the whole of the security argument for `run_js`, so it is a list of
+ * four names and a list of what is deliberately missing.
+ *
+ * A tool call is one verb per round trip, and a run gets twelve. Code is the
+ * other shape: a loop, a condition and an intermediate value cost one call
+ * between them. Every project that adopts it has to build a sandbox first —
+ * here the sandbox is what the script was already running inside, and
+ * `sandbox.run` is the engine handing a script a way to run *part* of itself
+ * holding less than it holds. The checks sit underneath the JavaScript, so
+ * nothing the model writes, and no arrangement of the transcript, reaches past
+ * them. A filtered tool list can be argued past; this cannot.
+ *
+ * What is granted:
+ *
+ * - `view_logs` is `console`, and on a turn that failed it is usually the only
+ *   part worth reading.
+ * - `use_network` is `fetch` and `fetchAll`, and is most of the reason to have
+ *   the tool at all — without it this is a calculator.
+ * - `read_assets` is the script's own files, which is where a skill keeps the
+ *   data it points the model at.
+ * - `read_storage` is this person's notes, so code can work over what the
+ *   agent already knows rather than recalling them one key at a time.
+ *
+ * What is withheld, each for its own reason rather than out of caution:
+ *
+ * - **`read_secrets`.** It gates `{{secret:...}}` inside a `fetch`, which the
+ *   engine substitutes host-side for whoever the run belongs to. Granted here,
+ *   three lines of model-written code would post this person's API key to a
+ *   URL of the model's choosing, and there is no version of that which is
+ *   acceptable. It is also what stops the code spending their money on model
+ *   calls of its own.
+ * - **`read_script_data`.** `database.query` is scoped to the *script*, not to
+ *   the person. This script's tables hold every run every person has ever had,
+ *   so granting it would let one person's turn read another's conversation and
+ *   hand it back as a tool result.
+ * - **Every write.** Nothing here writes: not storage, not the database, not
+ *   assets, not the queue. A wrong read costs a token and a wrong write costs
+ *   a rollback, and the place to spend that asymmetry is an approval step that
+ *   does not exist yet. `remember` remains the one write the model has, and it
+ *   is a tool because it is worth a person seeing in the activity log.
+ *
+ * The residual risk is worth naming rather than leaving implied: `read_storage`
+ * and `use_network` together are two legs of the lethal trifecta — private
+ * data and a way out. The third is untrusted content, and this agent has none
+ * today, because the only text in a run is what the person typed themselves.
+ * **The first channel adapter adds it**, and the fix is not a narrower list
+ * here but a run that holds fewer of these when it was started by somebody
+ * other than the account owner.
+ *
+ * Intersected with `sandbox.held()` rather than passed as written: `run` throws
+ * when asked to keep something the caller does not hold, and a delegation grant
+ * is free to be narrower than this list. Asking for what is there and taking
+ * what is given keeps a read-only grant working instead of failing every call.
+ */
+const CODE_CAPABILITIES: Capability[] = [
+  "view_logs",
+  "use_network",
+  "read_assets",
+  "read_storage",
+];
+
+/**
+ * How long model-written code may run.
+ *
+ * Well inside the turn's own budget rather than up against it. A nested
+ * execution is already clamped to whatever the parent has left, so the ceiling
+ * that matters is not the engine's — it is that a turn still has to record
+ * what happened and queue its successor after the code returns. Code that
+ * loops forever should cost the rest of one turn, not the run.
+ */
+const CODE_TIMEOUT_MS = 15000;
+
+/**
+ * How much of a run's result is handed back to the model.
+ *
+ * A tool result is not paid for once. It is stored in the conversation and
+ * resent on every turn after it, so a `fetch` of a large page pasted whole
+ * would be bought again twelve times over — which is the bill, and then the
+ * context, and then compaction arriving early to throw it away.
+ *
+ * Each part has its own ceiling and the whole has a backstop, and the order
+ * the parts are joined in decides what the backstop eats: the value goes last,
+ * so a `fetch` of something enormous is what gets trimmed rather than the
+ * console output above it. Somebody who printed their working meant the
+ * working to be read.
+ */
+const MAX_CODE_VALUE_CHARS = 3000;
+const MAX_CODE_CONSOLE_LINES = 40;
+const MAX_CODE_LINE_CHARS = 400;
+const MAX_CODE_RESULT_CHARS = 4000;
+
+/** Stack frames kept from a failure, once the engine's own are dropped. */
+const MAX_CODE_STACK_FRAMES = 5;
+
+/** How much of the source the person is shown in the activity log. */
+const CODE_ECHO_CHARS = 2000;
+
+// ============================================================================
 // The model's tools
 // ============================================================================
 
@@ -384,6 +492,26 @@ const TOOLS: ToolSpec[] = [
         key: { type: "string", description: "The note's name." },
       },
       required: ["key"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: "run_js",
+    description:
+      "Run JavaScript and get the value back. Reach for this whenever the work is more than one step: fetching something, trying each of several things in turn, or shaping data before you can answer. A loop, a condition and an intermediate value cost one call here, where asking for a tool per step costs a turn each. " +
+      "The value of the LAST EXPRESSION is the result — `const x = 1;` gives you nothing back, `const x = 1; x` gives you 1. `return` at the top level is a syntax error. Everything here is synchronous: `fetch(url, options)` hands back the response itself rather than a promise, and `fetchAll([...])` runs several at once. Top-level `await` is a syntax error, and you will not need one. `console.log` comes back whether or not the code worked, so print your working. " +
+      "It runs holding less than the rest of this agent does: it can call the network, read this script's assets, and read this person's stored notes. It cannot write anything, cannot reach a stored secret, and cannot query the database. That is enforced by the engine underneath the JavaScript, not by this description, so do not try to work around it — use remember to store something and write_response to say something.",
+    input_schema: {
+      type: "object",
+      properties: {
+        source: {
+          type: "string",
+          description:
+            "The code to run, ending in the expression whose value you want back.",
+        },
+      },
+      required: ["source"],
       additionalProperties: false,
     },
     strict: true,
@@ -2563,6 +2691,10 @@ function runTool(
       return { content: renderMemories(listing), isError: false };
     }
 
+    case "run_js": {
+      return runJsTool(userId, runId, String(input.source ?? ""));
+    }
+
     case "read_skill": {
       return readSkillTool(
         String(input.name ?? "").trim(),
@@ -2651,6 +2783,231 @@ function readSkillTool(
     };
   }
   return { content: content, isError: false };
+}
+
+/**
+ * Run the code the model wrote, in a context holding less than this one.
+ *
+ * The three things this function is arranged around:
+ *
+ * **The person sees the code before it runs.** An agent executing something
+ * nobody was shown is the thing people object to, and rightly. The activity is
+ * recorded first, so the source is on the page for however long the code takes
+ * rather than arriving with its result.
+ *
+ * **A thrown error and a returned one mean different things**, and the engine
+ * draws the line where an agent needs it. `sandbox.run` throws when the
+ * *request* was wrong — a capability that is not one, one this turn does not
+ * hold, nesting too deep — which is a bug in this file and belongs in the log.
+ * It *returns* with `ok: false` when the *code* was wrong, and that is the
+ * result of the turn: it goes back to the model as the next observation,
+ * because code that did not work is what the model is there to fix.
+ *
+ * **The helpers are visible and it does not matter.** The source is evaluated
+ * after this script's own program and in the same realm, so it can see
+ * `finishRun`, `appendMessage`, `callModel` and the rest. Every one of them
+ * bottoms out in a capability the sub-execution was not given — the database
+ * writes, the storage writes, the `{{secret:...}}` substitution that makes a
+ * model call possible — so what it can reach is decided by the list above and
+ * not by what happens to be in scope. That is the property a mask over the
+ * running context could not have given: the two executions share no object
+ * graph, so this turn cannot hand the narrowed one a function and have it
+ * called.
+ */
+function runJsTool(
+  userId: string,
+  runId: string,
+  source: string,
+): { content: string; isError: boolean } {
+  if (!source.trim()) {
+    return {
+      content: "There was no code to run. Put the code in `source`.",
+      isError: true,
+    };
+  }
+
+  const granted = codeCapabilities();
+
+  recordActivity(userId, runId, "code", cut(source.trim(), CODE_ECHO_CHARS));
+
+  let result: SandboxResult;
+  try {
+    result = sandbox.run(source, {
+      capabilities: granted,
+      timeoutMs: CODE_TIMEOUT_MS,
+    });
+  } catch (e) {
+    // The request was wrong rather than the code. Logged rather than dressed
+    // up as a result, because the model cannot fix it and should not be asked
+    // to try: the next turn would rewrite working code to appease a refusal
+    // that had nothing to do with it.
+    const message = e instanceof Error ? e.message : String(e);
+    console.log("agent: could not start a sub-execution: " + message);
+    return {
+      content: `The code could not be run at all: ${message}. This is a fault in the agent rather than in your code.`,
+      isError: true,
+    };
+  }
+
+  return renderCodeResult(result, granted);
+}
+
+/**
+ * What `run_js` may actually be given, which is what it wants and this turn
+ * holds.
+ *
+ * A grant can be narrower than `CODE_CAPABILITIES` — a delegation that said
+ * read and not write is still allowed to be one — and `sandbox.run` throws
+ * when asked to keep something the caller does not have. So the list is a
+ * request rather than an assertion, and an empty intersection still runs: code
+ * holding nothing at all computes, which is the base case everything else is
+ * subtracted from.
+ */
+function codeCapabilities(): Capability[] {
+  let held: Capability[] = [];
+  try {
+    held = sandbox.held();
+  } catch (e) {
+    // Nothing to do but grant nothing. Code that can only compute is worth
+    // more than a tool that refuses.
+    console.log("agent: could not read what this turn holds: " + String(e));
+    return [];
+  }
+  return CODE_CAPABILITIES.filter((name) => held.indexOf(name) !== -1);
+}
+
+/**
+ * Turn one sub-execution into the thing the model reads next.
+ *
+ * Every branch here is a prompt. A tool result is the one piece of text a
+ * model reads closely, so a failure that says what would have worked turns a
+ * dead step into a recovered one, where a bare "it failed" spends the step and
+ * teaches nothing — and a run gets twelve.
+ *
+ * Two of them are worth the trouble. A refusal from the engine already names
+ * the capability it wanted and says *narrowed* when the reason was this rather
+ * than the caller's own tier, so the message is kept as it came (minus the
+ * engine's own stack frames) and the list of what the code does hold is added
+ * beneath it. And code that returned `undefined` having printed nothing is
+ * nearly always the same mistake — a body of statements with no trailing
+ * expression — which is cheap to say and expensive to let the model discover
+ * by writing it twice.
+ *
+ * One thing worth knowing before trusting `ok` as "nothing was refused": it is
+ * not. A refusal reaches the code in whichever way that API already reports
+ * failure, and `database` reports it by answering `{ error }` rather than by
+ * throwing — so a narrowed `database.query` comes back as a *successful* run
+ * whose value happens to be a refusal. Nothing here needs to special-case
+ * that, because the engine's message names the capability either way, but a
+ * reader adding a branch on `ok` should not assume it catches every refusal.
+ */
+function renderCodeResult(
+  result: SandboxResult,
+  granted: Capability[],
+): { content: string; isError: boolean } {
+  const parts: string[] = [];
+  const printed = consoleBlock(result);
+
+  if (!result.ok) {
+    parts.push("The code failed: " + tidyError(result.error ?? ""));
+  }
+  if (printed) {
+    parts.push(printed);
+  }
+  if (result.ok) {
+    parts.push(valueBlock(result, printed !== ""));
+  } else {
+    parts.push(
+      granted.length > 0
+        ? "This code runs holding only: " +
+            granted.join(", ") +
+            ". It cannot write anything, read a secret, or query the database — use remember to store something and write_response to say something."
+        : "This code runs holding no capabilities at all, so it can compute and nothing else.",
+    );
+  }
+
+  return {
+    content: cut(parts.join("\n\n"), MAX_CODE_RESULT_CHARS),
+    isError: !result.ok,
+  };
+}
+
+/**
+ * The failure, with the engine's own stack frames taken out.
+ *
+ * A refusal arrives as a message followed by a QuickJS stack, and most of that
+ * stack is inside the preludes the engine installs — `engine://fetch-prelude`,
+ * `engine://storage-prelude`. Those frames locate nothing the model wrote, and
+ * a tool result is not paid for once: it is stored in the conversation and
+ * resent on every turn after it, so noise here is bought twelve times over.
+ *
+ * The frames that name the model's own source are kept, because an error in
+ * the middle of thirty lines is worth being able to find.
+ */
+function tidyError(error: string): string {
+  const parts = error.split("\nStack:");
+  // rquickjs punctuates the message with a trailing comma before the stack.
+  const message = parts[0].trim().replace(/,$/, "");
+  if (parts.length < 2) return message || "no reason given";
+
+  const frames: string[] = [];
+  for (const line of parts[1].split("\n")) {
+    const frame = line.trim();
+    if (!frame || frame.indexOf("engine://") !== -1) continue;
+    if (frames.length >= MAX_CODE_STACK_FRAMES) break;
+    frames.push("  " + frame);
+  }
+  if (frames.length === 0) return message || "no reason given";
+  return (message || "no reason given") + "\n" + frames.join("\n");
+}
+
+/** What the code evaluated to, or why there is nothing to show. */
+function valueBlock(result: SandboxResult, printedSomething: boolean): string {
+  const type = result.valueType ?? "undefined";
+
+  if (type === "undefined" || type === "function" || type === "symbol") {
+    if (printedSomething) {
+      return `It returned nothing (${type}), so the output above is all there is.`;
+    }
+    return (
+      `It ran, printed nothing and returned nothing (${type}). The value of ` +
+      "the last expression is what comes back — `const x = 1;` returns " +
+      "undefined where `const x = 1; x` returns 1. End with the expression " +
+      "you want, or console.log along the way."
+    );
+  }
+
+  // Whatever comes back has already been through `JSON.stringify` and reparsed
+  // engine-side, so it has a JSON form by construction — anything that did not
+  // was reported as `undefined` by `valueType` and handled above.
+  const rendered = JSON.stringify(result.value, null, 2);
+  return `Returned (${type}):\n${cut(rendered, MAX_CODE_VALUE_CHARS)}`;
+}
+
+/** What the code printed, whether or not it worked. */
+function consoleBlock(result: SandboxResult): string {
+  const lines = result.console ?? [];
+  const overflow = Math.max(0, lines.length - MAX_CODE_CONSOLE_LINES);
+  const dropped = (result.consoleDropped ?? 0) + overflow;
+  if (lines.length === 0 && dropped === 0) return "";
+
+  const shown: string[] = [];
+  for (const line of lines.slice(0, MAX_CODE_CONSOLE_LINES)) {
+    shown.push("  " + cut(String(line.message ?? ""), MAX_CODE_LINE_CHARS));
+  }
+  // The oldest lines are kept rather than the newest: the first thing a run
+  // printed is usually what it was about to do, and the last is whatever it
+  // was doing when it ran out of room.
+  if (dropped > 0) {
+    shown.push(`  [cut here: ${dropped} more lines]`);
+  }
+  return "Printed:\n" + shown.join("\n");
+}
+
+/** Text with a ceiling, saying so rather than ending mid-word in silence. */
+function cut(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max) + ` [cut here: ${text.length - max} more]`;
 }
 
 // ============================================================================
