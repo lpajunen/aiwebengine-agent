@@ -143,9 +143,11 @@ const MAX_HISTORY_ROWS = 60;
 
 const SYSTEM_PROMPT = [
   "You are an assistant embedded in a web page.",
-  "The person cannot see your reasoning or your raw output — they only see what",
-  "you send with the write_response tool. Always finish a task by calling",
-  "write_response, even when the answer is short or the news is bad.",
+  "Answer by calling the write_response tool: that is how the person sees what",
+  "you say, and you can call it and then carry on working. Always answer, even",
+  "when the answer is short or the news is bad. If you end a turn with plain",
+  "text and no tool call, that text is delivered as your answer and the run",
+  "ends there — so never end a turn having said nothing at all.",
   "Use remember for anything worth keeping between runs, list_memories to see",
   "what you already know about this person, and recall to read one back.",
 ].join(" ");
@@ -756,12 +758,21 @@ function advanceRun(context: HandlerContext): void {
   // replays them unchanged.
   appendMessage(userId, runId, "assistant", blocks);
 
+  // Whether this turn is going on to do something decides what its prose is.
+  // Text alongside a tool call is the model saying what it is about to do;
+  // text with no tool call is the answer, because a turn that calls nothing
+  // ends the run and there is nothing else it could be. Asked for in the
+  // system prompt and then settled here, since a weaker model will sometimes
+  // answer in prose however firmly it was told to use the tool — and the
+  // person is owed their answer either way.
+  const proseKind = proseKindFor(blocks);
+
+  let said = false;
   const results: ContentBlock[] = [];
   for (const block of blocks) {
     if (block.type === "text" && block.text) {
-      // The model is asked to speak through write_response; plain text is
-      // shown anyway rather than silently dropped.
-      recordActivity(userId, runId, "note", block.text);
+      recordActivity(userId, runId, proseKind, block.text);
+      said = true;
       continue;
     }
     if (block.type !== "tool_use" || !block.id || !block.name) continue;
@@ -778,6 +789,20 @@ function advanceRun(context: HandlerContext): void {
       content: outcome.content,
       is_error: outcome.isError,
     });
+  }
+
+  // A turn that neither spoke nor did anything would end the run in silence,
+  // which reads as the agent having crashed. It happens when a turn is cut
+  // off at `max_tokens` before any block is complete.
+  if (!said && results.length === 0) {
+    recordActivity(
+      userId,
+      runId,
+      "error",
+      answer.stop_reason === "max_tokens"
+        ? "The reply was cut off before anything was said. MAX_TOKENS may be too low."
+        : "The model ended the turn without saying anything.",
+    );
   }
 
   if (results.length > 0) {
@@ -805,6 +830,24 @@ function advanceRun(context: HandlerContext): void {
   }
 
   finishRun(userId, runId, answer.stop_reason ?? "end_turn");
+}
+
+/**
+ * What this turn's prose is: the answer, or talk about what it is doing.
+ *
+ * A turn that calls no tool ends the run, so its text is the last thing the
+ * person will hear and is therefore the answer — whether or not the model
+ * bothered with `write_response`. Text beside a tool call is narration, and
+ * stays a note.
+ *
+ * The rule lives here rather than in the loop because it is the whole of what
+ * decides whether somebody's answer arrives looking like an aside.
+ */
+function proseKindFor(blocks: ContentBlock[]): "note" | "response" {
+  for (const block of blocks) {
+    if (block.type === "tool_use" && block.id && block.name) return "note";
+  }
+  return "response";
 }
 
 /**
