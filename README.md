@@ -15,8 +15,16 @@ for anybody's tokens.
 
 There is no endpoint that advances a run. Each turn queues the next.
 
-The model gets three tools: `write_response` (the only way the person sees
-anything), `remember` and `recall` (notes in that person's `personalStorage`).
+The model gets four tools: `write_response` (the only way the person sees
+anything), and `remember`, `list_memories` and `recall` over notes in that
+person's `personalStorage`. A fifth, `read_skill`, appears only when the
+deployment has skills.
+
+`list_memories` is what makes the notes readable rather than only writable:
+`recall` needs a key, so anything written in an earlier run was unreachable
+unless the model guessed the name. The listing gives each key, the note's size
+and its first line — a note short enough to fit is its own preview, and no
+`recall` follows. A `recall` that misses now names the keys that exist.
 
 The model is `claude-haiku-4-5`, chosen on cost and on fitting the turn budget.
 Moving up a tier is more than the `MODEL` string — `output_config.effort`, the

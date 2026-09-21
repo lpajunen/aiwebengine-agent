@@ -122,8 +122,37 @@ const SYSTEM_PROMPT = [
   "The person cannot see your reasoning or your raw output — they only see what",
   "you send with the write_response tool. Always finish a task by calling",
   "write_response, even when the answer is short or the news is bad.",
-  "Use remember and recall for anything worth keeping between runs.",
+  "Use remember for anything worth keeping between runs, list_memories to see",
+  "what you already know about this person, and recall to read one back.",
 ].join(" ");
+
+// ============================================================================
+// Memory
+// ============================================================================
+
+/**
+ * Where a person's notes live inside their own store.
+ *
+ * Prefixed rather than stored bare, because `personalStorage` belongs to the
+ * script as a whole: anything else this agent keeps per person would otherwise
+ * be enumerated as though the model had written it.
+ */
+const NOTE_PREFIX = "note:";
+
+/**
+ * How many notes `list_memories` will name, and how much of each it shows.
+ *
+ * Enumerating costs a round trip per key and another per value, so this is a
+ * bound on the work as much as on the tokens.
+ */
+const MAX_MEMORIES = 100;
+const MEMORY_PREVIEW_CHARS = 160;
+
+interface Memory {
+  key: string;
+  preview: string;
+  chars: number;
+}
 
 // ============================================================================
 // Skills
@@ -202,6 +231,18 @@ const TOOLS: ToolSpec[] = [
         value: { type: "string", description: "What to store." },
       },
       required: ["key", "value"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: "list_memories",
+    description:
+      "List what you have remembered about this person, with a preview of each. Use this before assuming you know nothing about them — notes survive between runs, and recall needs a key you would otherwise have to guess.",
+    input_schema: {
+      type: "object",
+      properties: {},
+      required: [],
       additionalProperties: false,
     },
     strict: true,
@@ -1233,6 +1274,93 @@ function readErrorMessage(body: string): string {
 }
 
 // ============================================================================
+// Memory
+// ============================================================================
+
+/**
+ * Every note this person has, with enough of each to choose between them.
+ *
+ * `recall` needs a key the model already knows, which made anything written
+ * in an earlier run unreachable unless it happened to guess the name — memory
+ * that could be written and not read. Enumeration is the whole fix.
+ *
+ * `key(index)` answers in ascending order, so the listing is stable between
+ * calls without sorting it here.
+ *
+ * The cost is a round trip per key and another per value, which is why both
+ * the count and the preview are bounded. Reading the values is deliberate
+ * rather than free: a key like `trip-plan` says nothing about what is in it,
+ * and a preview usually answers the question outright — a note short enough
+ * to fit *is* its own preview, and no `recall` follows.
+ */
+function listMemories(): { memories: Memory[]; more: number } {
+  const keys: string[] = [];
+  const total = personalStorage.length;
+  for (let i = 0; i < total; i++) {
+    const stored = personalStorage.key(i);
+    if (stored === null) continue;
+    if (stored.indexOf(NOTE_PREFIX) !== 0) continue;
+    keys.push(stored);
+  }
+
+  const shown = keys.slice(0, MAX_MEMORIES);
+  const memories: Memory[] = [];
+  for (const stored of shown) {
+    const value = personalStorage.getItem(stored);
+    // Null here means it went away between the two reads. Skipped rather than
+    // reported: it is no longer a note, and nothing is owed about it.
+    if (value === null) continue;
+    memories.push({
+      key: stored.slice(NOTE_PREFIX.length),
+      preview: memoryPreview(value),
+      chars: value.length,
+    });
+  }
+  return { memories: memories, more: keys.length - shown.length };
+}
+
+/** The first line of a note, short enough to sit in a list. */
+function memoryPreview(value: string): string {
+  const firstLine = value.split("\n")[0].trim();
+  if (firstLine.length <= MEMORY_PREVIEW_CHARS) return firstLine;
+  return firstLine.slice(0, MEMORY_PREVIEW_CHARS) + "…";
+}
+
+function renderMemories(listing: { memories: Memory[]; more: number }): string {
+  if (listing.memories.length === 0) {
+    return "Nothing is remembered about this person yet. Use remember to keep something.";
+  }
+
+  const lines = ["Remembered about this person:"];
+  for (const memory of listing.memories) {
+    // The size is what tells the model whether the preview is the whole note
+    // or the start of one, which is what decides whether to call recall.
+    lines.push(`- ${memory.key} (${memory.chars} chars): ${memory.preview}`);
+  }
+  if (listing.more > 0) {
+    lines.push(`...and ${listing.more} more, not listed.`);
+  }
+  lines.push("Use recall with a key to read one in full.");
+  return lines.join("\n");
+}
+
+/** What to say when a key names nothing. */
+function missingNote(key: string): string {
+  let known: string[] = [];
+  try {
+    known = listMemories().memories.map((m) => m.key);
+  } catch (e) {
+    // The listing is a courtesy; failing to build it must not turn a plain
+    // miss into an error.
+    known = [];
+  }
+  if (known.length === 0) {
+    return `Nothing is stored under "${key}", and nothing else is either.`;
+  }
+  return `Nothing is stored under "${key}". These exist: ${known.join(", ")}.`;
+}
+
+// ============================================================================
 // Skills
 // ============================================================================
 
@@ -1445,7 +1573,7 @@ function runTool(
         // Per (script, person), and only reachable while that person is the
         // one being served — which is exactly why this loop runs in their
         // request rather than in a background job.
-        personalStorage.setItem("note:" + key, value);
+        personalStorage.setItem(NOTE_PREFIX + key, value);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         return { content: message, isError: true };
@@ -1459,16 +1587,38 @@ function runTool(
       if (!key) return { content: "A key is required.", isError: true };
       let value: string | null = null;
       try {
-        value = personalStorage.getItem("note:" + key);
+        value = personalStorage.getItem(NOTE_PREFIX + key);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         return { content: message, isError: true };
       }
       recordActivity(userId, runId, "tool", `Recalled "${key}".`);
       if (value === null) {
-        return { content: `Nothing is stored under "${key}".`, isError: false };
+        // A miss names what would have worked. Guessing a key was the whole
+        // reason memory was write-mostly, and a step spent learning "not that
+        // one" teaches nothing on its own.
+        return { content: missingNote(key), isError: false };
       }
       return { content: value, isError: false };
+    }
+
+    case "list_memories": {
+      let listing: { memories: Memory[]; more: number };
+      try {
+        listing = listMemories();
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        return { content: message, isError: true };
+      }
+      recordActivity(
+        userId,
+        runId,
+        "tool",
+        listing.memories.length === 1
+          ? "Listed 1 note."
+          : `Listed ${listing.memories.length} notes.`,
+      );
+      return { content: renderMemories(listing), isError: false };
     }
 
     case "read_skill": {
