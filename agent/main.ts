@@ -34,6 +34,11 @@
  * page fills in rather than waiting out the whole turn in silence. Only the
  * stream carries the pieces: the tables are still written once, by the tool
  * that produced the text, so nothing about reopening the page later changes.
+ *
+ * And the prompt is cached, which is what makes resending the run every turn
+ * affordable — though not until a run passes 4096 tokens, since that is this
+ * model's minimum and it is the highest of any current tier. See the request
+ * body in `callModel`, and `logUsage` for the evidence that it is working.
  */
 
 // ============================================================================
@@ -208,7 +213,24 @@ interface StreamEvent {
   index?: number;
   content_block?: ContentBlock;
   delta?: StreamDelta;
+  /** `message_start` carries the prompt's cost; `message_delta` the reply's. */
+  message?: { usage?: StreamUsage };
+  usage?: StreamUsage;
   error?: { message?: string };
+}
+
+/**
+ * What a turn cost, as the stream reports it.
+ *
+ * `input_tokens` is the uncached remainder only, so the prompt's real size is
+ * all three added together — reading the one field is how a run that was
+ * almost entirely cache hits looks like a run that barely sent anything.
+ */
+interface StreamUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
 }
 
 interface StreamDelta {
@@ -237,6 +259,7 @@ interface Turn {
   stopReason: string | null;
   stopDetails: { category?: string; explanation?: string } | null;
   sawStop: boolean;
+  usage: StreamUsage;
   /** Text held back until the end of the network read that produced it. */
   outbound: string;
 }
@@ -686,6 +709,31 @@ function callModel(
       messages: messages,
       tools: TOOLS,
       stream: true,
+      // Cache the prompt, which for this loop means the conversation.
+      //
+      // A breakpoint caches everything *before* it, and the top-level form
+      // puts one at the end of the last block and moves it forward as the
+      // conversation grows — so this single field covers the tools, the
+      // system prompt and every turn so far. Each turn reads back what the
+      // turn before it wrote, which is the shape that makes resending the
+      // whole run affordable.
+      //
+      // It does nothing at all until the whole prompt passes 4096 tokens,
+      // and that number is the model's rather than a choice: Haiku 4.5 has
+      // the highest minimum cacheable prefix of any current model, and a
+      // shorter prefix is refused silently — no error, just a `usage` that
+      // reports nothing cached. The tools and system prompt come to roughly
+      // 400 tokens together, so caching *those* — the obvious thing to
+      // reach for, and what this was expected to be — would never once have
+      // fired. What crosses 4096 is a long conversation, which is exactly
+      // the run whose bill is worth cutting.
+      //
+      // Moving up a tier lowers the threshold rather than raising it (512 on
+      // Opus 5), so this starts paying sooner there, not later. The 5-minute
+      // TTL is deliberate: a turn is queued the moment the one before it
+      // ends, so every turn refreshes the entry, and the 1-hour TTL would
+      // double the write price to buy a gap this loop does not have.
+      cache_control: { type: "ephemeral" },
       // No `output_config.effort` and no `thinking`: this model rejects the
       // first and does not take the adaptive form of the second. Both come
       // back if the model moves up a tier.
@@ -726,6 +774,7 @@ function readModelStream(
     stopReason: null,
     stopDetails: null,
     sawStop: false,
+    usage: {},
     outbound: "",
   };
 
@@ -755,6 +804,8 @@ function readModelStream(
   // remainder holding no data line, which is the usual case.
   applyEvent(turn, buffer);
   flush(turn, userId, runId);
+
+  logUsage(turn);
 
   if (!turn.sawStop) {
     // The body ended early. Saying so is better than returning a turn that
@@ -791,6 +842,11 @@ function applyEvent(turn: Turn, frame: string): void {
   }
 
   switch (event.type) {
+    case "message_start":
+      // The prompt's cost, including how much of it the cache answered.
+      if (event.message?.usage) turn.usage = event.message.usage;
+      return;
+
     case "content_block_start": {
       const index = event.index ?? 0;
       turn.blocks[index] = (event.content_block ?? {
@@ -814,6 +870,10 @@ function applyEvent(turn: Turn, frame: string): void {
       if (event.delta?.stop_details) {
         turn.stopDetails = event.delta.stop_details;
       }
+      // The reply's length is only known once it has stopped.
+      if (typeof event.usage?.output_tokens === "number") {
+        turn.usage.output_tokens = event.usage.output_tokens;
+      }
       return;
 
     case "message_stop":
@@ -827,9 +887,41 @@ function applyEvent(turn: Turn, frame: string): void {
       throw new Error(event.error?.message ?? "The model stream failed.");
 
     default:
-      // `ping`, `message_start`, and whatever the API grows next.
+      // `ping`, and whatever the API grows next.
       return;
   }
+}
+
+/**
+ * Write down what the turn cost and how much of it the cache paid for.
+ *
+ * The `usage` fields are the only evidence that caching is working: a prefix
+ * that stopped matching still answers, still looks right, and is simply
+ * billed in full — the failure announces itself nowhere else. So this is
+ * logged on every turn rather than measured once and trusted, since what
+ * breaks caching is a later change to how the prompt is assembled.
+ *
+ * In a healthy run `cached` grows turn over turn while `wrote` stays near the
+ * size of what the last turn added. `cached` staying at 0 once a run is past
+ * a few thousand tokens means the prefix is being rewritten somewhere above
+ * the breakpoint.
+ */
+function logUsage(turn: Turn): void {
+  const cached = turn.usage.cache_read_input_tokens ?? 0;
+  const wrote = turn.usage.cache_creation_input_tokens ?? 0;
+  const fresh = turn.usage.input_tokens ?? 0;
+  console.log(
+    "agent: prompt " +
+      (cached + wrote + fresh) +
+      " tokens (cached " +
+      cached +
+      ", wrote " +
+      wrote +
+      ", new " +
+      fresh +
+      "), reply " +
+      (turn.usage.output_tokens ?? 0),
+  );
 }
 
 function applyDelta(turn: Turn, index: number, delta: StreamDelta): void {

@@ -91,8 +91,8 @@ is.
 |                |                                                                                 |
 | -------------- | ------------------------------------------------------------------------------- |
 | One turn       | `javascript.job_timeout_ms`, 60 s by default — a turn is a job, not a request   |
-| The model call | Synchronous `fetch`, its timeout clamped to what is left of the turn            |
-| Streaming      | None — `fetch` buffers. The log updates per turn, not per token                 |
+| The model call | Synchronous `fetchStream`, its timeout clamped to what is left of the turn      |
+| Streaming      | The answer is sent on as it is written, so the page fills in during a turn      |
 | Concurrency    | Each in-flight turn holds one of `max_concurrent_executions` slots and a thread |
 
 A turn is queued work, so it gets the job budget rather than the 10 s a request
@@ -111,6 +111,34 @@ for the three things that change with it.
 Raise the budget **before** raising either. A turn that runs past its budget
 fails, and with `maxAttempts: 1` it is not retried — the run stops rather than
 quietly costing twice.
+
+## What a run costs
+
+Every turn resends the run so far, so the bill grows with the length of a run
+rather than with the prompt. The request asks for the prompt to be cached,
+which turns most of that resending into cache reads at about a tenth of the
+price — each turn reading back what the turn before it wrote.
+
+It does nothing until a run's whole prompt passes **4096 tokens**, and that is
+the model's number rather than a choice: `claude-haiku-4-5` has the highest
+minimum cacheable prefix of any current model, and a shorter prefix is refused
+silently — no error, just a `usage` reporting nothing cached. The tools and the
+system prompt come to roughly 400 tokens between them, so caching only those
+would never fire once. What crosses 4096 is a long conversation, which is
+exactly the run worth making cheaper. Moving up a tier lowers the threshold
+(512 on `claude-opus-5`), so caching starts paying sooner there, not later.
+
+Every turn logs what it spent, because a prefix that stops matching still
+answers and is simply billed in full:
+
+```
+read_logs uri=<this script> contains="agent: prompt"
+agent: prompt 5312 tokens (cached 5000, wrote 300, new 12), reply 44
+```
+
+`cached` should grow turn over turn while `wrote` stays near the size of what
+the last turn added. `cached` sitting at 0 in a run well past a few thousand
+tokens means something above the breakpoint is being rewritten between turns.
 
 ## When a run misbehaves
 
