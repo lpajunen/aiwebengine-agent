@@ -31,6 +31,12 @@ const el = {
   meterFill: document.getElementById("meter-fill"),
   meterText: document.getElementById("meter-text"),
   activity: document.getElementById("activity"),
+  planPanel: document.getElementById("plan-panel"),
+  planBody: document.getElementById("plan-body"),
+  planNote: document.getElementById("plan-note"),
+  planStatus: document.getElementById("plan-status"),
+  approve: document.getElementById("approve"),
+  reject: document.getElementById("reject"),
 };
 
 // Why a run ended, for the reasons that are not "it finished". Named here so
@@ -200,6 +206,71 @@ function setWorking(working) {
     ? "Say something to the run in progress..."
     : "Ask for something...";
 }
+
+/**
+ * Show or clear the plan a run is suspended on.
+ *
+ * The panel is the only part of this page that is waiting for the person
+ * rather than reporting to them, so it is shown and hidden on its own rather
+ * than folded into `setWorking` — a suspended run is still a working run as
+ * far as the stop button and the prompt box are concerned, and conflating the
+ * two would take away the ability to stop a run that is waiting.
+ */
+function showPlan(body) {
+  el.planBody.textContent = body;
+  el.planNote.value = "";
+  setStatus(el.planStatus, "");
+  el.approve.disabled = false;
+  el.reject.disabled = false;
+  el.planPanel.hidden = false;
+  // "Working. You can close this page." is true of a run taking turns and
+  // false of one that has stopped to ask — and closing the page while it
+  // waits is exactly how nobody answers it.
+  setStatus(el.runStatus, "Waiting for your answer.");
+}
+
+function hidePlan() {
+  el.planPanel.hidden = true;
+}
+
+/**
+ * Answer it.
+ *
+ * Both buttons go to one endpoint with the decision as a value, rather than
+ * one endpoint each: they are the same act with a different answer, and the
+ * note travels with either — a rejection that cannot say why teaches the model
+ * one bit, and the next plan is a guess.
+ */
+async function decide(decision) {
+  if (!shownRun) return;
+  el.approve.disabled = true;
+  el.reject.disabled = true;
+  setStatus(
+    el.planStatus,
+    decision === "approve" ? "Approving..." : "Rejecting...",
+  );
+  try {
+    await api("/agent/decide", {
+      method: "POST",
+      body: JSON.stringify({
+        runId: shownRun,
+        decision: decision,
+        note: el.planNote.value.trim(),
+      }),
+    });
+    // What happens next arrives on the stream, the same as every other turn,
+    // and so does the decision itself — which is what updates a second tab
+    // that was showing the same plan.
+    hidePlan();
+  } catch (e) {
+    setStatus(el.planStatus, e.message, true);
+    el.approve.disabled = false;
+    el.reject.disabled = false;
+  }
+}
+
+el.approve.addEventListener("click", () => decide("approve"));
+el.reject.addEventListener("click", () => decide("reject"));
 
 function setStatus(node, text, isError) {
   node.textContent = text;
@@ -450,6 +521,12 @@ async function start() {
     // to the tab.
     const state = history.runState ?? "done";
     setWorking(state === "running" || state === "waiting");
+    // A run suspended before this page was opened is still asking. Without
+    // this the panel only ever appeared for whoever happened to be watching
+    // when the plan landed.
+    if (state === "waiting" && history.pendingPlan) {
+      showPlan(history.pendingPlan.body);
+    }
     if (runWorking)
       setStatus(el.runStatus, "Working. You can close this page.");
 
@@ -535,10 +612,26 @@ async function start() {
         setWorking(true);
       }
 
+      // A run has suspended and is asking. Rendered as a panel as well as an
+      // activity row: the row is the record of what was proposed, the panel is
+      // the thing that can be answered.
+      if (payload.kind === "plan") {
+        shownRun = payload.runId;
+        showPlan(payload.message);
+      }
+
+      // Someone answered — this tab or another one. Either way the question
+      // is gone, which is what keeps two open tabs from both offering to
+      // decide something already decided.
+      if (payload.kind === "decision") {
+        hidePlan();
+      }
+
       // The end of a run is an activity like any other now. It used to be the
       // reply to the step the page was waiting on, and there is nothing to
       // wait on any more.
       if (payload.kind === "done") {
+        hidePlan();
         if (wasPending) render();
         setWorking(false);
         const stopped = STOP_REASONS.indexOf(payload.message) !== -1;

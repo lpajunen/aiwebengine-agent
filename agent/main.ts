@@ -277,8 +277,19 @@ interface RunRow {
   id: number;
   run_id: string;
   run_state: string;
+  run_mode?: string;
   task_id: string;
   steps?: number;
+}
+
+/** A plan put to the person, before and after they answer it. */
+interface PlanRow {
+  id: number;
+  run_id: string;
+  body: string;
+  decision: string;
+  note?: string;
+  created_ms: number;
 }
 
 interface InterjectionRow {
@@ -386,12 +397,56 @@ interface AssetInfo {
  * is free to be narrower than this list. Asking for what is there and taking
  * what is given keeps a read-only grant working instead of failing every call.
  */
-const CODE_CAPABILITIES: Capability[] = [
+const PLAN_CAPABILITIES: Capability[] = [
   "view_logs",
   "use_network",
   "read_assets",
   "read_storage",
 ];
+
+/**
+ * What the same code may do once a person has said yes.
+ *
+ * One capability wider, and the narrowness is the point rather than a first
+ * instalment. A plan is approved on the strength of what it said it would do,
+ * and the further the granted set is from that sentence the less the approval
+ * meant.
+ *
+ * **`write_script_data` is not here and should never be.** It is the one name
+ * that would let model-written code reach this agent's own control plane: the
+ * `runs` table holds the state every stop goes through and the mode this
+ * constant is selected by, `plans` holds the row a person is being asked to
+ * decide, and `messages` holds the conversation the next turn reasons from. A
+ * turn holding it could approve its own plan, un-cancel itself, or rewrite
+ * what it was asked to do — so the approval gate would be a gate the thing
+ * being gated can open. Reading them is refused for a different reason (they
+ * hold every person's rows, not just this one's), but this is the reason that
+ * does not soften with time.
+ *
+ * `enqueue_tasks` and `send_messages` are absent for a smaller reason: a turn
+ * that can start work is a turn that can outlive the approval it was given,
+ * and neither has been asked for yet. They are available to add; the one above
+ * is not.
+ */
+const ACT_CAPABILITIES: Capability[] = PLAN_CAPABILITIES.concat([
+  "write_storage",
+]);
+
+/**
+ * What a run may do, as a name rather than a flag.
+ *
+ * Two values, deliberately stored as a string. What actually varies between
+ * harnesses that ship this is *how often a person is asked* — plan,
+ * auto-accept, unattended — which is a scale rather than a switch, and every
+ * one of them that started with a boolean has had to re-litigate it on the
+ * next tool added. A third rung here is a row value and a branch in
+ * [`capabilitiesFor`], not a schema change and not a rewrite of this type.
+ *
+ * `plan` is the floor and the default, so a run that never needs to write is
+ * never interrupted: everything readable is already in [`PLAN_CAPABILITIES`],
+ * and only writing has to be asked for.
+ */
+type RunMode = "plan" | "act";
 
 /**
  * How long model-written code may run.
@@ -531,6 +586,37 @@ const TOOLS: ToolSpec[] = [
  * which also gives a skill somewhere to send the model next, since a SKILL.md
  * may name files beside it.
  */
+/**
+ * Offered only while the run is planning.
+ *
+ * In `act` the plan has already been approved, and a tool whose whole effect
+ * is "ask again" would spend a turn out of twelve to arrive back where it
+ * started. It costs one cache miss to withdraw it: a breakpoint caches
+ * everything before it, the tools sit at the front of that, so the turn after
+ * an approval rewrites the prefix. Once per run, on a run that has just been
+ * given permission to do the expensive half of its work.
+ */
+const REQUEST_APPROVAL_TOOL: ToolSpec = {
+  name: "request_approval",
+  description:
+    "Ask the person to approve what you are about to do, and stop until they answer. You are currently able to read and fetch but not to change anything; approval is what lets run_js write. " +
+    "Call this once you know what you intend to do, not before you have worked it out — the person is reading the plan to decide, so it has to say what you will actually change, and what you found that led you there. The run pauses here: your next turn only happens if they approve, and if they reject you will be told why and can propose something else. " +
+    "Do not call it for work that only reads. Everything you can already do, you can do without asking.",
+  input_schema: {
+    type: "object",
+    properties: {
+      plan: {
+        type: "string",
+        description:
+          "What you intend to do and why, in plain language the person can agree or disagree with.",
+      },
+    },
+    required: ["plan"],
+    additionalProperties: false,
+  },
+  strict: true,
+};
+
 const READ_SKILL_TOOL: ToolSpec = {
   name: "read_skill",
   description:
@@ -816,6 +902,11 @@ function init(): void {
           { name: "user_id", type: "text" },
           { name: "run_id", type: "text" },
           { name: "run_state", type: "text" },
+          // What this run may do, not what it is doing: `run_state` is the
+          // gate every stop goes through, this is the gate every write goes
+          // through. Added after the table existed, which the read retry in
+          // `queryRows` is there for.
+          { name: "run_mode", type: "text" },
           { name: "task_id", type: "text" },
           { name: "steps", type: "bigint" },
           { name: "created_ms", type: "bigint" },
@@ -843,6 +934,32 @@ function init(): void {
       }),
     ),
     'creating the table "interjections"',
+  );
+
+  // A plan put to the person, and what they said about it. A table rather
+  // than a column on the run for the reason `interjections` is one: two tabs
+  // answering at once must not lose one to a read-modify-write, and the row
+  // is worth keeping after the decision — "what was I approving" is the
+  // question somebody asks a week later, and the run's state cannot answer it.
+  must(
+    database.ensureTable(
+      "plans",
+      JSON.stringify({
+        columns: [
+          { name: "user_id", type: "text" },
+          { name: "run_id", type: "text" },
+          { name: "body", type: "text" },
+          { name: "decision", type: "text" },
+          // What the person said as they decided. A rejection with nothing
+          // attached tells the model it was wrong and not how, which spends
+          // a turn to learn one bit.
+          { name: "note", type: "text" },
+          { name: "created_ms", type: "bigint" },
+          { name: "decided_ms", type: "bigint" },
+        ],
+      }),
+    ),
+    'creating the table "plans"',
   );
 
   // Column names avoid anything SQL might claim: `output` and `usage` are
@@ -880,6 +997,10 @@ function init(): void {
   routeRegistry.registerRoute("/agent/say", "interject", "POST", {
     tags: ["Agent"],
     summary: "Say something to a run already in progress",
+  });
+  routeRegistry.registerRoute("/agent/decide", "decideRun", "POST", {
+    tags: ["Agent"],
+    summary: "Approve or reject the plan a run is waiting on",
   });
   routeRegistry.registerRoute("/agent/history", "readHistory", "GET", {
     tags: ["Agent"],
@@ -1189,9 +1310,12 @@ function advanceRun(context: HandlerContext): void {
     // during the model call, which is the one part of a turn that cannot be
     // interrupted. Catching it here stops the run a whole turn earlier than
     // the next gate would.
+    // Not only a cancel any more: a turn that called `request_approval` set
+    // this to `waiting`, and declining to queue a successor is exactly how a
+    // run suspends. The gate is the same one either way, which is the point.
     const now = runStateOf(userId, runId);
     if (now !== null && now !== "running") {
-      console.log(`agent: run ${runId} was stopped mid-turn`);
+      console.log(`agent: run ${runId} is ${now}; not queuing another turn`);
       return;
     }
 
@@ -1312,6 +1436,148 @@ function cancelRun(context: HandlerContext): HttpResponse {
 }
 
 /**
+ * Answer the plan a run is waiting on, and let it go again.
+ *
+ * The resuming half, and the ordering is the whole of it. The transition out
+ * of `waiting` is taken **first and conditionally**, before any message is
+ * written or any task is queued, because that single write is the mutex: two
+ * tabs pressing approve, or one person double-clicking, both reach here and
+ * exactly one moves the run. The loser changes nothing and is answered as
+ * though it had won, since from the person's side it did.
+ *
+ * Doing it the other way round — queue, then set the state — is what
+ * `advanceRun` does, and it is wrong here for a reason that does not apply
+ * there: a second caller would have queued a second turn before discovering
+ * it lost, and the run would take two turns for one approval, each paid for
+ * on somebody's own key.
+ *
+ * Then the message, then the task. The message has to be in the conversation
+ * before anything can read it, and the queued turn is exactly a thing that
+ * reads it — enqueue first and the turn can start against a history that does
+ * not yet say it was approved.
+ *
+ * A rejection resumes the run rather than ending it. The model is told what
+ * was wrong and gets to propose something else, which is the difference
+ * between a decision and a stop — and `MAX_STEPS` bounds how many times that
+ * can go round. Somebody who wants it to stop has the stop button.
+ */
+function decideRun(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  let runId = "";
+  let decision = "";
+  let note = "";
+  try {
+    const body = (context.request?.json() ?? {}) as {
+      runId?: string;
+      decision?: string;
+      note?: string;
+    };
+    runId = String(body.runId ?? "").trim();
+    decision = String(body.decision ?? "").trim();
+    note = String(body.note ?? "").trim();
+  } catch (e) {
+    return json(400, { error: "Expected a JSON body." });
+  }
+  if (!runId) return json(400, { error: "A runId is required." });
+  if (decision !== "approve" && decision !== "reject") {
+    return json(400, { error: 'Decision must be "approve" or "reject".' });
+  }
+
+  // Scoped to this person in the query, so another account's run id finds
+  // nothing rather than being decided.
+  const row = runRow(userId, runId);
+  if (!row) return json(404, { error: "No such run." });
+
+  const plan = pendingPlan(userId, runId);
+
+  // The mutex. Everything below this line happens once.
+  if (!setRunState(userId, runId, "running", undefined, "waiting")) {
+    const state = String(row.run_state ?? "running");
+    return json(200, {
+      runId: runId,
+      state: state,
+      alreadyDecided: true,
+    });
+  }
+
+  const approved = decision === "approve";
+  if (plan) {
+    writeRow(
+      () =>
+        database.update(
+          "plans",
+          Number(plan.id),
+          JSON.stringify({
+            decision: approved ? "approved" : "rejected",
+            note: note,
+            decided_ms: Date.now(),
+          }),
+        ),
+      "recording a decision",
+    );
+  }
+
+  if (approved) {
+    // What the mode is for. Written before the turn is queued, so the turn
+    // that reads it cannot see the old one.
+    writeRow(
+      () =>
+        database.update(
+          "runs",
+          Number(row.id),
+          JSON.stringify({ run_mode: "act", updated_ms: Date.now() }),
+        ),
+      "widening a run",
+    );
+  }
+
+  // Delivered as an ordinary message rather than an interjection: the run is
+  // suspended, so there is no turn in flight to race, and this has to be the
+  // last thing the next turn reads.
+  const told = approved
+    ? "[The person approved your plan." +
+      (note ? ' They added: "' + note + '"' : "") +
+      " run_js can now write. Carry it out.]"
+    : "[The person rejected your plan." +
+      (note ? ' They said: "' + note + '"' : "") +
+      " Do not carry it out. Propose something else, or tell them why you cannot.]";
+  appendMessage(userId, runId, "user", [{ type: "text", text: told }]);
+
+  recordActivity(
+    userId,
+    runId,
+    "decision",
+    approved
+      ? "You approved the plan." + (note ? " " + note : "")
+      : "You rejected the plan." + (note ? " " + note : ""),
+  );
+
+  try {
+    const task = personalTasks.enqueue({
+      handler: "advanceRun",
+      payload: { runId: runId },
+      maxAttempts: 1,
+    });
+    setRunState(userId, runId, "running", task.taskId, "running");
+  } catch (e) {
+    // Most likely the grant lapsed while the plan sat waiting, which is the
+    // longest any run is idle and so the likeliest moment for it.
+    const message = e instanceof Error ? e.message : String(e);
+    recordActivity(userId, runId, "error", `The run stopped: ${message}`);
+    finishRun(userId, runId, "error");
+    return json(500, { error: message });
+  }
+
+  return json(200, {
+    runId: runId,
+    state: "running",
+    mode: approved ? "act" : "plan",
+  });
+}
+
+/**
  * Say something to a run that is already working.
  *
  * Queued rather than appended to the conversation here: the turn in flight has
@@ -1398,6 +1664,8 @@ function readHistory(context: HandlerContext): HttpResponse {
   const latestRun =
     ordered.length > 0 ? String(ordered[ordered.length - 1].run_id ?? "") : "";
 
+  const waitingOn = latestRun ? pendingPlan(userId, latestRun) : null;
+
   return json(200, {
     activities: ordered.map((row) => ({
       runId: row.run_id,
@@ -1411,6 +1679,11 @@ function readHistory(context: HandlerContext): HttpResponse {
     // So a page opened while a run is working shows a stop button, rather
     // than learning the run exists only if a turn happens to land.
     runState: latestRun ? (runStateOf(userId, latestRun) ?? "done") : "done",
+    // So a page opened while a run is suspended shows the plan and its two
+    // buttons, rather than a run that looks stuck for no stated reason.
+    pendingPlan: waitingOn
+      ? { body: String(waitingOn.body ?? ""), at: Number(waitingOn.created_ms) }
+      : null,
     spend: runSpend(userId, latestRun),
     // Sent rather than duplicated in the page, so the rates the numbers were
     // costed with cannot drift away from the model that produced them.
@@ -1506,6 +1779,10 @@ function callModel(
   // premium on bytes nothing will ever read back.
   const summarising = options?.summarise === true;
   const skills = summarising ? [] : loadSkills();
+  // Both of the lines below follow the run's mode, which changes at most once
+  // in a run — when a plan is approved. That rewrites the cached prefix, since
+  // the tools sit at the front of it; see `REQUEST_APPROVAL_TOOL`.
+  const mode = summarising ? "plan" : runModeOf(userId, runId);
   const stream = fetchStream(API_URL, {
     method: "POST",
     headers: {
@@ -1518,13 +1795,9 @@ function callModel(
       max_tokens: MAX_TOKENS,
       // Both of these follow the skill library rather than the turn, so they
       // are as stable across a run as anything else in the cached prefix.
-      system: summarising ? COMPACT_PROMPT : systemPromptFor(skills),
+      system: summarising ? COMPACT_PROMPT : systemPromptFor(skills, mode),
       messages: messages,
-      tools: summarising
-        ? undefined
-        : skills.length > 0
-          ? TOOLS.concat([READ_SKILL_TOOL])
-          : TOOLS,
+      tools: summarising ? undefined : toolsFor(skills, mode),
       stream: true,
       // Cache the prompt, which for this loop means the conversation.
       //
@@ -1987,6 +2260,38 @@ function runStateOf(userId: string, runId: string): RunState | null {
     : "running";
 }
 
+/**
+ * What this run may do.
+ *
+ * Fails *closed*, which is the opposite of [`runStateOf`] and for the reason
+ * that makes both right: there, "no row" had to mean the run carries on,
+ * because work already accepted must not be abandoned over missing
+ * bookkeeping. Here "no row" — or a row written before this column existed —
+ * means the narrower of the two sets, because the cost of guessing wrong is
+ * a write nobody approved rather than a turn that did not happen.
+ */
+function runModeOf(userId: string, runId: string): RunMode {
+  const row = runRow(userId, runId);
+  return String(row?.run_mode ?? "") === "act" ? "act" : "plan";
+}
+
+/** The plan this run is waiting on, if it is waiting on one. */
+function pendingPlan(userId: string, runId: string): PlanRow | null {
+  if (!runId) return null;
+  try {
+    const rows = queryRows(
+      "plans",
+      JSON.stringify({ user_id: userId, run_id: runId, decision: "pending" }),
+      1,
+      "id",
+      "desc",
+    ) as PlanRow[];
+    return rows.length > 0 ? rows[0] : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 /** Whether a run can still be spoken to or stopped. Absence means no. */
 function runIsLive(userId: string, runId: string): boolean {
   const state = runStateOf(userId, runId);
@@ -2005,6 +2310,10 @@ function openRun(userId: string, runId: string, taskId: string): void {
           user_id: userId,
           run_id: runId,
           run_state: "running",
+          // Every run starts able to read and unable to write, which is what
+          // `run_js` could already do — so this is not a new restriction on
+          // anything, it is the floor the approval raises.
+          run_mode: "plan",
           task_id: taskId,
           steps: 0,
           created_ms: Date.now(),
@@ -2601,11 +2910,39 @@ function skillBody(text: string): string {
  * A deployment with no skills gets the prompt it had before this existed,
  * byte for byte, and no extra tool.
  */
-function systemPromptFor(skills: Skill[]): string {
-  if (skills.length === 0) return SYSTEM_PROMPT;
+/**
+ * The tool list for one turn.
+ *
+ * Both conditions are properties of the run rather than of the turn — the
+ * skill library does not change while a run is going, and the mode changes
+ * once at most — so the list is as stable across a run as the rest of the
+ * cached prefix, which is what a breakpoint at the end of the conversation
+ * needs it to be.
+ */
+function toolsFor(skills: Skill[], mode: RunMode): ToolSpec[] {
+  let tools = TOOLS;
+  if (mode === "plan") tools = tools.concat([REQUEST_APPROVAL_TOOL]);
+  if (skills.length > 0) tools = tools.concat([READ_SKILL_TOOL]);
+  return tools;
+}
+
+function systemPromptFor(skills: Skill[], mode: RunMode): string {
+  const preamble =
+    mode === "act"
+      ? SYSTEM_PROMPT +
+        " Your plan has been approved, so run_js can now write to this " +
+        "person's stored notes as well as read them. Do what you said you " +
+        "would do and nothing wider — the approval was for that plan."
+      : SYSTEM_PROMPT +
+        " You can read, fetch and compute, but you cannot change anything " +
+        "yet. If what you have been asked for needs writing, work out what " +
+        "you intend to do and call request_approval with it; the run stops " +
+        "until the person answers. Anything that only reads, just do.";
+
+  if (skills.length === 0) return preamble;
 
   const lines = [
-    SYSTEM_PROMPT,
+    preamble,
     "",
     "Skills are instructions for particular kinds of work. When one covers " +
       "what you have been asked to do, call read_skill and follow it before " +
@@ -2693,6 +3030,10 @@ function runTool(
 
     case "run_js": {
       return runJsTool(userId, runId, String(input.source ?? ""));
+    }
+
+    case "request_approval": {
+      return requestApprovalTool(userId, runId, String(input.plan ?? ""));
     }
 
     case "read_skill": {
@@ -2826,7 +3167,10 @@ function runJsTool(
     };
   }
 
-  const granted = codeCapabilities();
+  // Read per call rather than passed in, because it can change between one
+  // turn and the next: an approval lands while the run is suspended, and the
+  // turn after holds more than the turn before did.
+  const granted = capabilitiesFor(runModeOf(userId, runId));
 
   recordActivity(userId, runId, "code", cut(source.trim(), CODE_ECHO_CHARS));
 
@@ -2853,17 +3197,97 @@ function runJsTool(
 }
 
 /**
- * What `run_js` may actually be given, which is what it wants and this turn
+ * Put a plan to the person and stop the run until they answer.
+ *
+ * The suspending half needed no new machinery, which was the whole argument
+ * for building the stopping half once: `advanceRun` already re-reads the run's
+ * state after its tools have run and declines to queue a successor unless it
+ * is still `running`. So setting `waiting` here *is* the suspend — the turn
+ * finishes, its `tool_result` is stored beside the `tool_use` that asked for
+ * it, and nothing queues the next one. The conversation is left at a point it
+ * can legally resume from, which is why this must be a tool and not, say, a
+ * stop reason read off the model's prose.
+ *
+ * The state is written first and the record second. If the run was cancelled
+ * while this turn was thinking, the transition fails and there is no plan row
+ * asking a person to decide something that has already been abandoned.
+ */
+function requestApprovalTool(
+  userId: string,
+  runId: string,
+  plan: string,
+): { content: string; isError: boolean } {
+  const body = plan.trim();
+  if (!body) {
+    return {
+      content:
+        "A plan is required: say what you intend to do, in words the person can agree or disagree with.",
+      isError: true,
+    };
+  }
+
+  if (runModeOf(userId, runId) === "act") {
+    // The tool is withdrawn in `act`, so this is only reachable if the model
+    // replayed an earlier call. Answering plainly beats refusing.
+    return {
+      content:
+        "Your plan is already approved — you can write. Carry on and do it.",
+      isError: false,
+    };
+  }
+
+  if (!setRunState(userId, runId, "waiting", undefined, "running")) {
+    return {
+      content:
+        "This run is no longer running, so there is nobody to ask. Stop here.",
+      isError: true,
+    };
+  }
+
+  writeRow(
+    () =>
+      database.insert(
+        "plans",
+        JSON.stringify({
+          user_id: userId,
+          run_id: runId,
+          body: body,
+          decision: "pending",
+          note: "",
+          created_ms: Date.now(),
+          decided_ms: 0,
+        }),
+      ),
+    "recording a plan",
+  );
+
+  recordActivity(userId, runId, "plan", body);
+
+  return {
+    content:
+      "Paused. The person has been shown your plan and the run stops here until they answer. " +
+      "If they approve, your next turn can write; if they reject, you will be told why.",
+    isError: false,
+  };
+}
+
+/**
+ * What `run_js` may actually be given: what this mode wants, that this turn
  * holds.
  *
- * A grant can be narrower than `CODE_CAPABILITIES` — a delegation that said
- * read and not write is still allowed to be one — and `sandbox.run` throws
- * when asked to keep something the caller does not have. So the list is a
- * request rather than an assertion, and an empty intersection still runs: code
- * holding nothing at all computes, which is the base case everything else is
+ * A grant can be narrower than either list — a delegation that said read and
+ * not write is still allowed to be one — and `sandbox.run` throws when asked
+ * to keep something the caller does not have. So the list is a request rather
+ * than an assertion, and an empty intersection still runs: code holding
+ * nothing at all computes, which is the base case everything else is
  * subtracted from.
+ *
+ * Note what this means for an approved plan under a read-only delegation: the
+ * person approved the plan and the *grant* still refuses the write. That is
+ * the right order. An approval says what this run may attempt; the grant says
+ * what the script may ever do as them, and one click cannot widen the other.
  */
-function codeCapabilities(): Capability[] {
+function capabilitiesFor(mode: RunMode): Capability[] {
   let held: Capability[] = [];
   try {
     held = sandbox.held();
@@ -2873,7 +3297,8 @@ function codeCapabilities(): Capability[] {
     console.log("agent: could not read what this turn holds: " + String(e));
     return [];
   }
-  return CODE_CAPABILITIES.filter((name) => held.indexOf(name) !== -1);
+  const wanted = mode === "act" ? ACT_CAPABILITIES : PLAN_CAPABILITIES;
+  return wanted.filter((name) => held.indexOf(name) !== -1);
 }
 
 /**

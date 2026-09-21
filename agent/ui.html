@@ -113,6 +113,19 @@
         color: var(--muted);
         font-size: 13px;
       }
+      /* The plan itself. Newlines preserved because the model writes these as
+         a short list more often than as a paragraph, and a list run together
+         is the one thing that would make it harder to judge. */
+      .plan-body {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        margin: 0 0 12px;
+      }
+      /* A suspended run is waiting on a person, so the panel says so rather
+         than looking like every other section. */
+      #plan-panel {
+        border-color: var(--accent);
+      }
       /* A link the person is meant to act on, rather than one to read. Styled
          as the buttons are because it does what they do — the difference is
          that this one navigates, which is a link's job and not a button's. */
@@ -274,6 +287,24 @@
           <button id="save-key">Save key</button>
           <button id="forget-key" class="secondary" hidden>Remove key</button>
           <span id="key-status" class="status"></span>
+        </div>
+      </section>
+
+      <!-- Shown only while a run is suspended on a plan. Above the prompt
+           rather than in the activity list, because it is the one thing on the
+           page that is waiting for the person rather than telling them
+           something. -->
+      <section id="plan-panel" hidden>
+        <h2>Waiting for you</h2>
+        <p id="plan-body" class="plan-body"></p>
+        <input
+          id="plan-note"
+          placeholder="Optional: say why, or what to do instead"
+        />
+        <div class="row">
+          <button id="approve">Approve</button>
+          <button id="reject" class="secondary">Reject</button>
+          <span id="plan-status" class="status"></span>
         </div>
       </section>
 
