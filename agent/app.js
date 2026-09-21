@@ -28,6 +28,11 @@ const el = {
   activity: document.getElementById("activity"),
 };
 
+// Why a run ended, for the reasons that are not "it finished". Named here so
+// that adding one to the script is not a silent change to what this page says:
+// an unlisted reason reads as "Done.", which is the wrong word for a stop.
+const STOP_REASONS = ["error", "step-limit", "history-limit"];
+
 let entries = [];
 let running = false;
 
@@ -338,13 +343,8 @@ async function start() {
       // wait on any more.
       if (payload.kind === "done") {
         if (wasPending) render();
-        setStatus(
-          el.runStatus,
-          payload.message === "error" || payload.message === "step-limit"
-            ? "Stopped."
-            : "Done.",
-          payload.message === "error" || payload.message === "step-limit",
-        );
+        const stopped = STOP_REASONS.indexOf(payload.message) !== -1;
+        setStatus(el.runStatus, stopped ? "Stopped." : "Done.", stopped);
         return;
       }
 

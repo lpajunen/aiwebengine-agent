@@ -97,11 +97,23 @@ const MAX_STEPS = 12;
 const STREAM_PATH = "/agent/events";
 
 /**
- * Rows one run may accumulate; also the history window sent to the model.
+ * Rows one run may accumulate before it is stopped.
  *
- * Every turn resends the run so far, so this bounds both the time a step
- * spends and what it costs. A run reaching it is one `MAX_STEPS` should have
- * stopped long before.
+ * A ceiling, not a window — and the difference is the whole of why this is
+ * not simply a `LIMIT` on the read. A conversation cannot be truncated at an
+ * arbitrary row: this run has exactly one genuine user message, the prompt,
+ * and every later one carries `tool_result` blocks the API requires to be
+ * preceded by the matching `tool_use` in the message immediately before. So
+ * dropping rows off the front either starts the conversation on an assistant
+ * turn or orphans tool results, and both are refused outright. There is no
+ * valid truncation point except the beginning, which is the prompt.
+ *
+ * Summarising the middle and carrying on — compaction — is the real answer to
+ * a run this long, and it is not built. Until it is, a run that gets here has
+ * gone wrong and is stopped where it stands.
+ *
+ * `MAX_STEPS` should have ended it long before: twelve turns is roughly
+ * twenty-five rows.
  */
 const MAX_HISTORY_ROWS = 60;
 
@@ -488,6 +500,19 @@ function advanceRun(context: HandlerContext): void {
   const history = loadMessages(userId, runId);
   if (history.length === 0) {
     console.log(`agent: no such run ${runId}`);
+    return;
+  }
+
+  // Over the ceiling. Stopped rather than truncated, because there is nowhere
+  // valid to truncate — see `MAX_HISTORY_ROWS`.
+  if (history.length > MAX_HISTORY_ROWS) {
+    recordActivity(
+      userId,
+      runId,
+      "error",
+      `Stopped: this run passed ${MAX_HISTORY_ROWS} messages without finishing.`,
+    );
+    finishRun(userId, runId, "history-limit");
     return;
   }
 
@@ -1197,13 +1222,25 @@ function appendMessage(
  * Ordered by `id` rather than `created_ms`: two rows written in the same
  * millisecond tie on the timestamp, and a conversation replayed out of order
  * is a different conversation.
+ *
+ * Ascending with a limit takes the *oldest* rows, which is what makes the
+ * ceiling detectable rather than silent. Reading `MAX_HISTORY_ROWS` exactly
+ * meant a run past the ceiling went on being served its first sixty rows
+ * forever: the newest turn — the tool results the model was waiting on — fell
+ * outside the read, so every turn after that resent an identical prefix and
+ * the run reasoned about a conversation that had stopped moving. Nothing
+ * failed; it just could not finish, and `maxAttempts: 1` meant nothing
+ * retried it into view either.
+ *
+ * One row past the ceiling is enough to tell "at the limit" from "over it",
+ * which is the distinction the caller acts on.
  */
 function loadMessages(userId: string, runId: string): MessageRow[] {
   const rows = must(
     database.query(
       "messages",
       JSON.stringify({ user_id: userId, run_id: runId }),
-      MAX_HISTORY_ROWS,
+      MAX_HISTORY_ROWS + 1,
       "id",
       "asc",
     ),
