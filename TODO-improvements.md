@@ -873,6 +873,24 @@ is written while one approved from a **Telegram button is refused**, since that
 runs as a queued task; `performSkillWrite` says so in words rather than passing
 on "Insufficient capabilities".
 
+**And a skill the agent writes does not survive the next deploy**, which is
+the interaction nobody designed and both features are right about. Git sync is
+a sync rather than an append, so a file the repository does not have is one
+the engine should not keep; the agent writes into the asset store; a pull
+removes it. The first skill it wrote went exactly that way, reported as
+`deleted: 1`.
+
+The resolution is to treat an agent-written skill as a **proposal** and commit
+the ones worth keeping — `agent/skills/<name>/SKILL.md`, which maps with no
+configuration. Editing on the way through turned out to be the argument for
+doing it by hand rather than automating it: the first skill promoted had
+instructed the agent to run `git log`, which it cannot do, having no shell.
+A person reading it was the only thing that would have caught that.
+
+The alternative — pushing each skill back to git automatically — is available
+(`push_to_git`) and was not taken, because a commit per skill is a lot of
+ceremony for something the model is still learning to write well.
+
 The original note below is kept because its framing was right even where its
 mechanism was not.
 
