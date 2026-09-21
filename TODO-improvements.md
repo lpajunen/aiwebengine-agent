@@ -88,21 +88,16 @@ meant for the model talking to itself.
 ## Where to start next
 
 Compaction, [code as the action](#smolagents-and-codeact-code-as-the-action),
-[the suspended run](#three-features-one-primitive) and
-[memory the person can read](#memory-the-person-can-read) are built. What is
-left is the three that reach outside this page.
+[the suspended run](#three-features-one-primitive),
+[memory the person can read](#memory-the-person-can-read) and
+[the first channel](#the-agent-lives-where-the-person-already-is) are built.
 
 1. **Skills the agent writes.** The authoring half shipped; the half worth
    having is [the agent writing its own](#skills-as-markdown-written-by-the-agent),
    and `revisions.rs` makes every one of them revertible. It is now a smaller
    job than it was: `write_assets` is a capability the act set can be given,
    and the approval it would go behind exists.
-2. **The first channel adapter.** Buildable in an afternoon, and the thing
-   that was blocking it is gone — an inbound message is the third leg of the
-   trifecta and [the defence is a mode](#what-follows-a-channel), which is now
-   a mode that exists. A run started by a linked sender stays in `plan`; only
-   the account owner's own prompt can approve one into `act`.
-3. **Mounting the engine's own MCP tools** — `McpClient` is in the API and
+2. **Mounting the engine's own MCP tools** — `McpClient` is in the API and
    [the catch is a design question](#the-engine-is-already-an-mcp-server)
    rather than a wiring one.
 
@@ -797,7 +792,33 @@ deliberately never answers with the account id, which would end up in whatever
 the bot logs or echoes back into the chat.
 
 So the first adapter is: a webhook route, a signature check, `sender()`, and
-either `enqueueFrom` or a reply carrying `inviteLink()`. The signature check is
+either `enqueueFrom` or a reply carrying `inviteLink()`.
+
+**Built, for Telegram.** Three things it turned out to need that this section
+did not anticipate.
+
+**The engine could not reach Telegram at all.** Its Bot API takes the token as
+a path segment and offers no header form, and `http_client.rs` substituted
+`{{secret:...}}` into header values only — deliberately, since a URL reaches
+the audit line, the engine's logs and the far end's access log. So the adapter
+began with an engine change: a secret may now fill in a **path**, the template
+goes on carrying the scheme and host so every check runs against a string with
+no credential in it, and every line that writes the URL down writes the
+template. Worth knowing before picking a second channel: **Slack needs none of
+this**, because it authenticates with a bearer header.
+
+**The anonymous tier is what shapes the adapter.** Nobody is signed in when a
+webhook arrives, and that tier holds the network, secrets, storage and the
+queue but **no database access and no `view_logs`**. So the webhook can only
+resolve a sender, queue, and reply — the run is opened by a delegated task
+running as whoever linked the sender, and a button press is queued the same
+way rather than acted on inline.
+
+**The approval had to move.** A plan answerable only at a browser defeats the
+point of reaching somebody on their phone, so a plan arrives as a message with
+Approve and Reject under it. That forced `decide` out of `decideRun`: a
+decision now comes from a page and from a chat, one of them has no request to
+answer, and building the move twice is how the two come to disagree. The signature check is
 the script's job and the engine's documentation says so rather than pretending
 otherwise — Telegram and Slack sign their webhooks, email does not, and the
 engine cannot verify that the message came from the sender it claims.
