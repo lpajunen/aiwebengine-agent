@@ -130,6 +130,33 @@ const MAX_TOKENS = 1024;
  */
 const MAX_STEPS = 12;
 
+/**
+ * How long one model call may take.
+ *
+ * Passed explicitly, and that is the whole of the fix it represents. A `fetch`
+ * given no `timeout` uses the engine's default of **30 seconds**, and the
+ * budget clamp takes the *minimum* of that and what the execution has left —
+ * so the job budget could never raise it. Every model call this agent has ever
+ * made has had a 30-second ceiling, whatever `job_timeout_ms` said.
+ *
+ * Which was invisible while answers were short and became a wall as soon as
+ * one turn had something long to write: a whole `SKILL.md` body is close to
+ * `MAX_TOKENS`, and on this tier that does not reliably finish inside thirty
+ * seconds. It surfaced as `fetchStream ... Request timed out` on exactly the
+ * turns that were doing the most work, which reads like a network fault and
+ * is not one.
+ *
+ * Still clamped by the execution budget, so this is a ceiling rather than a
+ * grant: a run gets `min(this, what the job has left)`. It is set below
+ * `javascript.job_timeout_ms` on purpose — the turn still has to store what
+ * came back and queue its successor after the stream ends, and a timeout that
+ * used the whole budget would leave nothing for that.
+ *
+ * Raising it past the engine's job budget does nothing on its own; that is
+ * `set_script_limits jobTimeoutMs=...`, which is the dial to turn first.
+ */
+const MODEL_TIMEOUT_MS = 110000;
+
 const STREAM_PATH = "/agent/events";
 
 /**
@@ -2150,6 +2177,9 @@ function callModel(
   const mode = summarising ? "plan" : runModeOf(userId, runId);
   const stream = fetchStream(API_URL, {
     method: "POST",
+    // Without this the call inherits the engine's 30-second default. See
+    // `MODEL_TIMEOUT_MS` — it is the reason long turns failed as timeouts.
+    timeout: MODEL_TIMEOUT_MS,
     headers: {
       "x-api-key": "{{secret:" + SECRET_NAME + "}}",
       "anthropic-version": "2023-06-01",
