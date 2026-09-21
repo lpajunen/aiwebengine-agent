@@ -787,8 +787,11 @@ function advanceRun(context: HandlerContext): void {
   // gate every kind of stop goes through — a person's cancel today, a plan
   // awaiting approval later — which is why it reads the state rather than
   // asking whether a cancel happened.
+  // Fails open: a run with no row is one whose bookkeeping failed or which
+  // predates the table, and work already accepted is not abandoned over a
+  // missing record of it.
   const state = runStateOf(userId, runId);
-  if (state !== "running") {
+  if (state !== null && state !== "running") {
     console.log(`agent: run ${runId} is ${state}; not taking another turn`);
     return;
   }
@@ -915,7 +918,8 @@ function advanceRun(context: HandlerContext): void {
     // during the model call, which is the one part of a turn that cannot be
     // interrupted. Catching it here stops the run a whole turn earlier than
     // the next gate would.
-    if (runStateOf(userId, runId) !== "running") {
+    const now = runStateOf(userId, runId);
+    if (now !== null && now !== "running") {
       console.log(`agent: run ${runId} was stopped mid-turn`);
       return;
     }
@@ -966,6 +970,20 @@ function proseKindFor(blocks: ContentBlock[]): "note" | "response" {
  * everything else does.
  */
 function finishRun(userId: string, runId: string, reason: string): void {
+  // Anything said after the last turn read the queue has nowhere to go: the
+  // run is over and no turn will collect it. Saying so is the whole
+  // difference between a sentence that was lost and one that was lost
+  // silently — and silently is how a prompt typed into a run that had already
+  // ended disappeared without trace.
+  for (const said of takeInterjections(userId, runId)) {
+    recordActivity(
+      userId,
+      runId,
+      "error",
+      `Not delivered, the run ended first: "${said}"`,
+    );
+  }
+
   // Only from `running`: a turn that finishes normally must not overwrite a
   // cancel that landed while it was working, or the page would be told the
   // run ended by itself and the row would say the same.
@@ -1051,14 +1069,14 @@ function interject(context: HandlerContext): HttpResponse {
   if (!runId) return json(400, { error: "A runId is required." });
   if (!text) return json(400, { error: "Nothing to say." });
 
-  const state = runStateOf(userId, runId);
-  if (state !== "running" && state !== "waiting") {
-    // The run ended between the person typing and pressing send. Told apart
-    // from an error so the page can post it as a new prompt instead.
+  // Fails closed: without a row saying the run is alive, this is not a run
+  // that can be spoken to. The page turns the refusal into a new prompt, so
+  // the words are not lost.
+  if (!runIsLive(userId, runId)) {
     return json(409, {
       error: "That run has already finished.",
       runEnded: true,
-      state: state,
+      state: runStateOf(userId, runId) ?? "done",
     });
   }
 
@@ -1121,7 +1139,7 @@ function readHistory(context: HandlerContext): HttpResponse {
     runId: latestRun,
     // So a page opened while a run is working shows a stop button, rather
     // than learning the run exists only if a turn happens to land.
-    runState: latestRun ? runStateOf(userId, latestRun) : "done",
+    runState: latestRun ? (runStateOf(userId, latestRun) ?? "done") : "done",
     spend: runSpend(userId, latestRun),
     // Sent rather than duplicated in the page, so the rates the numbers were
     // costed with cannot drift away from the model that produced them.
@@ -1656,10 +1674,25 @@ function runRow(userId: string, runId: string): RunRow | null {
   }
 }
 
-/** What state a run is in. A run with no row is one that is still going. */
-function runStateOf(userId: string, runId: string): RunState {
+/**
+ * What state a run is in, or `null` when there is no row to say.
+ *
+ * Null rather than a default, because "no row" means opposite things to the
+ * two questions asked of it, and answering both with one default is a bug
+ * this shipped once. *May this run take another turn?* must say yes: a run
+ * whose bookkeeping failed, or that started before the table existed, is
+ * still a run and must not be stopped by the absence of a record of it.
+ * *Is this run alive?* must say no: a finished run has no row either, and
+ * treating that as alive leaves a page saying "working" forever and sends the
+ * next thing the person types into a run that ended — which is exactly what
+ * happened, and the prompt was queued for a turn that was never coming.
+ *
+ * So the default belongs at each call, where the cost of being wrong is
+ * known. Work fails open; liveness fails closed.
+ */
+function runStateOf(userId: string, runId: string): RunState | null {
   const row = runRow(userId, runId);
-  if (!row) return "running";
+  if (!row) return null;
   const state = String(row.run_state ?? "running");
   return state === "waiting" ||
     state === "cancelled" ||
@@ -1667,6 +1700,12 @@ function runStateOf(userId: string, runId: string): RunState {
     state === "running"
     ? (state as RunState)
     : "running";
+}
+
+/** Whether a run can still be spoken to or stopped. Absence means no. */
+function runIsLive(userId: string, runId: string): boolean {
+  const state = runStateOf(userId, runId);
+  return state === "running" || state === "waiting";
 }
 
 function openRun(userId: string, runId: string, taskId: string): void {
