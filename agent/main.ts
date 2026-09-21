@@ -1346,7 +1346,10 @@ function advanceRun(context: HandlerContext): void {
         block.name !== "write_response",
     );
     if (!workedOn) {
-      finishRun(userId, runId, answer.stop_reason ?? "end_turn");
+      // "end_turn" rather than the raw `stop_reason`, which here is always
+      // "tool_use" — true of the API and meaningless to the person reading
+      // "DONE tool_use" at the bottom of a run that simply answered.
+      finishRun(userId, runId, "end_turn");
       return;
     }
 
@@ -1566,12 +1569,6 @@ function decideRun(context: HandlerContext): HttpResponse {
     );
   }
 
-  // Carried out here rather than left to the resumed model, which does not
-  // reliably do it. Before the mode is widened, because this is the person's
-  // own request and does not need the run to hold anything.
-  const carriedOut =
-    approved && plan ? performApproved(userId, runId, plan) : null;
-
   if (approved) {
     // What the mode is for. Written before the turn is queued, so the turn
     // that reads it cannot see the old one.
@@ -1585,6 +1582,26 @@ function decideRun(context: HandlerContext): HttpResponse {
       "widening a run",
     );
   }
+
+  recordActivity(
+    userId,
+    runId,
+    "decision",
+    approved
+      ? "You approved the plan." + (note ? " " + note : "")
+      : "You rejected the plan." + (note ? " " + note : ""),
+  );
+
+  // Carried out here rather than left to the resumed model, which does not
+  // reliably do it. After the decision is recorded, so the activity log reads
+  // in the order the person lived it — approved, then done, rather than done
+  // then approved — and before the turn is queued, so the model is told about
+  // work that has happened rather than work that is about to.
+  //
+  // This is the person's own request, which is the one context where
+  // `personalStorage` resolves to them.
+  const carriedOut =
+    approved && plan ? performApproved(userId, runId, plan) : null;
 
   // Delivered as an ordinary message rather than an interjection: the run is
   // suspended, so there is no turn in flight to race, and this has to be the
@@ -1601,15 +1618,6 @@ function decideRun(context: HandlerContext): HttpResponse {
       (note ? ' They said: "' + note + '"' : "") +
       " Do not carry it out. Propose something else, or tell them why you cannot.]";
   appendMessage(userId, runId, "user", [{ type: "text", text: told }]);
-
-  recordActivity(
-    userId,
-    runId,
-    "decision",
-    approved
-      ? "You approved the plan." + (note ? " " + note : "")
-      : "You rejected the plan." + (note ? " " + note : ""),
-  );
 
   try {
     const task = personalTasks.enqueue({
