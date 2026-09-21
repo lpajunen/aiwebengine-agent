@@ -642,7 +642,30 @@ approved into `act` — gets `404 No such run`, and the plan stays pending.
 
 **A rejection resumes rather than ends**, carrying the person's note, so the
 model is told what was wrong and can propose something else. A rejection that
-cannot say why teaches one bit and the next plan is a guess. `MAX_STEPS`
+cannot say why teaches one bit and the next plan is a guess.
+
+**A gated tool must ask, not refuse — and approving it must carry it out.**
+This one cost two deployments to learn and is the most transferable thing
+here. `remember` was gated first the way every other error in this file
+works: refuse, and name the recovery. Asked to remember a preference, the
+model met the refusal, decided out loud that "no approval needed since I'll
+just act on it directly", and told the person it had noted something it had
+not. A refusal is an instruction, and an instruction can be argued with.
+
+So the tool raises the approval itself, and by the time the model reads an
+answer the run is already suspended. That fixed the arguing and not the
+lying: approved, resumed, the next turn called no tool at all and said
+"Done." Relying on the model to repeat its own call was the same mistake one
+step further along. A plan that defers a call now carries it — `plans` has
+`action` and `payload` — and approving runs it, in the person's own request,
+where `personalStorage` resolves to them.
+
+Two things fall out that are better than the original design rather than
+merely fixed. The plan shows the note itself, key and value, because those
+are known exactly at the point the tool raises it rather than paraphrased by
+a model describing an intention. And what happens is guaranteed to be what
+was shown, which is the only reading of an approval button that means
+anything. `MAX_STEPS`
 bounds how many times that goes round.
 
 The mode is stored as a string rather than a boolean, which is this section's
