@@ -24,6 +24,7 @@ const el = {
   keyStatus: document.getElementById("key-status"),
   prompt: document.getElementById("prompt"),
   run: document.getElementById("run"),
+  stop: document.getElementById("stop"),
   runStatus: document.getElementById("run-status"),
   spend: document.getElementById("spend"),
   spendText: document.getElementById("spend-text"),
@@ -35,7 +36,7 @@ const el = {
 // Why a run ended, for the reasons that are not "it finished". Named here so
 // that adding one to the script is not a silent change to what this page says:
 // an unlisted reason reads as "Done.", which is the wrong word for a stop.
-const STOP_REASONS = ["error", "step-limit", "history-limit"];
+const STOP_REASONS = ["error", "step-limit", "history-limit", "cancelled"];
 
 let entries = [];
 let running = false;
@@ -56,6 +57,11 @@ let spend = null;
 let pricing = null;
 let contextWindow = 0;
 let shownRun = "";
+
+// Whether the run on screen is still working. It decides what the button
+// does and what the prompt box means, so it is one flag rather than a guess
+// made separately in each place.
+let runWorking = false;
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -177,6 +183,22 @@ function renderSpend() {
       thousands(contextWindow) +
       " context";
   }
+}
+
+/**
+ * Reflect whether the run is working.
+ *
+ * While it is, the prompt box sends into the run rather than starting a new
+ * one, and there is a way to stop it — which there was not, and the run no
+ * longer belongs to the tab, so nothing else would have.
+ */
+function setWorking(working) {
+  runWorking = working;
+  el.stop.hidden = !working;
+  el.run.textContent = working ? "Send" : "Run";
+  el.prompt.placeholder = working
+    ? "Say something to the run in progress..."
+    : "Ask for something...";
 }
 
 function setStatus(node, text, isError) {
@@ -310,9 +332,29 @@ el.run.addEventListener("click", async () => {
 
   running = true;
   el.run.disabled = true;
-  setStatus(el.runStatus, "Starting...");
+  setStatus(el.runStatus, runWorking ? "Sending..." : "Starting...");
 
   try {
+    if (runWorking) {
+      // Into the run rather than alongside it. It lands at the next turn
+      // boundary, which is the soonest the model can be told anything
+      // without it arriving in the middle of a decision.
+      try {
+        await api("/agent/say", {
+          method: "POST",
+          body: JSON.stringify({ runId: shownRun, text: prompt }),
+        });
+        el.prompt.value = "";
+        setStatus(el.runStatus, "Sent. It lands at the next turn.");
+        return;
+      } catch (e) {
+        // It finished between typing and sending. Not a failure — the words
+        // are still wanted, so they start a run instead.
+        if (!e.body?.runEnded) throw e;
+        setWorking(false);
+      }
+    }
+
     await api("/agent/prompt", {
       method: "POST",
       body: JSON.stringify({ prompt }),
@@ -342,6 +384,24 @@ el.run.addEventListener("click", async () => {
   } finally {
     running = false;
     el.run.disabled = false;
+  }
+});
+
+el.stop.addEventListener("click", async () => {
+  if (!shownRun) return;
+  el.stop.disabled = true;
+  try {
+    await api("/agent/cancel", {
+      method: "POST",
+      body: JSON.stringify({ runId: shownRun }),
+    });
+    // The rest arrives on the stream like any other end of a run, so there is
+    // nothing to render here — and a second tab watching the same run learns
+    // about it the same way.
+  } catch (e) {
+    setStatus(el.runStatus, e.message, true);
+  } finally {
+    el.stop.disabled = false;
   }
 });
 
@@ -384,6 +444,14 @@ async function start() {
     shownRun = history.runId ?? "";
     spend = history.spend ?? EMPTY_SPEND;
     renderSpend();
+
+    // A run started before this page was opened is still a run: it can be
+    // stopped and spoken to from here, which is the point of it not belonging
+    // to the tab.
+    const state = history.runState ?? "done";
+    setWorking(state === "running" || state === "waiting");
+    if (runWorking)
+      setStatus(el.runStatus, "Working. You can close this page.");
 
     // Say up front that a run will need permission, rather than letting them
     // write a prompt and meet the refusal afterwards.
@@ -462,6 +530,9 @@ async function start() {
         shownRun = payload.runId;
         spend = EMPTY_SPEND;
         renderSpend();
+        // Another tab may have started it. Either way there is now a run to
+        // stop and a run to speak into.
+        setWorking(true);
       }
 
       // The end of a run is an activity like any other now. It used to be the
@@ -469,8 +540,17 @@ async function start() {
       // wait on any more.
       if (payload.kind === "done") {
         if (wasPending) render();
+        setWorking(false);
         const stopped = STOP_REASONS.indexOf(payload.message) !== -1;
-        setStatus(el.runStatus, stopped ? "Stopped." : "Done.", stopped);
+        setStatus(
+          el.runStatus,
+          payload.message === "cancelled"
+            ? "Stopped."
+            : stopped
+              ? "Stopped."
+              : "Done.",
+          stopped,
+        );
         return;
       }
 

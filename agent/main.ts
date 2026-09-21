@@ -141,6 +141,9 @@ const STREAM_PATH = "/agent/events";
  */
 const MAX_HISTORY_ROWS = 60;
 
+/** Asides delivered to one turn. Beyond this they wait for the next. */
+const MAX_INTERJECTIONS = 10;
+
 const SYSTEM_PROMPT = [
   "You are an assistant embedded in a web page.",
   "Answer by calling the write_response tool: that is how the person sees what",
@@ -201,6 +204,36 @@ interface UsageRow {
   wrote_tokens: number;
   fresh_tokens: number;
   out_tokens: number;
+}
+
+/**
+ * Where a run has got to.
+ *
+ * `running` is the ordinary case and `done` is the end of one. `cancelled` is
+ * a person stopping it. `waiting` is a run suspended for an answer only a
+ * person can give — an approved plan, a permission prompt — and it is named
+ * here although nothing yet puts a run into it.
+ *
+ * That is deliberate rather than speculative. Cancel, interject, plan mode and
+ * per-tool approval are not four features; they are one question — may this
+ * run take another turn, and what should it carry when it does — and building
+ * them separately is how they end up disagreeing about what a suspended run
+ * is. The half that stops a run is identical for all of them and is written
+ * once, here: `advanceRun` proceeds only from `running`. What plan mode still
+ * needs is the half that resumes one, plus a reason to show the person.
+ */
+type RunState = "running" | "waiting" | "cancelled" | "done";
+
+interface RunRow {
+  id: number;
+  run_id: string;
+  run_state: string;
+  task_id: string;
+}
+
+interface InterjectionRow {
+  id: number;
+  body: string;
 }
 
 // ============================================================================
@@ -530,6 +563,45 @@ function init(): void {
     'creating the table "activities"',
   );
 
+  // A run's own row: what state it is in, and which queued task will take it
+  // forward. Without one there was nothing to cancel — the run was only ever
+  // implied by the rows that mentioned its id.
+  must(
+    database.ensureTable(
+      "runs",
+      JSON.stringify({
+        columns: [
+          { name: "user_id", type: "text" },
+          { name: "run_id", type: "text" },
+          { name: "run_state", type: "text" },
+          { name: "task_id", type: "text" },
+          { name: "created_ms", type: "bigint" },
+          { name: "updated_ms", type: "bigint" },
+        ],
+      }),
+    ),
+    'creating the table "runs"',
+  );
+
+  // What the person said while the agent was working. A table rather than a
+  // column on the run, so two tabs interjecting at once cannot lose one to a
+  // read-modify-write, and so the text lands in the conversation at a defined
+  // point rather than wherever it happened to arrive.
+  must(
+    database.ensureTable(
+      "interjections",
+      JSON.stringify({
+        columns: [
+          { name: "user_id", type: "text" },
+          { name: "run_id", type: "text" },
+          { name: "body", type: "text" },
+          { name: "created_ms", type: "bigint" },
+        ],
+      }),
+    ),
+    'creating the table "interjections"',
+  );
+
   // Column names avoid anything SQL might claim: `output` and `usage` are
   // both words a database has opinions about, and a rejected ensureTable is
   // the failure this script has already shipped once.
@@ -557,6 +629,14 @@ function init(): void {
   routeRegistry.registerRoute("/agent/prompt", "startRun", "POST", {
     tags: ["Agent"],
     summary: "Accept a prompt and open a run",
+  });
+  routeRegistry.registerRoute("/agent/cancel", "cancelRun", "POST", {
+    tags: ["Agent"],
+    summary: "Stop a run that is still working",
+  });
+  routeRegistry.registerRoute("/agent/say", "interject", "POST", {
+    tags: ["Agent"],
+    summary: "Say something to a run already in progress",
   });
   routeRegistry.registerRoute("/agent/history", "readHistory", "GET", {
     tags: ["Agent"],
@@ -651,11 +731,12 @@ function startRun(context: HandlerContext): HttpResponse {
   // answers immediately, and `maxAttempts: 1` because a retried turn is a
   // second model call charged to this person for the same work.
   try {
-    personalTasks.enqueue({
+    const task = personalTasks.enqueue({
       handler: "advanceRun",
       payload: { runId: runId },
       maxAttempts: 1,
     });
+    openRun(userId, runId, task.taskId);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     recordActivity(
@@ -700,6 +781,23 @@ function advanceRun(context: HandlerContext): void {
   if (!runId) {
     console.log("agent: a turn was queued with no runId");
     return;
+  }
+
+  // Only a run that is still running takes another turn. This is the single
+  // gate every kind of stop goes through — a person's cancel today, a plan
+  // awaiting approval later — which is why it reads the state rather than
+  // asking whether a cancel happened.
+  const state = runStateOf(userId, runId);
+  if (state !== "running") {
+    console.log(`agent: run ${runId} is ${state}; not taking another turn`);
+    return;
+  }
+
+  // Whatever the person said while the last turn was working, delivered here
+  // so the model sees it before it decides anything.
+  for (const said of takeInterjections(userId, runId)) {
+    if (!said) continue;
+    appendMessage(userId, runId, "user", [{ type: "text", text: said }]);
   }
 
   const history = loadMessages(userId, runId);
@@ -813,12 +911,22 @@ function advanceRun(context: HandlerContext): void {
     // The next turn, queued rather than run here — same reasoning as the
     // first: one model call per execution budget. Enqueueing is what replaced
     // the browser posting the next step.
+    // Re-read rather than trusting the check at the top: a cancel can land
+    // during the model call, which is the one part of a turn that cannot be
+    // interrupted. Catching it here stops the run a whole turn earlier than
+    // the next gate would.
+    if (runStateOf(userId, runId) !== "running") {
+      console.log(`agent: run ${runId} was stopped mid-turn`);
+      return;
+    }
+
     try {
-      personalTasks.enqueue({
+      const task = personalTasks.enqueue({
         handler: "advanceRun",
         payload: { runId: runId },
         maxAttempts: 1,
       });
+      setRunState(userId, runId, "running", task.taskId, "running");
     } catch (e) {
       // Most likely the grant was withdrawn mid-run, which is the person
       // saying stop. Recorded so the page shows why it ended.
@@ -858,7 +966,125 @@ function proseKindFor(blocks: ContentBlock[]): "note" | "response" {
  * everything else does.
  */
 function finishRun(userId: string, runId: string, reason: string): void {
+  // Only from `running`: a turn that finishes normally must not overwrite a
+  // cancel that landed while it was working, or the page would be told the
+  // run ended by itself and the row would say the same.
+  setRunState(userId, runId, "done", undefined, "running");
   recordActivity(userId, runId, "done", reason);
+}
+
+/**
+ * Stop a run.
+ *
+ * Two things, because one is not enough. The queued task is cancelled so a
+ * turn that has not started never does; and the run's state is written so a
+ * turn already in flight stops at the next gate. Cancelling the task alone
+ * leaves a running turn to queue its own successor, and writing the state
+ * alone leaves a pending task to wake up and read it — which works, but burns
+ * an execution slot to do nothing.
+ */
+function cancelRun(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  let runId = "";
+  try {
+    const body = (context.request?.json() ?? {}) as { runId?: string };
+    runId = String(body.runId ?? "").trim();
+  } catch (e) {
+    return json(400, { error: "Expected a JSON body." });
+  }
+  if (!runId) return json(400, { error: "A runId is required." });
+
+  const row = runRow(userId, runId);
+  // Scoped to this person in the query, so another account's run id finds
+  // nothing rather than being stopped.
+  if (!row) return json(404, { error: "No such run." });
+
+  const state = String(row.run_state ?? "running");
+  if (state !== "running" && state !== "waiting") {
+    // Already over. Not an error: the person pressed stop as it finished.
+    return json(200, { runId: runId, state: state, alreadyEnded: true });
+  }
+
+  if (row.task_id) {
+    try {
+      personalTasks.cancel(String(row.task_id));
+    } catch (e) {
+      // The task may have been claimed already, which is exactly the case the
+      // state write below covers.
+    }
+  }
+
+  setRunState(userId, runId, "cancelled");
+  recordActivity(userId, runId, "note", "Stopped by you.");
+  recordActivity(userId, runId, "done", "cancelled");
+  return json(200, { runId: runId, state: "cancelled" });
+}
+
+/**
+ * Say something to a run that is already working.
+ *
+ * Queued rather than appended to the conversation here: the turn in flight has
+ * already read the history, so text written now would sit before an assistant
+ * message that never saw it, and the turn after would read that as an aside
+ * already answered. `takeInterjections` delivers it at the top of a turn,
+ * which is the only point where "the model has not decided anything yet" is
+ * true.
+ */
+function interject(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  let runId = "";
+  let text = "";
+  try {
+    const body = (context.request?.json() ?? {}) as {
+      runId?: string;
+      text?: string;
+    };
+    runId = String(body.runId ?? "").trim();
+    text = String(body.text ?? "").trim();
+  } catch (e) {
+    return json(400, { error: "Expected a JSON body." });
+  }
+  if (!runId) return json(400, { error: "A runId is required." });
+  if (!text) return json(400, { error: "Nothing to say." });
+
+  const state = runStateOf(userId, runId);
+  if (state !== "running" && state !== "waiting") {
+    // The run ended between the person typing and pressing send. Told apart
+    // from an error so the page can post it as a new prompt instead.
+    return json(409, {
+      error: "That run has already finished.",
+      runEnded: true,
+      state: state,
+    });
+  }
+
+  try {
+    must(
+      database.insert(
+        "interjections",
+        JSON.stringify({
+          user_id: userId,
+          run_id: runId,
+          body: text,
+          created_ms: Date.now(),
+        }),
+      ),
+      "queueing something to say",
+    );
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return json(500, { error: message });
+  }
+
+  // Shown at once rather than when it is delivered, because the person has
+  // said it and should see that it landed. A kind of its own so the page does
+  // not mistake it for the start of a new run.
+  recordActivity(userId, runId, "interject", text);
+  return json(202, { runId: runId });
 }
 
 function readHistory(context: HandlerContext): HttpResponse {
@@ -893,6 +1119,9 @@ function readHistory(context: HandlerContext): HttpResponse {
     hasKey: secretStorage.exists(SECRET_NAME),
     authorization: personalTasks.authorization(),
     runId: latestRun,
+    // So a page opened while a run is working shows a stop button, rather
+    // than learning the run exists only if a turn happens to land.
+    runState: latestRun ? runStateOf(userId, latestRun) : "done",
     spend: runSpend(userId, latestRun),
     // Sent rather than duplicated in the page, so the rates the numbers were
     // costed with cannot drift away from the model that produced them.
@@ -1395,6 +1624,154 @@ function readErrorMessage(body: string): string {
   } catch (e) {
     return body.slice(0, 200);
   }
+}
+
+// ============================================================================
+// The state of a run
+// ============================================================================
+
+/**
+ * The run's own row, or null if it has none.
+ *
+ * Runs that predate this table have no row, and every reader treats that as
+ * `running` — an old run must not become uncancellable *and* unstoppable
+ * because a feature arrived after it started.
+ */
+function runRow(userId: string, runId: string): RunRow | null {
+  if (!runId) return null;
+  try {
+    const rows = must(
+      database.query(
+        "runs",
+        JSON.stringify({ user_id: userId, run_id: runId }),
+        1,
+        "id",
+        "desc",
+      ),
+      "reading a run's state",
+    ) as RunRow[];
+    return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** What state a run is in. A run with no row is one that is still going. */
+function runStateOf(userId: string, runId: string): RunState {
+  const row = runRow(userId, runId);
+  if (!row) return "running";
+  const state = String(row.run_state ?? "running");
+  return state === "waiting" ||
+    state === "cancelled" ||
+    state === "done" ||
+    state === "running"
+    ? (state as RunState)
+    : "running";
+}
+
+function openRun(userId: string, runId: string, taskId: string): void {
+  try {
+    must(
+      database.insert(
+        "runs",
+        JSON.stringify({
+          user_id: userId,
+          run_id: runId,
+          run_state: "running",
+          task_id: taskId,
+          created_ms: Date.now(),
+          updated_ms: Date.now(),
+        }),
+      ),
+      "opening a run",
+    );
+  } catch (e) {
+    // A run without a row still runs; it just cannot be cancelled. Losing the
+    // answer to keep the bookkeeping would be the wrong way round.
+    console.log("agent: could not record a run: " + String(e));
+  }
+}
+
+/**
+ * Move a run along, and remember which task carries it next.
+ *
+ * `expected` is what the caller believes the run is, and the write is skipped
+ * when it is not — so a turn finishing normally cannot overwrite a cancel that
+ * landed while it was working. It is the one race this design actually has:
+ * the person presses stop during a model call that cannot be interrupted, and
+ * the turn then completes and would otherwise mark the run `done`.
+ */
+function setRunState(
+  userId: string,
+  runId: string,
+  state: RunState,
+  taskId?: string,
+  expected?: RunState,
+): boolean {
+  const row = runRow(userId, runId);
+  if (!row) return false;
+  if (expected && String(row.run_state ?? "running") !== expected) return false;
+
+  const patch: Record<string, unknown> = {
+    run_state: state,
+    updated_ms: Date.now(),
+  };
+  if (taskId !== undefined) patch.task_id = taskId;
+
+  try {
+    must(
+      database.update("runs", Number(row.id), JSON.stringify(patch)),
+      "moving a run along",
+    );
+    return true;
+  } catch (e) {
+    console.log("agent: could not move a run along: " + String(e));
+    return false;
+  }
+}
+
+/**
+ * Everything the person said while this run was working, taken off the queue.
+ *
+ * Read and deleted together, so a turn cannot deliver the same aside twice.
+ * Consumed at the top of a turn rather than written straight into `messages`
+ * when it arrives, which is the part that matters: text appended mid-turn
+ * would sit *before* an assistant message that never saw it, and the next
+ * turn would read that as an aside already answered.
+ */
+function takeInterjections(userId: string, runId: string): string[] {
+  let rows: InterjectionRow[] = [];
+  try {
+    const answer = must(
+      database.query(
+        "interjections",
+        JSON.stringify({ user_id: userId, run_id: runId }),
+        MAX_INTERJECTIONS,
+        "id",
+        "asc",
+      ),
+      "reading what was said mid-run",
+    ) as InterjectionRow[];
+    if (Array.isArray(answer)) rows = answer;
+  } catch (e) {
+    return [];
+  }
+
+  const said: string[] = [];
+  for (const row of rows) {
+    said.push(String(row.body ?? ""));
+    try {
+      must(
+        database.delete("interjections", Number(row.id)),
+        "clearing what was said mid-run",
+      );
+    } catch (e) {
+      // Left on the queue it would be delivered again next turn. Dropping it
+      // from this turn's batch is the lesser of the two.
+      said.pop();
+    }
+  }
+  return said;
 }
 
 // ============================================================================

@@ -120,6 +120,32 @@ Raise the budget **before** raising either. A turn that runs past its budget
 fails, and with `maxAttempts: 1` it is not retried — the run stops rather than
 quietly costing twice.
 
+## Stopping and steering a run
+
+The run lives in the engine, so closing the tab does not stop it — which used
+to mean nothing did. A run now has a row of its own:
+
+- `POST /agent/cancel {runId}` stops it. The queued task is cancelled so a turn
+  that has not started never does, and the run's state is written so a turn
+  already in flight stops at the next boundary. Both, because either alone
+  leaves a case open.
+- `POST /agent/say {runId, text}` speaks into a run that is still working. It
+  is delivered at the top of the next turn, which is the soonest the model can
+  be told anything without it arriving mid-decision. Queued rather than
+  appended when it arrives: text written into the conversation mid-turn would
+  sit before an assistant message that never saw it, and the turn after would
+  read that as an aside already answered.
+
+On the page the button becomes **Send** while a run is working and a **Stop**
+appears beside it. A page opened onto a run started somewhere else gets both,
+since the run is not the tab's.
+
+A run is `running`, `cancelled` or `done` — and `waiting`, which nothing sets
+yet. That last one is the seam for plan approval and per-tool permission:
+those are not separate features but the same question, *may this run take
+another turn*, and the half that stops a run is already written once for all
+of them. What is missing is the half that resumes one.
+
 ## Skills
 
 A skill is a folder of instructions the agent reads when it decides the work
