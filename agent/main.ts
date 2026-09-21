@@ -192,7 +192,9 @@ const COMPACT_PROMPT = [
 const SYSTEM_PROMPT = [
   "You are an assistant embedded in a web page.",
   "Answer by calling the write_response tool: that is how the person sees what",
-  "you say, and you can call it and then carry on working. Always answer, even",
+  "you say. A turn that calls only write_response ends the run — so if you mean",
+  "to say something and keep working, call the tool you need next in the same",
+  "turn. Always answer, even",
   "when the answer is short or the news is bad. If you end a turn with plain",
   "text and no tool call, that text is delivered as your answer and the run",
   "ends there — so never end a turn having said nothing at all.",
@@ -1285,23 +1287,60 @@ function advanceRun(context: HandlerContext): void {
   }
 
   // A turn that neither spoke nor did anything would end the run in silence,
-  // which reads as the agent having crashed. It happens when a turn is cut
-  // off at `max_tokens` before any block is complete.
+  // which reads as the agent having crashed.
+  //
+  // Two ways to arrive here and only one of them is wrong. A turn cut off at
+  // `max_tokens` before any block completed is a real failure and says so.
+  // A turn that had genuinely nothing left to add, in a run that has already
+  // answered, is just the end — and calling that an error put a red line on
+  // the end of a run that did everything asked of it.
   if (!said && results.length === 0) {
-    recordActivity(
-      userId,
-      runId,
-      "error",
-      answer.stop_reason === "max_tokens"
-        ? "The reply was cut off before anything was said. MAX_TOKENS may be too low."
-        : "The model ended the turn without saying anything.",
-    );
+    if (answer.stop_reason === "max_tokens") {
+      recordActivity(
+        userId,
+        runId,
+        "error",
+        "The reply was cut off before anything was said. MAX_TOKENS may be too low.",
+      );
+    } else if (!alreadyAnswered(userId, runId)) {
+      recordActivity(
+        userId,
+        runId,
+        "error",
+        "The model ended the turn without saying anything.",
+      );
+    }
+    // Else: it had said its piece and had nothing to add. The `done` activity
+    // that follows is the whole of what needs recording.
   }
 
   if (results.length > 0) {
     // Every result in one user message: splitting them teaches the model to
     // stop calling tools in parallel.
     appendMessage(userId, runId, "user", results);
+
+    // A turn whose only tool call was `write_response` has said its piece,
+    // and there is nothing for a successor to read: the tool answers
+    // "Delivered." and carries no information back. Queueing one anyway is
+    // what put a dead turn on the end of *every* run — a whole prompt resent
+    // to buy two tokens of nothing, on somebody's own key, and then an error
+    // line for having answered the way the system prompt asks.
+    //
+    // So answering is terminal, and a turn that means to answer *and* carry
+    // on says so by calling the tool it needs in the same turn. That is the
+    // contract the system prompt states, rather than a guess made here: the
+    // model cannot tell us it has more to do after the fact, so the only
+    // honest signal is one it gives while it still has the turn.
+    const workedOn = blocks.some(
+      (block) =>
+        block.type === "tool_use" &&
+        block.name &&
+        block.name !== "write_response",
+    );
+    if (!workedOn) {
+      finishRun(userId, runId, answer.stop_reason ?? "end_turn");
+      return;
+    }
 
     // The next turn, queued rather than run here — same reasoning as the
     // first: one model call per execution budget. Enqueueing is what replaced
@@ -2233,6 +2272,31 @@ function runRow(userId: string, runId: string): RunRow | null {
 }
 
 /**
+ * Whether this run has already told the person something.
+ *
+ * Asked only of a turn that produced nothing, to tell "it is finished" apart
+ * from "it broke". Reading the activity rather than the conversation is
+ * deliberate: compaction throws the conversation away and keeps the activity,
+ * so a long run that answered an hour ago still answers this correctly.
+ */
+function alreadyAnswered(userId: string, runId: string): boolean {
+  try {
+    const rows = queryRows(
+      "activities",
+      JSON.stringify({ user_id: userId, run_id: runId, kind: "response" }),
+      1,
+      "id",
+      "desc",
+    );
+    return rows.length > 0;
+  } catch (e) {
+    // If we cannot tell, say no: a spurious "it said nothing" is a smaller
+    // harm than a run that broke in silence.
+    return false;
+  }
+}
+
+/**
  * What state a run is in, or `null` when there is no row to say.
  *
  * Null rather than a default, because "no row" means opposite things to the
@@ -2935,9 +2999,11 @@ function systemPromptFor(skills: Skill[], mode: RunMode): string {
         "would do and nothing wider — the approval was for that plan."
       : SYSTEM_PROMPT +
         " You can read, fetch and compute, but you cannot change anything " +
-        "yet. If what you have been asked for needs writing, work out what " +
-        "you intend to do and call request_approval with it; the run stops " +
-        "until the person answers. Anything that only reads, just do.";
+        "yet, and that includes remember. If what you have been asked for " +
+        "needs writing, work out what you intend to do and call " +
+        "request_approval with it; the run stops until the person answers. " +
+        "Anything that only reads — including recall and list_memories — " +
+        "just do.";
 
   if (skills.length === 0) return preamble;
 
@@ -2976,6 +3042,26 @@ function runTool(
       const key = String(input.key ?? "").trim();
       const value = String(input.value ?? "");
       if (!key) return { content: "A key is required.", isError: true };
+
+      // The one gate in this file that is policy rather than capability, and
+      // the difference is worth being honest about. `run_js` is refused
+      // *underneath* the JavaScript, by a context that does not hold
+      // `write_storage`; this is refused by the script, because the turn
+      // running it legitimately holds that capability — the agent's own
+      // bookkeeping needs it. So this check is only as good as this file,
+      // where that one is enforcement.
+      //
+      // It is here anyway because the alternative is a claim that is not
+      // true. A person reading "Waiting for you" takes it to mean nothing
+      // has been written, and a plan mode that stopped arbitrary code while
+      // leaving a note-writing tool open would be telling them so falsely.
+      if (runModeOf(userId, runId) === "plan") {
+        return {
+          content: `Not yet — storing a note changes something, and this run has not been approved. Call request_approval and say that you want to remember "${key}" and roughly what you would put in it. If you were only checking what you already know, recall and list_memories need no approval.`,
+          isError: true,
+        };
+      }
+
       try {
         // Per (script, person), and only reachable while that person is the
         // one being served — which is exactly why this loop runs in their
