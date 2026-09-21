@@ -87,27 +87,22 @@ meant for the model talking to itself.
 
 ## Where to start next
 
-Compaction, [code as the action](#smolagents-and-codeact-code-as-the-action)
-and [the suspended run](#three-features-one-primitive) are built, which takes
-the first, the largest and the one everything else was waiting on off this
-list.
+Compaction, [code as the action](#smolagents-and-codeact-code-as-the-action),
+[the suspended run](#three-features-one-primitive) and
+[memory the person can read](#memory-the-person-can-read) are built. What is
+left is the three that reach outside this page.
 
-1. **Memory the person can read.** `list_memories` made the notes readable by
-   the model. [The person still cannot see them](#memory-the-person-can-read),
-   and an agent that remembers things about somebody without showing them is
-   one they cannot correct. The smallest item here and the one with the most
-   trust in it.
-2. **Skills the agent writes.** The authoring half shipped; the half worth
+1. **Skills the agent writes.** The authoring half shipped; the half worth
    having is [the agent writing its own](#skills-as-markdown-written-by-the-agent),
    and `revisions.rs` makes every one of them revertible. It is now a smaller
    job than it was: `write_assets` is a capability the act set can be given,
    and the approval it would go behind exists.
-3. **The first channel adapter.** Buildable in an afternoon, and the thing
+2. **The first channel adapter.** Buildable in an afternoon, and the thing
    that was blocking it is gone — an inbound message is the third leg of the
    trifecta and [the defence is a mode](#what-follows-a-channel), which is now
    a mode that exists. A run started by a linked sender stays in `plan`; only
    the account owner's own prompt can approve one into `act`.
-4. **Mounting the engine's own MCP tools** — `McpClient` is in the API and
+3. **Mounting the engine's own MCP tools** — `McpClient` is in the API and
    [the catch is a design question](#the-engine-is-already-an-mcp-server)
    rather than a wiring one.
 
@@ -863,11 +858,34 @@ visible on the page and editable by the person is a small change, and the
 transparency _is_ the feature — an agent that remembers things about somebody
 without showing them what it remembers is one they cannot correct.
 
-Listable is [done](#memory). Visible and editable are not, and they are the
-two that this section is actually about: `list_memories` made the notes
-readable by _the model_, which is not the same thing at all. What is missing
-is an endpoint and a panel — and, once a person can see a note, somewhere to
-delete one, which no tool currently offers either.
+**Built.** Three handlers on `/agent/memories` — read, correct, delete — and a
+collapsed panel above the activity log.
+
+It stopped being only a principle while it was being built. Twice in one
+afternoon this agent told its owner it had saved a preference and had not,
+first by arguing past a refusal and then by answering "Done." with no tool
+call at all, and both times the only way to find out was to read the database.
+The panel is the thing that makes that a glance rather than a query.
+
+What a person gets is the whole note rather than a preview, and the
+distinction from `list_memories` is the entire point: the model is searching
+an index for a key worth reading, a person is checking whether what the agent
+believes about them is true, and a first line cannot answer that.
+
+Two decisions worth keeping. `MAX_MEMORY_VALUE_CHARS` is **enforced** rather
+than merely applied, because a field showing part of a note would save back
+part of a note — an over-long value is sent marked, shown read-only, and can
+still be deleted, since wanting a note gone does not require being able to see
+all of it. And there is deliberately **no gate** on any of the three handlers:
+the plan/act mode governs what the _agent_ may do while acting for somebody,
+and this is the somebody, in their own request, editing their own store.
+
+There is also deliberately no "add a note" form. Every note in the panel was
+written by the agent, and the panel is for correcting what the agent believes.
+Seeding preferences it never inferred is [project
+instructions](#project-instructions), which is a different item with a
+different shape — though the endpoint upserts, so the capability is there the
+moment that item wants it.
 
 ### It starts the conversation
 
