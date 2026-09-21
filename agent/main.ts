@@ -28,6 +28,12 @@
  * default, which for a turn would mean re-sending the whole conversation and
  * paying for a second model call on somebody's personal key — so every enqueue
  * here passes `maxAttempts: 1` and lets `MAX_STEPS` do the bounding.
+ *
+ * The answer arrives as it is written. `callModel` reads the model's response
+ * with `fetchStream` and pushes the text on as it becomes readable, so the
+ * page fills in rather than waiting out the whole turn in silence. Only the
+ * stream carries the pieces: the tables are still written once, by the tool
+ * that produced the text, so nothing about reopening the page later changes.
  */
 
 // ============================================================================
@@ -188,6 +194,51 @@ interface MessageRow {
   id: number;
   speaker: string;
   blocks: string;
+}
+
+/**
+ * One frame of the streaming Messages API.
+ *
+ * The streamed form does not send content blocks, it sends instructions for
+ * building them — a start, a run of deltas, a stop — so these are the shapes
+ * of the instructions rather than of the answer.
+ */
+interface StreamEvent {
+  type?: string;
+  index?: number;
+  content_block?: ContentBlock;
+  delta?: StreamDelta;
+  error?: { message?: string };
+}
+
+interface StreamDelta {
+  type?: string;
+  text?: string;
+  partial_json?: string;
+  thinking?: string;
+  signature?: string;
+  stop_reason?: string;
+  stop_details?: { category?: string; explanation?: string } | null;
+}
+
+/**
+ * A turn under construction, and what of it has already reached the page.
+ *
+ * `blocks` ends up being exactly the array a buffered response would have
+ * handed over whole, which is what lets `advanceRun` stay unaware that any of
+ * this happened.
+ */
+interface Turn {
+  blocks: ContentBlock[];
+  /** Tool arguments arrive as JSON in pieces; one accumulator per block. */
+  partialJson: string[];
+  /** How much of a block's answer text has already been sent, per block. */
+  delivered: number[];
+  stopReason: string | null;
+  stopDetails: { category?: string; explanation?: string } | null;
+  sawStop: boolean;
+  /** Text held back until the end of the network read that produced it. */
+  outbound: string;
 }
 
 interface ActivityRow {
@@ -431,7 +482,7 @@ function advanceRun(context: HandlerContext): void {
 
   let answer: ApiResponse;
   try {
-    answer = callModel(history.map(toApiMessage));
+    answer = callModel(userId, runId, history.map(toApiMessage));
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     recordActivity(userId, runId, "error", message);
@@ -590,7 +641,7 @@ function forgetKey(context: HandlerContext): HttpResponse {
 // ============================================================================
 
 /**
- * One request to the Messages API.
+ * One request to the Messages API, read as it arrives.
  *
  * Raw HTTP rather than the Anthropic SDK because there is no npm here: a
  * script's imports resolve through the engine's module loader over its own
@@ -603,9 +654,25 @@ function forgetKey(context: HandlerContext): HttpResponse {
  * The template is substituted anywhere inside a header value, so
  * `Authorization: Bearer {{secret:...}}` works too. It did not once, and this
  * comment used to say so.
+ *
+ * This was `fetch` until the engine grew `fetchStream`. `fetch` returns only
+ * once the whole body has arrived, so a person learned what the model said one
+ * turn at a time and a turn is as long as the model takes to finish thinking —
+ * the agent's longest silence was the part where it was working hardest.
+ * `fetchStream` hands back the status and headers immediately and the body in
+ * pieces, which is what lets an answer appear while it is still being written.
+ *
+ * What comes back from here is the same `ApiResponse` it always was. The
+ * streaming is contained in this section on purpose: `advanceRun` stores
+ * blocks and dispatches tools exactly as it did, and cannot tell that the
+ * answer was assembled rather than parsed.
  */
-function callModel(messages: ApiMessage[]): ApiResponse {
-  const response = fetch(API_URL, {
+function callModel(
+  userId: string,
+  runId: string,
+  messages: ApiMessage[],
+): ApiResponse {
+  const stream = fetchStream(API_URL, {
     method: "POST",
     headers: {
       "x-api-key": "{{secret:" + SECRET_NAME + "}}",
@@ -618,18 +685,328 @@ function callModel(messages: ApiMessage[]): ApiResponse {
       system: SYSTEM_PROMPT,
       messages: messages,
       tools: TOOLS,
+      stream: true,
       // No `output_config.effort` and no `thinking`: this model rejects the
       // first and does not take the adaptive form of the second. Both come
       // back if the model moves up a tier.
     }),
   });
 
-  if (!response.ok) {
-    const detail = readErrorMessage(response.body);
-    throw new Error(`The model API answered ${response.status}: ${detail}`);
+  // The status is known before any of the body is, which is the other half of
+  // what streaming buys: a 401 for a key that has been revoked is answered
+  // without waiting for a response that was never coming.
+  if (!stream.ok) {
+    const detail = readErrorMessage(stream.text());
+    throw new Error(`The model API answered ${stream.status}: ${detail}`);
   }
 
-  return response.json() as ApiResponse;
+  try {
+    return readModelStream(stream, userId, runId);
+  } finally {
+    // An abandoned stream holds a socket until the execution ends, and an
+    // execution may hold only a few. Closing one that already finished is a
+    // no-op, so this covers the thrown path without a second branch.
+    stream.close();
+  }
+}
+
+/**
+ * Rebuild the turn from the frames that describe it, sending the answer on as
+ * it becomes readable.
+ */
+function readModelStream(
+  stream: FetchStream,
+  userId: string,
+  runId: string,
+): ApiResponse {
+  const turn: Turn = {
+    blocks: [],
+    partialJson: [],
+    delivered: [],
+    stopReason: null,
+    stopDetails: null,
+    sawStop: false,
+    outbound: "",
+  };
+
+  let buffer = "";
+  for (const chunk of stream) {
+    // A chunk is not a frame. Boundaries fall wherever the network put them,
+    // so whatever follows the last blank line is half an event and waits for
+    // the next read. Carriage returns are dropped rather than parsed around:
+    // a raw one cannot appear inside a JSON string, so nothing is lost.
+    buffer += chunk.split("\r").join("");
+
+    let cut = buffer.indexOf("\n\n");
+    while (cut !== -1) {
+      applyEvent(turn, buffer.slice(0, cut));
+      buffer = buffer.slice(cut + 2);
+      cut = buffer.indexOf("\n\n");
+    }
+
+    // One stream message per network read rather than one per delta. The model
+    // sends text in pieces far smaller than anything a person can perceive,
+    // and every send is a host call; the network has already done the
+    // coalescing, so this borrows its framing rather than inventing a size.
+    flush(turn, userId, runId);
+  }
+
+  // A last frame that arrived without its blank line. `applyEvent` ignores a
+  // remainder holding no data line, which is the usual case.
+  applyEvent(turn, buffer);
+  flush(turn, userId, runId);
+
+  if (!turn.sawStop) {
+    // The body ended early. Saying so is better than returning a turn that
+    // looks complete: `maxAttempts: 1` means nothing will retry it, so a
+    // silent truncation would be stored as what the model said and replayed
+    // as such on every turn after it.
+    throw new Error("The model's answer ended before it was finished.");
+  }
+
+  return {
+    content: turn.blocks,
+    stop_reason: turn.stopReason ?? "end_turn",
+    stop_details: turn.stopDetails,
+  };
+}
+
+/**
+ * One SSE frame, applied to the turn being built.
+ *
+ * The `event:` line is ignored: every frame's JSON carries the same name in
+ * `type`, and reading one of the two is enough.
+ */
+function applyEvent(turn: Turn, frame: string): void {
+  const data = frameData(frame);
+  if (!data) return;
+
+  let event: StreamEvent;
+  try {
+    event = JSON.parse(data) as StreamEvent;
+  } catch (e) {
+    // A frame that is not JSON is not something to guess at, and not a reason
+    // to abandon a turn that is otherwise arriving.
+    return;
+  }
+
+  switch (event.type) {
+    case "content_block_start": {
+      const index = event.index ?? 0;
+      turn.blocks[index] = (event.content_block ?? {
+        type: "text",
+      }) as ContentBlock;
+      turn.partialJson[index] = "";
+      turn.delivered[index] = 0;
+      return;
+    }
+
+    case "content_block_delta":
+      applyDelta(turn, event.index ?? 0, event.delta ?? {});
+      return;
+
+    case "content_block_stop":
+      closeBlock(turn, event.index ?? 0);
+      return;
+
+    case "message_delta":
+      if (event.delta?.stop_reason) turn.stopReason = event.delta.stop_reason;
+      if (event.delta?.stop_details) {
+        turn.stopDetails = event.delta.stop_details;
+      }
+      return;
+
+    case "message_stop":
+      turn.sawStop = true;
+      return;
+
+    case "error":
+      // An error arriving mid-stream is a request that was answered 200 and
+      // went wrong afterwards — the one failure a buffered `fetch` could only
+      // report as a body that did not parse.
+      throw new Error(event.error?.message ?? "The model stream failed.");
+
+    default:
+      // `ping`, `message_start`, and whatever the API grows next.
+      return;
+  }
+}
+
+function applyDelta(turn: Turn, index: number, delta: StreamDelta): void {
+  const block = turn.blocks[index];
+  if (!block) return;
+
+  if (delta.type === "text_delta" && typeof delta.text === "string") {
+    block.text = (block.text ?? "") + delta.text;
+    // Prose the model wrote outside a tool call. The system prompt asks it to
+    // speak through write_response instead, so this is the rarer path — but it
+    // is shown rather than dropped, which is what `advanceRun` does with the
+    // finished block too.
+    turn.outbound += delta.text;
+    return;
+  }
+
+  if (
+    delta.type === "input_json_delta" &&
+    typeof delta.partial_json === "string"
+  ) {
+    turn.partialJson[index] =
+      (turn.partialJson[index] ?? "") + delta.partial_json;
+    if (block.name === "write_response") deliverAnswer(turn, index);
+    return;
+  }
+
+  if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+    block.thinking = String(block.thinking ?? "") + delta.thinking;
+    return;
+  }
+
+  if (delta.type === "signature_delta" && typeof delta.signature === "string") {
+    // Not shown and not read here, but a thinking block replayed on a later
+    // turn is rejected without its signature.
+    block.signature = String(block.signature ?? "") + delta.signature;
+  }
+}
+
+/**
+ * Send whatever of `write_response`'s text has become readable.
+ *
+ * The thing a person is waiting for is not a text block. This agent speaks
+ * through a tool, so its answer arrives as the `text` argument of a tool call:
+ * JSON, a fragment at a time. Waiting for that JSON to parse would mean
+ * waiting for the whole answer, which is the thing streaming exists to stop —
+ * so the half-written object is read directly and only what has grown since
+ * last time is sent.
+ */
+function deliverAnswer(turn: Turn, index: number): void {
+  const whole = jsonStringPrefix(turn.partialJson[index] ?? "", "text");
+  const already = turn.delivered[index] ?? 0;
+  let ready = whole.length;
+  if (ready <= already) return;
+
+  // A character outside the basic plane is two units and a JSON fragment can
+  // end between them. Holding the first half back costs one read and saves
+  // sending half a character to be drawn as a replacement glyph.
+  const last = whole.charCodeAt(ready - 1);
+  if (last >= 0xd800 && last <= 0xdbff) ready -= 1;
+  if (ready <= already) return;
+
+  turn.outbound += whole.slice(already, ready);
+  turn.delivered[index] = ready;
+}
+
+/**
+ * Turn the JSON that arrived in pieces into the arguments a tool call needs.
+ *
+ * `advanceRun` reads `input` off a finished block exactly as it did when the
+ * whole response arrived at once, so the reassembly has to land here rather
+ * than anywhere later.
+ */
+function closeBlock(turn: Turn, index: number): void {
+  const block = turn.blocks[index];
+  if (!block || block.type !== "tool_use") return;
+
+  const raw = turn.partialJson[index] ?? "";
+  try {
+    block.input = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+  } catch (e) {
+    // Arguments that did not parse leave the tool with nothing, which is what
+    // it would have been handed anyway — and "a key is required" from the tool
+    // is a better thing for the model to read back than a parse error.
+    block.input = {};
+  }
+}
+
+/**
+ * Push what has accumulated to this person's open tabs.
+ *
+ * Nothing is written to the database here, and that is the point: the stream
+ * is the convenience and the table is the record, so a delta is something a
+ * page watches happen rather than something that happened. What the model
+ * finally said is recorded once, by the tool that says it — which is why a
+ * page opened tomorrow reads the table and misses none of this.
+ */
+function flush(turn: Turn, userId: string, runId: string): void {
+  if (!turn.outbound) return;
+  routeRegistry.sendStreamMessageFiltered(
+    STREAM_PATH,
+    { runId: runId, kind: "delta", message: turn.outbound, at: Date.now() },
+    JSON.stringify({ userId: userId }),
+    "subset",
+  );
+  turn.outbound = "";
+}
+
+/** The `data:` lines of one frame, joined as the SSE format defines. */
+function frameData(frame: string): string {
+  const parts: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (line.indexOf("data:") !== 0) continue;
+    const value = line.slice(5);
+    // One space after the colon is the field separator rather than content.
+    parts.push(value.indexOf(" ") === 0 ? value.slice(1) : value);
+  }
+  return parts.join("\n");
+}
+
+/**
+ * As much of a string field as a half-written JSON object will give up.
+ *
+ * `JSON.parse` is all-or-nothing and the object is by definition incomplete.
+ * This reads the one field it is asked for and stops wherever the text runs
+ * out — mid-escape included, since `\u00` is not yet a character and guessing
+ * the rest would put the wrong one on somebody's screen.
+ */
+function jsonStringPrefix(partial: string, key: string): string {
+  const marker = '"' + key + '"';
+  const at = partial.indexOf(marker);
+  if (at === -1) return "";
+
+  let i = at + marker.length;
+  while (i < partial.length && (partial[i] === " " || partial[i] === ":")) i++;
+  if (partial[i] !== '"') return "";
+  i++;
+
+  let out = "";
+  while (i < partial.length) {
+    const c = partial[i];
+    if (c === '"') return out;
+    if (c !== "\\") {
+      out += c;
+      i++;
+      continue;
+    }
+
+    if (i + 1 >= partial.length) return out;
+    const escape = partial[i + 1];
+    if (escape === "u") {
+      if (i + 6 > partial.length) return out;
+      out += String.fromCharCode(parseInt(partial.slice(i + 2, i + 6), 16));
+      i += 6;
+      continue;
+    }
+    out += unescapeOne(escape);
+    i += 2;
+  }
+  return out;
+}
+
+function unescapeOne(escape: string): string {
+  switch (escape) {
+    case "n":
+      return "\n";
+    case "t":
+      return "\t";
+    case "r":
+      return "\r";
+    case "b":
+      return "\b";
+    case "f":
+      return "\f";
+    // `"`, `\` and `/` stand for themselves.
+    default:
+      return escape;
+  }
 }
 
 function readErrorMessage(body: string): string {

@@ -160,10 +160,36 @@
       .kind[data-kind="error"] {
         color: var(--warn);
       }
+      .kind[data-kind="writing"] {
+        color: var(--accent);
+      }
       .message {
         white-space: pre-wrap;
         overflow-wrap: anywhere;
         margin: 0;
+      }
+      /* The answer still being written, with somewhere for the next character
+         to go. It is replaced by an ordinary row the moment the turn records
+         what it said. */
+      .live .message::after {
+        content: "";
+        display: inline-block;
+        width: 7px;
+        height: 1em;
+        margin-left: 2px;
+        vertical-align: text-bottom;
+        background: var(--accent);
+        animation: caret 1s step-end infinite;
+      }
+      @keyframes caret {
+        50% {
+          opacity: 0;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .live .message::after {
+          animation: none;
+        }
       }
       .empty {
         color: var(--muted);

@@ -10,6 +10,11 @@
 // it belonged to. That is no longer true, and the loop that was here is gone
 // rather than kept as a fallback: two ways to advance the same run is how they
 // drift apart.
+//
+// Two kinds of message arrive on that stream. An activity is a row that was
+// stored, and it is the record. A delta is a piece of an answer still being
+// written, stored nowhere — so it is rendered as a provisional entry and
+// replaced the moment the real row for it lands.
 
 const el = {
   keyPanel: document.getElementById("key-panel"),
@@ -26,30 +31,47 @@ const el = {
 let entries = [];
 let running = false;
 
+// The answer currently being written, if one is.
+//
+// One string rather than a map keyed by run, because at most one block streams
+// at a time: the API finishes a content block before starting the next, and a
+// person's runs no longer overlap — the engine's queue gives every personal
+// task a lane and defaults it to the person, so two prompts wait for each
+// other instead of interleaving.
+let pending = "";
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
 function render() {
-  if (entries.length === 0) {
+  const nodes = entries.map((entry) => entryNode(entry, false));
+  if (pending) {
+    nodes.push(entryNode({ kind: "writing", message: pending }, true));
+  }
+  if (nodes.length === 0) {
     el.activity.innerHTML = '<li class="empty">Nothing yet.</li>';
     return;
   }
-  el.activity.replaceChildren(
-    ...entries.map((entry) => {
-      const li = document.createElement("li");
-      const kind = document.createElement("span");
-      kind.className = "kind";
-      kind.dataset.kind = entry.kind;
-      kind.textContent = entry.kind;
-      const message = document.createElement("p");
-      message.className = "message";
-      message.textContent = entry.message;
-      li.append(kind, message);
-      return li;
-    }),
-  );
+  el.activity.replaceChildren(...nodes);
   el.activity.lastElementChild?.scrollIntoView({ block: "nearest" });
+}
+
+// `live` marks the one entry that is still being written, which is what earns
+// it a caret. Everything else about it is an ordinary row, because it is about
+// to become one.
+function entryNode(entry, live) {
+  const li = document.createElement("li");
+  if (live) li.className = "live";
+  const kind = document.createElement("span");
+  kind.className = "kind";
+  kind.dataset.kind = entry.kind;
+  kind.textContent = entry.kind;
+  const message = document.createElement("p");
+  message.className = "message";
+  message.textContent = entry.message;
+  li.append(kind, message);
+  return li;
 }
 
 function addEntry(entry) {
@@ -295,10 +317,27 @@ async function start() {
       const payload = JSON.parse(event.data);
       if (!payload || typeof payload.message !== "string") return;
 
+      // A piece of the answer, still being written. These are the only
+      // messages the script sends without storing anything, so they are the
+      // only ones that do not correspond to a row.
+      if (payload.kind === "delta") {
+        pending += payload.message;
+        render();
+        return;
+      }
+
+      // Anything the run recorded supersedes what was being written: the table
+      // is the record and the deltas were a preview of it. Clearing here
+      // rather than on a particular kind is what stops a half-streamed answer
+      // outliving the turn that was writing it.
+      const wasPending = pending !== "";
+      pending = "";
+
       // The end of a run is an activity like any other now. It used to be the
       // reply to the step the page was waiting on, and there is nothing to
       // wait on any more.
       if (payload.kind === "done") {
+        if (wasPending) render();
         setStatus(
           el.runStatus,
           payload.message === "error" || payload.message === "step-limit"
