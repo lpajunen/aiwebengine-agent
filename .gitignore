@@ -1,0 +1,3 @@
+# Build output. The engine runs main.ts; a compiled main.js beside it is a
+# second entry point, and a pull refuses a directory holding two.
+agent/main.js
