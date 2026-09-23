@@ -27,18 +27,18 @@ assumed.
 
 ### Context
 
-| Item                       | State               | Where, or what it waits on                                                       |
-| -------------------------- | ------------------- | -------------------------------------------------------------------------------- |
-| Skills, read by the model  | Built               | `skills/<name>/SKILL.md`, the index in the prompt, `read_skill`                  |
-| Skills the agent writes    | Built               | `write_skill`; always asks, and writes where the approval is                     |
-| `remember` / `recall`      | Built               | `personalStorage`, per person                                                    |
-| `list_memories`            | Built               | key, size and first line — the index `recall` needed                             |
-| Memory the person can read | Built               | `/agent/memories`, a panel above the log                                         |
-| Compaction                 | Built               | `COMPACT_AT_TOKENS`, at the top of a turn and nowhere else                       |
-| Prompt caching             | Built               | one breakpoint, at the end of the conversation                                   |
-| Project instructions       | Ahead               | an asset for the deployment's text, `personalStorage` for theirs                 |
-| Attachments and images     | Ahead, part-blocked | a page upload is base64 already; a fetched image is not — see the engine backlog |
-| Slash commands             | Superseded          | by skills — what is missing is an entry point, not a second library              |
+| Item                       | State      | Where, or what it waits on                                                    |
+| -------------------------- | ---------- | ----------------------------------------------------------------------------- |
+| Skills, read by the model  | Built      | `skills/<name>/SKILL.md`, the index in the prompt, `read_skill`               |
+| Skills the agent writes    | Built      | `write_skill`; always asks, and writes where the approval is                  |
+| `remember` / `recall`      | Built      | `personalStorage`, per person                                                 |
+| `list_memories`            | Built      | key, size and first line — the index `recall` needed                          |
+| Memory the person can read | Built      | `/agent/memories`, a panel above the log                                      |
+| Compaction                 | Built      | `COMPACT_AT_TOKENS`, at the top of a turn and nowhere else                    |
+| Prompt caching             | Built      | one breakpoint, at the end of the conversation                                |
+| Project instructions       | Ahead      | an asset for the deployment's text, `personalStorage` for theirs              |
+| Attachments and images     | Ahead      | all three paths are open now; `fetch(url, { binary: true })` was the last one |
+| Slash commands             | Superseded | by skills — what is missing is an entry point, not a second library           |
 
 ### Tools
 
@@ -281,6 +281,25 @@ list — and two new rows have opened since, both found by building against it.
   carrying the scheme and host, so every check still runs against a string with
   no credential in it, and every line that writes the URL down writes the
   template. An engine older than this change cannot run the adapter at all.
+- **An asset written from JavaScript records a revision.** `upsertAsset` wrote
+  the asset and stopped, so a skill the agent wrote had no history, could not be
+  reverted, and did not move a git binding off `in_sync` — which is how the
+  first one got deleted by a pull for not being in the repository, with nothing
+  anywhere recording that it had existed. This is what unblocks
+  [checkpoints and rewind](#checkpoints-and-rewind).
+- **`McpClient` is gated on `use_network` and `read_secrets`.** It was installed
+  into every execution with no capability check, which made it the way around
+  `sandbox.run` — see
+  [the engine is already an MCP server](#the-engine-is-already-an-mcp-server).
+- **The engine serves MCP resources.** `mcpRegistry.registerResource(uri,
+assetName, metadata)` publishes one of a script's own assets under a URI, and
+  it is asset-backed rather than handler-backed on purpose. Two things here
+  might want it: the [artifacts](#presentation) item, if an artifact should be
+  readable by a client and not only by a browser, and an image — a resource
+  answers non-UTF-8 content as base64, so **an image is reachable over MCP even
+  though `FetchResponse.body` is still a string**. It does not solve the photo
+  case, which is inbound, but it is the first place binary content crosses this
+  boundary at all.
 
 ### The engine backlog
 
@@ -292,14 +311,34 @@ list — and two new rows have opened since, both found by building against it.
 | A lane key on the task queue                                        | One run at a time per person                            | `lane`, defaulting to the person |
 | A secret in a URL path                                              | Any API that takes its token as a path segment          | `resolve_url`                    |
 | **`use_network` narrowed to a host allowlist**                      | The one structural answer to exfiltration               | **Wanted** — see above           |
-| **A binary response body**                                          | An image from a channel, or from anywhere but an upload | **Wanted** — `body` is a string  |
+| A binary response body                                              | An image from a channel, or from anywhere but an upload | `fetch(url, { binary: true })`   |
 
-The second of those is worth stating precisely, because it looks smaller than
-it is. `FetchResponse.body` is a string, so a photo a person sends the bot
-cannot be retrieved at all. An image _uploaded to the page_ needs nothing:
-`request.files[].data` is already base64, which is the content-block form. And
-an image named by URL needs nothing either, since the API will fetch a URL
-source itself. It is only the middle case that is blocked.
+The second of those is worth stating precisely. `FetchResponse.body` is a
+string — `String::from_utf8` on the bytes, which _errors_ rather than
+substituting — so a photo a person sends the bot cannot be retrieved at all. An
+image _uploaded to the page_ needs nothing: `request.files[].data` is already
+base64, which is the content-block form. And an image named by URL needs nothing
+either, since the API will fetch a URL source itself. It is only the middle case
+that is blocked.
+
+**Built, and it was the small thing it looked like once the engine was read
+rather than guessed at.** `fetch(url, { binary: true })` answers with the bytes
+as base64 in `bodyBase64`, and `body` is empty — exactly one of the two carries
+the answer, so there is never a question of which to read.
+
+Three decisions in it are worth knowing before using it. It is an **option**
+rather than a field every response grows, because base64 is a third again the
+size and every JSON call would have paid for it. It is not a **silent
+fallback**: without the option a non-text body is still refused, because a
+binary body answering as an empty string reads exactly like a server that sent
+nothing — what changed is that the refusal now names the option that fixes it.
+And the engine decides nothing from the `Content-Type`, which is a claim; the
+caller says what it expects.
+
+So the photo case is unblocked: `fetch(fileUrl, { binary: true }).bodyBase64`
+is already the content-block form, which is what `request.files[].data` gives
+for an upload. The three cases in
+[attachments and @-mentions](#attachments-and--mentions) are now all open.
 
 ### Three that looked uncertain and are not
 
@@ -481,15 +520,21 @@ than by paste. `fetch` and `assetStorage` cover the first two.
 
 Images are cheaper and more expensive than "they need the multimodal
 content-block form", which is what this section used to say. Three cases, and
-only one of them is blocked:
+**none of them is blocked any more**:
 
 - **An upload from the page needs nothing.** `request.files[].data` is already
   base64, which is exactly what a content block takes.
 - **An image named by URL needs nothing either.** The API will fetch a URL
   source itself, so the bytes never have to come through this script.
-- **An image from a channel cannot be fetched at all.** `FetchResponse.body` is
-  a string with no binary form, so a photo sent to the bot is unreachable —
-  a [row on the engine backlog](#the-engine-backlog) rather than script work.
+- **An image from a channel needs one option.** This used to be the blocked
+  case: `FetchResponse.body` was a string with no binary form, so a photo sent
+  to the bot was unreachable. `fetch(fileUrl, { binary: true }).bodyBase64` now
+  answers with it, in the same shape an upload arrives in — so the two paths
+  converge on one content block and the adapter does not branch.
+
+What is left is script work rather than engine work: a Telegram photo arrives
+as a `file_id` and takes a `getFile` call before there is a URL to fetch, and
+the result has to go into the turn as a content block rather than as text.
 
 ### Compaction
 
@@ -667,6 +712,26 @@ it directly, and the refusal would still be in place and still be doing
 nothing. The same is true of any third-party server whose token is worth more
 than the run it is mounted into. A capability model that is enforced everywhere
 except through a secret name is enforced nowhere that matters.
+
+**Half of that turned out to be true already, and not as a consequence of
+mounting anything.** `McpClient` was installed into every execution with no
+capability check at all — so a `sandbox.run` narrowed to hold neither
+`use_network` nor `read_secrets` still had one, and model-authored code inside
+`run_js` could name any public address and any secret and have the engine
+resolve that secret host-side and send it there as a `Bearer` token. That is
+the person's own API key, two lines into a tool built to be narrower than the
+turn around it. The engine has since gated every arm on both capabilities
+(`fix: an MCP client is a way out, and was not gated as one`), including the
+methods and not only the constructor, since `_callTool` rebuilds the client from
+a JSON blob the caller hands it.
+
+**The paragraph above still stands for the case it was actually about.** A
+delegated turn holds `use_network` and `read_secrets` — the delegation base
+keeps both, deliberately, since a run that cannot call out cannot do what people
+delegate and dropping `read_secrets` would take away the script's own key. So
+the gate does not stop a delegated turn mounting an owner-scoped server; it
+stops a _narrowed_ one. The laundering question is unchanged and is still a
+decision to make rather than drift into.
 
 ## Run control — mostly what separates a demo from something usable
 
@@ -972,10 +1037,22 @@ shape, for an agent that writes files.
 
 It stopped being hypothetical when `write_skill` landed: there is now something
 the agent writes that outlives the run and changes what every later run does.
-The concrete version is a skill's history, with a diff and a revert — and the
-thing to know before building it is that **an asset written from JavaScript
-records no revision at all**, so the history this would show does not exist
-yet. That is the work, rather than the page over it.
+The concrete version is a skill's history, with a diff and a revert.
+
+**The blocker this section named is gone.** It said an asset written from
+JavaScript recorded no revision at all, so the history a page would show did not
+exist — true when it was written, and fixed in the engine since
+(`fix: a script writing its own asset records a revision`). `upsertAsset` now
+records what the script consisted of afterwards, like every other path that
+changes a script's files. So the history exists, and what is left is the page
+over it plus the engine calls that read it: `list_revisions`, `diff_revisions`
+and `revert_script`.
+
+Worth knowing before building it: a revision is per **script**, not per file.
+A skill's history is a query over the manifests rather than a row per skill, and
+reverting lands the whole script on a revision rather than one file — which is
+the right unit for undoing a change that spanned modules and the wrong one for
+"put that skill back". `file_history` is the shape to reach for first.
 
 ### Session management
 
