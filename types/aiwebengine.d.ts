@@ -71,7 +71,7 @@ declare function init(context?: HandlerContext): void;
  *
  * - `routeRegistry.registerRoute` / `registerAssetRoute` / `registerStreamRoute`
  * - `graphQLRegistry.registerQuery` / `registerMutation` / `registerSubscription`
- * - `mcpRegistry.registerTool` / `registerPrompt`
+ * - `mcpRegistry.registerTool` / `registerPrompt` / `registerResource`
  * - `schedulerService.registerOnce` / `registerRecurring` / `clearAll`
  * - `dispatcher.registerListener`
  *
@@ -1493,6 +1493,67 @@ interface McpRegistry {
     argumentsJson: string,
     handlerFunction: string,
   ): string;
+
+  /**
+   * Publish one of this script's assets as an MCP resource.
+   *
+   * This is `routeRegistry.registerAssetRoute` aimed at `/mcp` instead of at
+   * a path: the same asset, under a name a different protocol reaches. A
+   * resource is the *read* half of MCP — content a client fetches by URI and
+   * puts in front of a model — as against a tool, which is something it runs.
+   *
+   * It is asset-backed rather than handler-backed on purpose. A resource whose
+   * content came from a handler would be a tool with a different spelling:
+   * free to read a database, call out, and answer differently every time, none
+   * of which a client caching by URI has reason to expect. An asset cannot,
+   * and `revisions.rs` already records every change to one.
+   *
+   * The asset is read when a client asks, not when this is called, so an asset
+   * rewritten later — by the script, or by an editor — is served without a
+   * redeploy. It must already exist and belong to this script at registration,
+   * so that a listed resource is never one a client cannot read.
+   *
+   * Published on the hosts this script publishes on, like every other
+   * registration, and requires `manage_graphql` — the same capability the rest
+   * of `mcpRegistry` takes, since what is being decided is whether the
+   * solution exposes an MCP surface rather than whether the asset may be
+   * written.
+   *
+   * @param uri - How clients name it. Must carry a scheme (`docs://handbook`,
+   *   `https://example.com/spec`), 3-500 characters, no whitespace.
+   * @param assetName - The backing asset, in this script's own asset store.
+   * @param metadata - Optional `{ name, description, mimeType }`. `name`
+   *   defaults to the asset's name; `mimeType` defaults to the asset's own at
+   *   read time, and is omitted from a listing when neither states one, since
+   *   a wrong type is worse than an absent one.
+   * @returns Registration result message
+   * @example
+   * mcpRegistry.registerResource("docs://handbook", "handbook.md", {
+   *   name: "Handbook",
+   *   description: "How the team works",
+   *   mimeType: "text/markdown",
+   * });
+   *
+   * Content that is not valid UTF-8 is served as base64 in `blob` rather than
+   * as `text`, decided by the bytes rather than by the declared type — so an
+   * image asset is reachable over MCP even though `fetch` cannot yet return
+   * one.
+   *
+   * Only takes effect during startup and `init()`. Called from a handler it
+   * returns a message saying nothing was registered, and does not throw.
+   */
+  registerResource(
+    uri: string,
+    assetName: string,
+    metadata?: {
+      /** Shown in a client's resource picker. Defaults to the asset's name. */
+      name?: string;
+      /** What the resource is for. */
+      description?: string;
+      /** Overrides the asset's own MIME type. */
+      mimeType?: string;
+    },
+  ): string;
 }
 
 // ============================================================================
@@ -1519,6 +1580,18 @@ interface McpTool {
  * The MCP Client implements the Model Context Protocol to connect to external
  * MCP servers (like GitHub Copilot MCP) and use their tools. Authentication
  * is handled via secrets stored in the environment.
+ *
+ * Every call here — the constructor included — requires **both**
+ * `use_network` and `read_secrets`. A call to an MCP server is unconditionally
+ * both: an outbound request to the URL you name, carrying the secret you name
+ * as a `Bearer` token. There is no unauthenticated arm, which is why
+ * `read_secrets` is required up front rather than only when a secret is
+ * mentioned, as it is for `fetch`.
+ *
+ * So a `sandbox.run` narrowed out of either cannot mount an MCP server, and
+ * that is deliberate: a credential resolved host-side by name would otherwise
+ * be a way to hold, through a secret, authority the narrowing had just
+ * refused.
  *
  * IMPORTANT: The McpClient uses a low-level API with static methods. For easier
  * usage, wrap it in a class as shown in scripts/examples/github_mcp_issues.js
@@ -1669,6 +1742,27 @@ interface FetchOptions {
    * within the same budget rather than each getting the full timeout.
    */
   timeout?: number;
+
+  /**
+   * Ask for the body as base64 in `bodyBase64` rather than as text in `body`.
+   *
+   * A response body is a string, and one that is not valid UTF-8 is an error
+   * rather than a lossy decode — right for the JSON and HTML nearly every call
+   * fetches, and the reason an image could not be retrieved at all. Set this
+   * when you know the bytes are not text: a photo from a chat platform, a PDF,
+   * an audio file.
+   *
+   * Exactly one of `body` and `bodyBase64` carries the answer. With `binary`,
+   * `body` is the empty string and `text()` and `json()` have nothing to read.
+   *
+   * @example
+   * const photo = fetch(fileUrl, { binary: true });
+   * const block = {
+   *   type: "image",
+   *   source: { type: "base64", media_type: "image/jpeg", data: photo.bodyBase64 },
+   * };
+   */
+  binary?: boolean;
 }
 
 /**
@@ -1688,8 +1782,22 @@ interface FetchResponse {
   /** Whether the status was a 2xx */
   ok: boolean;
 
-  /** Response body as string */
+  /**
+   * Response body as string.
+   *
+   * Empty when the request asked for `{ binary: true }` — the bytes are in
+   * `bodyBase64` instead.
+   */
   body: string;
+
+  /**
+   * Response body as base64, present only when the request asked for
+   * `{ binary: true }`.
+   *
+   * Never populated alongside a non-empty `body`, so there is never a question
+   * of which one to read.
+   */
+  bodyBase64?: string;
 
   /** Response headers */
   headers: Record<string, string>;
@@ -2830,6 +2938,41 @@ interface SandboxRunOptions {
    * must not hand model-authored code the whole of the caller's authority.
    */
   capabilities?: Capability[];
+  /**
+   * Which hosts the sub-execution may reach.
+   *
+   * The destination half of a narrowing, and the one a capability set cannot
+   * express: `use_network` is a verb, so "may call the network" means "may
+   * call anything". That gap is why **exfiltration needs no write
+   * capability** — a planning turn holding only reads can still put what it
+   * read into a URL. This takes the destination away rather than the data,
+   * which is the one defence that holds regardless of what untrusted text
+   * talked the model into.
+   *
+   * Each entry is a host: `api.example.com`, or `*.example.com` for its
+   * subdomains. A wildcard does **not** match the bare parent — the CSP and
+   * CORS rule — so name both when both are wanted. Ports are not part of it.
+   *
+   * Checked on the request's own host **and on every redirect hop**: an
+   * allowlist checked once is one open redirector away from being none.
+   * `McpClient` is bounded by it too, since an MCP server is a destination
+   * like any other.
+   *
+   * Omitted means *wherever the calling turn could already go*, which is the
+   * opposite default to `capabilities` and deliberately so: this only ever
+   * subtracts from a set that is already the caller's, and defaulting it to
+   * empty would silently take the network away from every existing call.
+   * Pass `[]` for "nowhere". Must be covered by the caller's own scope —
+   * asking to reach further throws.
+   *
+   * @example
+   * // The model may call one API and cannot post what it read anywhere else.
+   * sandbox.run(modelWroteThis, {
+   *   capabilities: ["use_network"],
+   *   hosts: ["api.anthropic.com"],
+   * });
+   */
+  hosts?: string[];
   /** Handed to the source as `context.args`. Must be JSON-serializable. */
   input?: unknown;
   /** Budget in milliseconds, clamped to the engine's own ceiling. */
@@ -2891,8 +3034,9 @@ interface Sandbox {
    *
    * @throws TypeError if a capability name is not one, RangeError if
    *   sub-executions are already nested as deep as they go, and a
-   *   SecurityError if the caller does not hold what it asked to keep. What
-   *   the *source* did comes back in the result instead.
+   *   SecurityError if the caller does not hold what it asked to keep or
+   *   cannot itself reach a host it named. What the *source* did comes back
+   *   in the result instead.
    */
   run(source: string, options?: SandboxRunOptions): SandboxResult;
 
@@ -2901,6 +3045,15 @@ interface Sandbox {
 
   /** What the calling turn holds, sorted. The set a narrowing subtracts from. */
   held(): Capability[];
+
+  /**
+   * Where the calling turn may go, or `null` for anywhere.
+   *
+   * `null` rather than an empty array, because an empty array is a real
+   * answer — a turn that may reach nothing — and conflating the two would
+   * make `sandbox.hosts() || []` quietly open the network back up.
+   */
+  hosts(): string[] | null;
 }
 
 // ============================================================================
