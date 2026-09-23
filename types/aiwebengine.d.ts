@@ -1740,9 +1740,25 @@ interface FetchResponse {
  * sent as itself — a request carrying template text where a credential should
  * be comes back as a 401 that explains nothing.
  *
- * A URL is never substituted. A secret in one would be written to this
- * engine's logs and to the far end's, which is the one place a credential
- * should not appear.
+ * A URL is substituted as well, under one extra rule: a `{{secret:NAME}}` may
+ * fill in the **path, query or fragment**, and may not change the scheme, the
+ * host or the port. `https://api.example.com/bot{{secret:TOKEN}}/send`
+ * resolves; `https://{{secret:WHERE}}/send` is refused rather than resolved,
+ * and so is any value whose substitution moves the origin.
+ *
+ * That rule is the whole of why this is safe to have. The template already
+ * carries the origin, so every check about where a request may go runs
+ * against a string with no credential in it, and everything that writes the
+ * URL down — the audit line, the debug log, an error handed back to a script
+ * — writes the template. A redirect target and a transport error are derived
+ * from the resolved form, so both are scrubbed before they are returned.
+ *
+ * What it cannot cover is the far end's own access log, which sees the
+ * resolved URL. That is the API's choice rather than this engine's, and it is
+ * the reason to prefer a header wherever an API offers one. Substituting into
+ * a path was refused outright until an API that offers no header form had to
+ * be reachable from a script — the Telegram Bot API is the case — so treat it
+ * as the exception it was added for rather than as the pattern.
  *
  * @param url - URL to fetch
  * @param options - Fetch options
@@ -1765,6 +1781,14 @@ interface FetchResponse {
  *   },
  *   body: JSON.stringify({ key: "value" })
  * });
+ *
+ * // A token the API insists on having in the path. The scheme and host are
+ * // written out, so they are what every check and every log line sees.
+ * const sent = fetch(
+ *   "https://api.telegram.org/bot{{secret:TELEGRAM_BOT_TOKEN}}/sendMessage",
+ *   { method: "POST", headers: { "Content-Type": "application/json" },
+ *     body: JSON.stringify({ chat_id: id, text: text }) },
+ * );
  */
 declare function fetch(
   url: string,
