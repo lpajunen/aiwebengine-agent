@@ -171,11 +171,13 @@ const STREAM_PATH = "/agent/events";
  * turn or orphans tool results, and both are refused outright. There is no
  * valid truncation point except the beginning, which is the prompt.
  *
- * Summarising the middle and carrying on — compaction — is the real answer to
- * a run this long, and it is not built. Until it is, a run that gets here has
- * gone wrong and is stopped where it stands.
+ * Summarising and carrying on — compaction — is the real answer to a run this
+ * long, and it is built: `COMPACT_AT_ROWS` sits at 70% of this, so a run folds
+ * itself well before it arrives here. Which makes this a backstop rather than
+ * the working limit. A run that reaches it has had a compaction fail or be
+ * skipped, so it has gone wrong and is stopped where it stands.
  *
- * `MAX_STEPS` should have ended it long before: twelve turns is roughly
+ * `MAX_STEPS` should have ended it long before either: twelve turns is roughly
  * twenty-five rows.
  */
 const MAX_HISTORY_ROWS = 60;

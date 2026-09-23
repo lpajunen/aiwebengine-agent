@@ -7,18 +7,25 @@ for anybody's tokens.
 
 ## What it is
 
-- `GET /agent` — the page: a prompt box, a key form, and the activity log.
+- `GET /agent` — the page: a prompt box, a key form, the memory panel and the
+  activity log.
 - `POST /agent/prompt` — accepts a prompt and queues the run.
 - `GET /agent/events` — SSE; activity as it happens, for this person only.
 - `GET /agent/history` — the log, so a refresh loses nothing.
+- `POST /agent/cancel` — stops a run; `POST /agent/say` speaks into one.
+- `POST /agent/decide` — approves or rejects a plan a run is waiting on.
+- `GET|POST|DELETE /agent/memories` — what the agent remembers, and corrections.
 - `GET|POST|DELETE /agent/key` — the person's own API key.
+- `POST /agent/telegram` — the bot webhook.
 
 There is no endpoint that advances a run. Each turn queues the next.
 
-The model gets four tools: `write_response` (the only way the person sees
-anything), and `remember`, `list_memories` and `recall` over notes in that
-person's `personalStorage`. A fifth, `read_skill`, appears only when the
-deployment has skills.
+The model gets five tools: `write_response` (the only way the person sees
+anything), `remember`, `list_memories` and `recall` over notes in that person's
+`personalStorage`, and `run_js`, which runs model-written JavaScript in a
+sandbox holding less than the turn around it. Three more appear conditionally:
+`request_approval` while a run is planning, `read_skill` when the deployment
+has skills, and `write_skill` with it.
 
 `list_memories` is what makes the notes readable rather than only writable:
 `recall` needs a key, so anything written in an earlier run was unreachable
@@ -29,7 +36,9 @@ and its first line — a note short enough to fit is its own preview, and no
 The model is `claude-haiku-4-5`, chosen on cost and on fitting the turn budget.
 Moving up a tier is more than the `MODEL` string — `output_config.effort`, the
 `thinking` form and the server-side refusal fallback all differ by tier, and
-the comment above the constant says which go back.
+the comment above the constant says which go back. So do `PRICES`, and so does
+the minimum cacheable prefix, which is the one that changes nothing visible
+until a bill arrives.
 
 ## The one structural decision
 
@@ -114,7 +123,7 @@ set_script_limits script=<this script> jobTimeoutMs=120000 note="agent turns cal
 `MAX_TOKENS` is 1024 and the model is `claude-haiku-4-5` because both were
 chosen when a turn had ten seconds. With a job's budget there is room to raise
 the first and to move up a tier on the second — see the comment above `MODEL`
-for the three things that change with it.
+for what changes with it.
 
 Raise the budget **before** raising either. A turn that runs past its budget
 fails, and with `maxAttempts: 1` it is not retried — the run stops rather than
@@ -167,11 +176,12 @@ On the page the button becomes **Send** while a run is working and a **Stop**
 appears beside it. A page opened onto a run started somewhere else gets both,
 since the run is not the tab's.
 
-A run is `running`, `cancelled` or `done` — and `waiting`, which nothing sets
-yet. That last one is the seam for plan approval and per-tool permission:
-those are not separate features but the same question, _may this run take
-another turn_, and the half that stops a run is already written once for all
-of them. What is missing is the half that resumes one.
+A run is `running`, `cancelled`, `done` or `waiting`. That last one is the seam
+plan approval and per-tool permission both hang off: they are not separate
+features but the same question, _may this run take another turn_, and the half
+that stops a run was written once for all of them. `request_approval` sets
+`waiting` and the run suspends where it stands; `POST /agent/decide` — or a
+Telegram button — is the half that resumes it.
 
 ## Skills
 
