@@ -2907,6 +2907,98 @@ interface Sandbox {
 
 declare var routeRegistry: RouteRegistry;
 declare var assetStorage: AssetStorage;
+// ============================================================================
+// MCP elicitation — asking the caller a question mid-tool
+// ============================================================================
+
+/**
+ * What the person did with the question, and what they said.
+ *
+ * Three actions, and the difference matters: `accept` carries `content`,
+ * `decline` is an explicit refusal, `cancel` is a dismissal. Treating anything
+ * but `accept` as a failure reports an error for somebody who closed a dialog.
+ */
+interface ElicitAnswer {
+  action: "accept" | "decline" | "cancel";
+  content?: Record<string, unknown>;
+}
+
+interface AskOptions {
+  /** Why the information is needed. Shown to the person. Required. */
+  message: string;
+  /**
+   * A flat JSON Schema object of primitive properties — string, number,
+   * integer, boolean, or an enum of those. Nested objects and arrays of
+   * objects are deliberately not supported by the protocol.
+   */
+  schema?: Record<string, unknown>;
+  /**
+   * Names this question across passes. Defaults to the call's position, which
+   * is stable as long as the code before it is; name it when a handler asks
+   * different questions down different branches.
+   */
+  key?: string;
+}
+
+/**
+ * Asking the caller a question in the middle of a tool call.
+ *
+ * `ask` is not a pause. A tool call that asks **ends**: the engine answers the
+ * client with `input_required`, the client asks the person, and then calls the
+ * tool again. On that second call the handler runs from the top once more, and
+ * `ask` returns the answer instead of ending anything.
+ *
+ * So everything before an `ask` runs on every pass. Put reads and validation
+ * before it, writes after it, and wrap anything that must happen exactly once
+ * in `once`.
+ */
+interface Mcp {
+  /**
+   * Whether this caller can be asked at all.
+   *
+   * False when the client declared no elicitation capability, and false
+   * wherever there is no client — a scheduled job, a delegated task, a
+   * listener. A tool that can manage without the answer should check this and
+   * fall back; one that cannot should just ask and let the throw stand.
+   */
+  canAsk(): boolean;
+
+  /**
+   * Ask for structured input, returning what was given or ending the turn
+   * asking for it.
+   *
+   * Throws if this caller cannot be asked. Never use it for passwords, API
+   * keys, tokens or payment details — the protocol forbids collecting those
+   * this way.
+   *
+   * @example
+   * const answer = mcp.ask({
+   *   message: "Which branch?",
+   *   schema: {
+   *     type: "object",
+   *     properties: { branch: { type: "string" } },
+   *     required: ["branch"],
+   *   },
+   * });
+   * if (answer.action === "accept") {
+   *   deploy(answer.content.branch);
+   * }
+   */
+  ask(options: AskOptions): ElicitAnswer;
+
+  /**
+   * Run something exactly once across the whole exchange, however many times
+   * the handler re-runs.
+   *
+   * The result travels to the client and back on every round trip, so it must
+   * be JSON and it must be small: a decision or an identifier, not a document.
+   *
+   * @example
+   * const draftId = mcp.once("draft", () => createDraft(repo));
+   */
+  once<T>(key: string, compute: () => T): T;
+}
+
 declare var scriptStorage: Storage;
 declare var personalStorage: Storage;
 declare var secretStorage: SecretStorage;
@@ -2915,6 +3007,7 @@ declare var scriptTasks: ScriptTasks;
 declare var personalTasks: PersonalTasks;
 declare var graphQLRegistry: GraphQLRegistry;
 declare var mcpRegistry: McpRegistry;
+declare var mcp: Mcp;
 declare var database: Database;
 declare var console: Console;
 declare var dispatcher: MessageDispatcher;
