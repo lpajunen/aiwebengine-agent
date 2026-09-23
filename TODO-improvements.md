@@ -176,13 +176,26 @@ Three things it cost, two of them small and one of them a surprise.
   most permissive reader of that store can do**, and a tool that runs
   model-written code is the most permissive reader there is.
 
-**What is left is engine work, and only the engine can do it.** `use_network`
-narrowed to a set of hosts is the one fix that holds regardless of what the
-untrusted text says, because it takes away the destination rather than the
-data. It is the top row of [the engine backlog](#the-engine-backlog) and it is
-why that table is no longer empty. Until it lands, the standing rule for
-anything added to `PLAN_CAPABILITIES` is the one the guard encodes: **nothing
-that reads private data goes into the same execution as `use_network`.**
+**The engine half has landed.** `sandbox.run(source, { capabilities, hosts })`
+bounds where a sub-execution may go as well as what it may do, which is the fix
+that holds regardless of what the untrusted text says: it takes away the
+destination rather than the data. Every redirect hop is checked, not only the
+URL the code wrote — an allowlist checked once is one open redirector away from
+being none — and `McpClient` is bounded by it too.
+
+**What is left is script work here, and it is a real decision rather than a
+line.** `run_js` has to name the hosts a run may reach, and the list is the
+whole of the value: too wide and it buys nothing, too narrow and the model
+cannot do what it was asked. The shape that probably fits is the API this agent
+already talks to plus whatever the person's own prompt named, with the default
+being the model provider alone — but that is a judgement about what this
+solution is for, not something to copy from the engine.
+
+Until that list exists, the standing rule for anything added to
+`PLAN_CAPABILITIES` still holds and is still what the guard encodes: **nothing
+that reads private data goes into the same execution as `use_network`.** The
+host bound makes that rule cheaper to relax later; it does not relax it by
+itself.
 
 ### The first suite
 
@@ -291,6 +304,14 @@ list — and two new rows have opened since, both found by building against it.
   into every execution with no capability check, which made it the way around
   `sandbox.run` — see
   [the engine is already an MCP server](#the-engine-is-already-an-mcp-server).
+- **`use_network` can be narrowed to a set of hosts.**
+  `sandbox.run(source, { capabilities, hosts })`, checked on every redirect hop
+  and on `McpClient` as well. This is the top row of the backlog, and the answer
+  to [the egress question](#the-egress-question) that a capability set could not
+  give. Picking the list is script work and is the part still to do.
+- **`fetch` can return a body that is not text.**
+  `fetch(url, { binary: true }).bodyBase64`, which unblocks a photo from a
+  channel — the one attachment case that had no path.
 - **The engine serves MCP resources.** `mcpRegistry.registerResource(uri,
 assetName, metadata)` publishes one of a script's own assets under a URI, and
   it is asset-backed rather than handler-backed on purpose. Two things here
@@ -310,7 +331,7 @@ assetName, metadata)` publishes one of a script's own assets under a URI, and
 | Delegation reach — scope verbs, and acting for a person off-request | Channels, async plan approval, narrowed background work | `"write"` scope, `enqueueFrom`   |
 | A lane key on the task queue                                        | One run at a time per person                            | `lane`, defaulting to the person |
 | A secret in a URL path                                              | Any API that takes its token as a path segment          | `resolve_url`                    |
-| **`use_network` narrowed to a host allowlist**                      | The one structural answer to exfiltration               | **Wanted** — see above           |
+| `use_network` narrowed to a host allowlist                          | The one structural answer to exfiltration               | `sandbox.run(…, { hosts })`      |
 | A binary response body                                              | An image from a channel, or from anywhere but an upload | `fetch(url, { binary: true })`   |
 
 The second of those is worth stating precisely. `FetchResponse.body` is a
@@ -384,10 +405,11 @@ called — a capability leak by reference that no mask catches. A filtered tool
 list can be argued past. This cannot, because the check sits _under_ the
 JavaScript rather than in it.
 
-What it does not narrow is _where_ a capability reaches. `use_network` is one
-name whether the far end is an API this agent needs or an attacker's collector,
-which is [the egress question](#the-egress-question) above and the reason the
-backlog is not empty.
+What it narrows is no longer only _what_ a capability does. `hosts` was added
+beside `capabilities` for exactly the gap this paragraph used to describe —
+`use_network` being one name whether the far end is an API this agent needs or
+an attacker's collector — so [the egress question](#the-egress-question) now has
+an answer the engine can enforce. Using it is this repository's work.
 
 ## What the first six were, and what they taught
 
