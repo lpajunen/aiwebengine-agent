@@ -20,6 +20,21 @@ for anybody's tokens.
 
 There is no endpoint that advances a run. Each turn queues the next.
 
+`agent/main.ts` is the root script and holds the loop. Five modules sit beside
+it, because a root script cannot `export` and a test module reaches its
+subject by importing it — so anything under test had to move out:
+
+| Module            | What it holds                                           |
+| ----------------- | ------------------------------------------------------- |
+| `protocol.ts`     | reading what the model sent, half-written JSON included |
+| `capabilities.ts` | what model-written code may do, and the pair it may not |
+| `budget.ts`       | what a run has spent, and when it has had enough        |
+| `skills.ts`       | the SKILL.md format, written and read                   |
+| `plans.ts`        | decoding the call an approval carries                   |
+
+Their tests are `agent/*.test.ts` — 77 cases — run with the `run_tests` tool
+or `POST /engine/run_tests?uri=<this script>`.
+
 The model gets five tools: `write_response` (the only way the person sees
 anything), `remember`, `list_memories` and `recall` over notes in that person's
 `personalStorage`, and `run_js`, which runs model-written JavaScript in a
@@ -32,6 +47,13 @@ has skills, and `write_skill` with it.
 unless the model guessed the name. The listing gives each key, the note's size
 and its first line — a note short enough to fit is its own preview, and no
 `recall` follows. A `recall` that misses now names the keys that exist.
+
+They are also the only way to a note. `run_js` deliberately holds no
+`read_storage`: it can call the network, and private data plus a way out in
+one execution is two thirds of a prompt-injection story that a fetched page
+supplies the rest of. So code gets a note as a literal that a `recall`
+fetched, which costs a turn and means a note only leaves if the model itself
+carries it.
 
 The model is `claude-haiku-4-5`, chosen on cost and on fitting the turn budget.
 Moving up a tier is more than the `MODEL` string — `output_config.effort`, the
@@ -393,8 +415,8 @@ is written until a button is pressed.
 Three things, none of which the script can do for itself.
 
 **1. A bot, and its token as a script secret.** Get one from
-[@BotFather](https://t.me/BotFather), then store the token — never in
-`scriptStorage`, which `run_js` can read:
+[@BotFather](https://t.me/BotFather), then store the token as a secret rather
+than a `scriptStorage` value, so that it is never handed to JavaScript at all:
 
 ```text
 write_secret uri=<this script> name=TELEGRAM_BOT_TOKEN value=<token> scope=script
@@ -403,7 +425,10 @@ write_secret uri=<this script> name=TELEGRAM_BOT_TOKEN value=<token> scope=scrip
 **2. A webhook secret**, which Telegram echoes back on every call so the
 script can tell a real delivery from a forged one. It lives in `scriptStorage`
 because checking it means _comparing_ it, and the engine never returns a
-secret's value to JavaScript. Generate something long and random, then:
+secret's value to JavaScript. `run_js` holds no `read_storage`, so
+model-written code cannot read it back; what it is worth is bounded anyway,
+since a forged delivery still has to name a sender somebody has linked.
+Generate something long and random, then:
 
 ```js
 // eval_script, as an administrator

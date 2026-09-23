@@ -1,5 +1,39 @@
 /// <reference path="../types/aiwebengine.d.ts" />
 
+import {
+  frameData,
+  jsonStringPrefix,
+  proseKindFor,
+  readErrorMessage,
+} from "./protocol.ts";
+import {
+  wantedCapabilities,
+  withoutTheExfiltrationPair,
+} from "./capabilities.ts";
+import {
+  COMPACT_AT_ROWS,
+  COMPACT_AT_TOKENS,
+  emptySpend,
+  HISTORY_QUERY_LIMIT,
+  MAX_HISTORY_ROWS,
+  overHistoryLimit,
+  shouldCompact,
+  spendOf,
+  stepsFrom,
+} from "./budget.ts";
+import {
+  SKILLS_PREFIX,
+  SKILL_FILE,
+  SKILL_NAME_PATTERN,
+  frontMatterValue,
+  renderSkillFile,
+  shortHash,
+  skillAssetPath,
+  skillBody,
+  skillNameOf,
+} from "./skills.ts";
+import { rememberArgs, skillWriteArgs } from "./plans.ts";
+
 /**
  * A prompt-driven agent that runs inside aiwebengine.
  *
@@ -159,47 +193,8 @@ const MODEL_TIMEOUT_MS = 110000;
 
 const STREAM_PATH = "/agent/events";
 
-/**
- * Rows one run may accumulate before it is stopped.
- *
- * A ceiling, not a window — and the difference is the whole of why this is
- * not simply a `LIMIT` on the read. A conversation cannot be truncated at an
- * arbitrary row: this run has exactly one genuine user message, the prompt,
- * and every later one carries `tool_result` blocks the API requires to be
- * preceded by the matching `tool_use` in the message immediately before. So
- * dropping rows off the front either starts the conversation on an assistant
- * turn or orphans tool results, and both are refused outright. There is no
- * valid truncation point except the beginning, which is the prompt.
- *
- * Summarising and carrying on — compaction — is the real answer to a run this
- * long, and it is built: `COMPACT_AT_ROWS` sits at 70% of this, so a run folds
- * itself well before it arrives here. Which makes this a backstop rather than
- * the working limit. A run that reaches it has had a compaction fail or be
- * skipped, so it has gone wrong and is stopped where it stands.
- *
- * `MAX_STEPS` should have ended it long before either: twelve turns is roughly
- * twenty-five rows.
- */
-const MAX_HISTORY_ROWS = 60;
-
 /** Asides delivered to one turn. Beyond this they wait for the next. */
 const MAX_INTERJECTIONS = 10;
-
-/**
- * When a run's conversation is folded into a summary and carried on.
- *
- * Either trigger is enough. Tokens are the real measure and come from the
- * last turn's `usage`; rows are the backstop that keeps `MAX_HISTORY_ROWS`
- * from ever being reached, since hitting it stops the run outright.
- *
- * The token figure is the dial worth turning. Too low and a run pays for a
- * summary it did not need; too high and every turn carries a conversation
- * nobody is reading. It is well under the model's 200k window on purpose —
- * what makes a long run expensive here is resending it every turn, not
- * running out of room.
- */
-const COMPACT_AT_TOKENS = 30000;
-const COMPACT_AT_ROWS = Math.floor(MAX_HISTORY_ROWS * 0.7);
 
 /**
  * What the summariser is told to keep.
@@ -293,29 +288,6 @@ interface MemoryView {
 }
 
 /**
- * What a run has spent so far.
- *
- * Summed over turns, except `largestPrompt`, which is the biggest single
- * prompt the run sent — the sum of prompts is not a context measurement,
- * because every turn resends the one before it.
- */
-interface Spend {
-  turns: number;
-  cached: number;
-  wrote: number;
-  fresh: number;
-  output: number;
-  largestPrompt: number;
-}
-
-interface UsageRow {
-  cached_tokens: number;
-  wrote_tokens: number;
-  fresh_tokens: number;
-  out_tokens: number;
-}
-
-/**
  * Where a run has got to.
  *
  * `running` is the ordinary case and `done` is the end of one. `cancelled` is
@@ -376,8 +348,6 @@ interface InterjectionRow {
  * disagree with itself; a `name:` in the front matter is allowed and ignored,
  * so a SKILL.md written for another harness drops in unchanged.
  */
-const SKILLS_PREFIX = "skills/";
-const SKILL_FILE = "SKILL.md";
 
 /**
  * How many skills the index will name.
@@ -389,17 +359,6 @@ const MAX_SKILLS = 64;
 
 /** A skill body handed to the model, in characters. */
 const MAX_SKILL_CHARS = 32000;
-
-/**
- * What a skill may be called.
- *
- * The folder name *is* the skill's name, so this is a directory segment as
- * much as an identifier: no dots, no slashes, nothing that could climb out of
- * `skills/`. Lower case because the model copies the name out of prose and a
- * library that distinguishes `Email` from `email` is one that will eventually
- * hold both.
- */
-const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
 /** A description sits in the prompt on every turn, so it stays one line. */
 const MAX_SKILL_DESCRIPTION_CHARS = 200;
@@ -418,98 +377,6 @@ interface AssetInfo {
 // ============================================================================
 // Code as the action
 // ============================================================================
-
-/**
- * What model-written code is allowed to do.
- *
- * This is the whole of the security argument for `run_js`, so it is a list of
- * four names and a list of what is deliberately missing.
- *
- * A tool call is one verb per round trip, and a run gets twelve. Code is the
- * other shape: a loop, a condition and an intermediate value cost one call
- * between them. Every project that adopts it has to build a sandbox first —
- * here the sandbox is what the script was already running inside, and
- * `sandbox.run` is the engine handing a script a way to run *part* of itself
- * holding less than it holds. The checks sit underneath the JavaScript, so
- * nothing the model writes, and no arrangement of the transcript, reaches past
- * them. A filtered tool list can be argued past; this cannot.
- *
- * What is granted:
- *
- * - `view_logs` is `console`, and on a turn that failed it is usually the only
- *   part worth reading.
- * - `use_network` is `fetch` and `fetchAll`, and is most of the reason to have
- *   the tool at all — without it this is a calculator.
- * - `read_assets` is the script's own files, which is where a skill keeps the
- *   data it points the model at.
- * - `read_storage` is this person's notes, so code can work over what the
- *   agent already knows rather than recalling them one key at a time.
- *
- * What is withheld, each for its own reason rather than out of caution:
- *
- * - **`read_secrets`.** It gates `{{secret:...}}` inside a `fetch`, which the
- *   engine substitutes host-side for whoever the run belongs to. Granted here,
- *   three lines of model-written code would post this person's API key to a
- *   URL of the model's choosing, and there is no version of that which is
- *   acceptable. It is also what stops the code spending their money on model
- *   calls of its own.
- * - **`read_script_data`.** `database.query` is scoped to the *script*, not to
- *   the person. This script's tables hold every run every person has ever had,
- *   so granting it would let one person's turn read another's conversation and
- *   hand it back as a tool result.
- * - **Every write.** Nothing here writes: not storage, not the database, not
- *   assets, not the queue. A wrong read costs a token and a wrong write costs
- *   a rollback, and the place to spend that asymmetry is an approval step that
- *   does not exist yet. `remember` remains the one write the model has, and it
- *   is a tool because it is worth a person seeing in the activity log.
- *
- * The residual risk is worth naming rather than leaving implied: `read_storage`
- * and `use_network` together are two legs of the lethal trifecta — private
- * data and a way out. The third is untrusted content, and this agent has none
- * today, because the only text in a run is what the person typed themselves.
- * **The first channel adapter adds it**, and the fix is not a narrower list
- * here but a run that holds fewer of these when it was started by somebody
- * other than the account owner.
- *
- * Intersected with `sandbox.held()` rather than passed as written: `run` throws
- * when asked to keep something the caller does not hold, and a delegation grant
- * is free to be narrower than this list. Asking for what is there and taking
- * what is given keeps a read-only grant working instead of failing every call.
- */
-const PLAN_CAPABILITIES: Capability[] = [
-  "view_logs",
-  "use_network",
-  "read_assets",
-  "read_storage",
-];
-
-/**
- * What the same code may do once a person has said yes.
- *
- * One capability wider, and the narrowness is the point rather than a first
- * instalment. A plan is approved on the strength of what it said it would do,
- * and the further the granted set is from that sentence the less the approval
- * meant.
- *
- * **`write_script_data` is not here and should never be.** It is the one name
- * that would let model-written code reach this agent's own control plane: the
- * `runs` table holds the state every stop goes through and the mode this
- * constant is selected by, `plans` holds the row a person is being asked to
- * decide, and `messages` holds the conversation the next turn reasons from. A
- * turn holding it could approve its own plan, un-cancel itself, or rewrite
- * what it was asked to do — so the approval gate would be a gate the thing
- * being gated can open. Reading them is refused for a different reason (they
- * hold every person's rows, not just this one's), but this is the reason that
- * does not soften with time.
- *
- * `enqueue_tasks` and `send_messages` are absent for a smaller reason: a turn
- * that can start work is a turn that can outlive the approval it was given,
- * and neither has been asked for yet. They are available to add; the one above
- * is not.
- */
-const ACT_CAPABILITIES: Capability[] = PLAN_CAPABILITIES.concat([
-  "write_storage",
-]);
 
 /**
  * What a run may do, as a name rather than a flag.
@@ -635,7 +502,7 @@ const TOOLS: ToolSpec[] = [
     description:
       "Run JavaScript and get the value back. Reach for this whenever the work is more than one step: fetching something, trying each of several things in turn, or shaping data before you can answer. A loop, a condition and an intermediate value cost one call here, where asking for a tool per step costs a turn each. " +
       "The value of the LAST EXPRESSION is the result — `const x = 1;` gives you nothing back, `const x = 1; x` gives you 1. `return` at the top level is a syntax error. Everything here is synchronous: `fetch(url, options)` hands back the response itself rather than a promise, and `fetchAll([...])` runs several at once. Top-level `await` is a syntax error, and you will not need one. `console.log` comes back whether or not the code worked, so print your working. " +
-      "It runs holding less than the rest of this agent does: it can call the network, read this script's assets, and read this person's stored notes. It cannot write anything, cannot reach a stored secret, and cannot query the database. That is enforced by the engine underneath the JavaScript, not by this description, so do not try to work around it — use remember to store something and write_response to say something.",
+      "It runs holding less than the rest of this agent does: it can call the network and read this script's assets. It cannot read this person's stored notes — call list_memories or recall first and pass what you need into the code as a literal — and it cannot write anything, reach a stored secret, or query the database. That is enforced by the engine underneath the JavaScript, not by this description, so do not try to work around it — use remember to store something and write_response to say something.",
     input_schema: {
       type: "object",
       properties: {
@@ -1332,7 +1199,7 @@ function advanceRun(context: HandlerContext): void {
 
   // Over the ceiling. Stopped rather than truncated, because there is nowhere
   // valid to truncate — see `MAX_HISTORY_ROWS`.
-  if (history.length > MAX_HISTORY_ROWS) {
+  if (overHistoryLimit(history.length)) {
     recordActivity(
       userId,
       runId,
@@ -1540,24 +1407,6 @@ function advanceRun(context: HandlerContext): void {
   }
 
   finishRun(userId, runId, answer.stop_reason ?? "end_turn");
-}
-
-/**
- * What this turn's prose is: the answer, or talk about what it is doing.
- *
- * A turn that calls no tool ends the run, so its text is the last thing the
- * person will hear and is therefore the answer — whether or not the model
- * bothered with `write_response`. Text beside a tool call is narration, and
- * stays a note.
- *
- * The rule lives here rather than in the loop because it is the whole of what
- * decides whether somebody's answer arrives looking like an aside.
- */
-function proseKindFor(blocks: ContentBlock[]): "note" | "response" {
-  for (const block of blocks) {
-    if (block.type === "tool_use" && block.id && block.name) return "note";
-  }
-  return "response";
 }
 
 /**
@@ -2521,87 +2370,6 @@ function flush(turn: Turn, userId: string, runId: string): void {
   turn.outbound = "";
 }
 
-/** The `data:` lines of one frame, joined as the SSE format defines. */
-function frameData(frame: string): string {
-  const parts: string[] = [];
-  for (const line of frame.split("\n")) {
-    if (line.indexOf("data:") !== 0) continue;
-    const value = line.slice(5);
-    // One space after the colon is the field separator rather than content.
-    parts.push(value.indexOf(" ") === 0 ? value.slice(1) : value);
-  }
-  return parts.join("\n");
-}
-
-/**
- * As much of a string field as a half-written JSON object will give up.
- *
- * `JSON.parse` is all-or-nothing and the object is by definition incomplete.
- * This reads the one field it is asked for and stops wherever the text runs
- * out — mid-escape included, since `\u00` is not yet a character and guessing
- * the rest would put the wrong one on somebody's screen.
- */
-function jsonStringPrefix(partial: string, key: string): string {
-  const marker = '"' + key + '"';
-  const at = partial.indexOf(marker);
-  if (at === -1) return "";
-
-  let i = at + marker.length;
-  while (i < partial.length && (partial[i] === " " || partial[i] === ":")) i++;
-  if (partial[i] !== '"') return "";
-  i++;
-
-  let out = "";
-  while (i < partial.length) {
-    const c = partial[i];
-    if (c === '"') return out;
-    if (c !== "\\") {
-      out += c;
-      i++;
-      continue;
-    }
-
-    if (i + 1 >= partial.length) return out;
-    const escape = partial[i + 1];
-    if (escape === "u") {
-      if (i + 6 > partial.length) return out;
-      out += String.fromCharCode(parseInt(partial.slice(i + 2, i + 6), 16));
-      i += 6;
-      continue;
-    }
-    out += unescapeOne(escape);
-    i += 2;
-  }
-  return out;
-}
-
-function unescapeOne(escape: string): string {
-  switch (escape) {
-    case "n":
-      return "\n";
-    case "t":
-      return "\t";
-    case "r":
-      return "\r";
-    case "b":
-      return "\b";
-    case "f":
-      return "\f";
-    // `"`, `\` and `/` stand for themselves.
-    default:
-      return escape;
-  }
-}
-
-function readErrorMessage(body: string): string {
-  try {
-    const parsed = JSON.parse(body) as ApiResponse;
-    return parsed.error?.message ?? body.slice(0, 200);
-  } catch (e) {
-    return body.slice(0, 200);
-  }
-}
-
 // ============================================================================
 // The state of a run
 // ============================================================================
@@ -2838,8 +2606,7 @@ function stepsTaken(
 ): number {
   const row = runRow(userId, runId);
   const counted = history.filter((m) => m.speaker === "assistant").length;
-  if (!row || row.steps === undefined || row.steps === null) return counted;
-  return Math.max(Number(row.steps), counted);
+  return stepsFrom(row ? row.steps : null, counted);
 }
 
 function countStep(userId: string, runId: string, taken: number): void {
@@ -2856,15 +2623,22 @@ function countStep(userId: string, runId: string, taken: number): void {
   );
 }
 
-/** Whether this run's conversation should be folded up before the next turn. */
+/**
+ * Whether this run's conversation should be folded up before the next turn.
+ *
+ * The thresholds and the rule are in `budget.ts`; what is here is the one
+ * thing that needs a database — the largest prompt this run has sent, which
+ * is read only when the row count has not already decided it.
+ */
 function needsCompacting(
   userId: string,
   runId: string,
   history: MessageRow[],
 ): boolean {
-  if (history.length < 4) return false;
-  if (history.length >= COMPACT_AT_ROWS) return true;
-  return runSpend(userId, runId).largestPrompt >= COMPACT_AT_TOKENS;
+  if (history.length < 4 || history.length >= COMPACT_AT_ROWS) {
+    return shouldCompact(history.length, 0);
+  }
+  return shouldCompact(history.length, runSpend(userId, runId).largestPrompt);
 }
 
 /**
@@ -3033,45 +2807,23 @@ function recordUsage(userId: string, runId: string, usage: StreamUsage): void {
 }
 
 /** What one run has spent, read back from the rows its turns wrote. */
-function runSpend(userId: string, runId: string): Spend {
-  const spend: Spend = {
-    turns: 0,
-    cached: 0,
-    wrote: 0,
-    fresh: 0,
-    output: 0,
-    largestPrompt: 0,
-  };
-  if (!runId) return spend;
-
-  let rows: UsageRow[] = [];
+function runSpend(userId: string, runId: string) {
+  if (!runId) return emptySpend();
   try {
-    rows = queryRows(
-      "turn_usage",
-      JSON.stringify({ user_id: userId, run_id: runId }),
-      MAX_STEPS + 1,
-      "id",
-      "asc",
-    ) as UsageRow[];
+    return spendOf(
+      queryRows(
+        "turn_usage",
+        JSON.stringify({ user_id: userId, run_id: runId }),
+        MAX_STEPS + 1,
+        "id",
+        "asc",
+      ),
+    );
   } catch (e) {
     // A page that cannot say what a run cost is better than a page that will
     // not load.
-    return spend;
+    return emptySpend();
   }
-
-  for (const row of rows) {
-    const cached = Number(row.cached_tokens ?? 0);
-    const wrote = Number(row.wrote_tokens ?? 0);
-    const fresh = Number(row.fresh_tokens ?? 0);
-    spend.turns += 1;
-    spend.cached += cached;
-    spend.wrote += wrote;
-    spend.fresh += fresh;
-    spend.output += Number(row.out_tokens ?? 0);
-    const prompt = cached + wrote + fresh;
-    if (prompt > spend.largestPrompt) spend.largestPrompt = prompt;
-  }
-  return spend;
 }
 
 // ============================================================================
@@ -3174,16 +2926,6 @@ function listAssetInfo(): AssetInfo[] {
   }
 }
 
-/** The skill an asset belongs to, or null if it is not a skill's SKILL.md. */
-function skillNameOf(assetName: string): string | null {
-  if (assetName.indexOf(SKILLS_PREFIX) !== 0) return null;
-  const rest = assetName.slice(SKILLS_PREFIX.length);
-  const cut = rest.indexOf("/");
-  if (cut <= 0) return null;
-  if (rest.slice(cut + 1) !== SKILL_FILE) return null;
-  return rest.slice(0, cut);
-}
-
 /**
  * Every skill this deployment has, with the one line that says when it
  * applies.
@@ -3259,14 +3001,6 @@ function loadSkills(): Skill[] {
  * fingerprint is stored in the entry and compared there. This only has to
  * spread keys well enough that one skill library does not sit on another's.
  */
-function shortHash(text: string): string {
-  let h = 5381;
-  for (let i = 0; i < text.length; i++) {
-    h = ((h << 5) + h + text.charCodeAt(i)) | 0;
-  }
-  return (h >>> 0).toString(36);
-}
-
 /** An asset's content as text, or null if it is not there. */
 function readAssetText(name: string): string | null {
   // `fetchAsset` answers a missing asset with a sentence rather than by
@@ -3278,44 +3012,6 @@ function readAssetText(name: string): string | null {
   } catch (e) {
     return null;
   }
-}
-
-/**
- * One `key: value` out of a leading `---` front-matter block.
- *
- * Deliberately not a YAML parser: the format's whole job here is to carry one
- * description line, and a parser that accepted more would be promising a
- * fidelity nothing downstream honours.
- */
-function frontMatterValue(text: string, key: string): string {
-  if (text.indexOf("---") !== 0) return "";
-  const close = text.indexOf("\n---", 3);
-  if (close === -1) return "";
-
-  for (const line of text.slice(3, close).split("\n")) {
-    const colon = line.indexOf(":");
-    if (colon === -1) continue;
-    if (line.slice(0, colon).trim().toLowerCase() !== key) continue;
-
-    let value = line.slice(colon + 1).trim();
-    const quoted =
-      value.length >= 2 &&
-      ((value[0] === '"' && value[value.length - 1] === '"') ||
-        (value[0] === "'" && value[value.length - 1] === "'"));
-    if (quoted) value = value.slice(1, -1);
-    return value;
-  }
-  return "";
-}
-
-/** What is left of a SKILL.md once the front matter is taken off. */
-function skillBody(text: string): string {
-  if (text.indexOf("---") !== 0) return text;
-  const close = text.indexOf("\n---", 3);
-  if (close === -1) return text;
-  const lineEnd = text.indexOf("\n", close + 1);
-  if (lineEnd === -1) return "";
-  return text.slice(lineEnd + 1).replace(/^\n+/, "");
 }
 
 /**
@@ -3357,8 +3053,9 @@ function systemPromptFor(skills: Skill[], mode: RunMode): string {
     mode === "act"
       ? SYSTEM_PROMPT +
         " Your plan has been approved, so run_js can now write to this " +
-        "person's stored notes as well as read them. Do what you said you " +
-        "would do and nothing wider — the approval was for that plan."
+        "person's stored notes. Reading them is still recall and " +
+        "list_memories, in act mode as in plan. Do what you said you would " +
+        "do and nothing wider — the approval was for that plan."
       : SYSTEM_PROMPT +
         " You can read, fetch and compute, but you cannot change anything " +
         "yet. If what you have been asked for needs writing, work out what " +
@@ -3867,31 +3564,15 @@ function performSkillWrite(
   runId: string,
   plan: PlanRow,
 ): string | null {
-  let args: { name?: string; description?: string; body?: string } = {};
-  try {
-    args = JSON.parse(String(plan.payload ?? "{}")) as typeof args;
-  } catch (e) {
-    return null;
-  }
-  const name = String(args.name ?? "").trim();
-  if (!SKILL_NAME_PATTERN.test(name)) return null;
-
-  const file =
-    "---\n" +
-    "name: " +
-    name +
-    "\n" +
-    "description: " +
-    String(args.description ?? "") +
-    "\n" +
-    "---\n\n" +
-    String(args.body ?? "") +
-    "\n";
+  const args = skillWriteArgs(plan.payload);
+  if (!args) return null;
+  const name = args.name;
+  const file = renderSkillFile(name, args.description, args.body);
 
   let answer = "";
   try {
     answer = assetStorage.upsertAsset(
-      SKILLS_PREFIX + name + "/" + SKILL_FILE,
+      skillAssetPath(name),
       "text/markdown",
       convert.btoa(file),
     );
@@ -3974,17 +3655,12 @@ function performApproved(
     return null;
   }
 
-  let args: { key?: string; value?: string } = {};
-  try {
-    args = JSON.parse(String(plan.payload ?? "{}")) as typeof args;
-  } catch (e) {
-    return null;
-  }
-  const key = String(args.key ?? "").trim();
-  if (!key) return null;
+  const args = rememberArgs(plan.payload);
+  if (!args) return null;
+  const key = args.key;
 
   try {
-    personalStorage.setItem(NOTE_PREFIX + key, String(args.value ?? ""));
+    personalStorage.setItem(NOTE_PREFIX + key, args.value);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     recordActivity(
@@ -4026,8 +3702,9 @@ function capabilitiesFor(mode: RunMode): Capability[] {
     console.log("agent: could not read what this turn holds: " + String(e));
     return [];
   }
-  const wanted = mode === "act" ? ACT_CAPABILITIES : PLAN_CAPABILITIES;
-  return wanted.filter((name) => held.indexOf(name) !== -1);
+  return withoutTheExfiltrationPair(
+    wantedCapabilities(mode).filter((name) => held.indexOf(name) !== -1),
+  );
 }
 
 /**
@@ -4179,10 +3856,13 @@ const TELEGRAM_CHANNEL = "telegram";
  * to this one.
  *
  * It is a secret rather than a `scriptStorage` value, and that distinction is
- * the reason the engine grew URL substitution for this. `scriptStorage` is
- * readable by `run_js` — which holds `read_storage` — so a bot token kept
- * there could be lifted by three lines of model-authored code and posted
- * anywhere. Kept here it is never handed to JavaScript at all.
+ * the reason the engine grew URL substitution for this. A token in
+ * `scriptStorage` is a string this script can read, and therefore a string
+ * that leaves with whatever reads it; kept here it is never handed to
+ * JavaScript at all, and is substituted host-side into a URL that reaches the
+ * audit line as a template. `run_js` no longer holds `read_storage`, so the
+ * model-authored path to it is closed as well — but that is the second lock
+ * and this is the first, and the second was not there when this was written.
  */
 const TELEGRAM_TOKEN_SECRET = "TELEGRAM_BOT_TOKEN";
 
@@ -4195,7 +3875,14 @@ const TELEGRAM_TOKEN_SECRET = "TELEGRAM_BOT_TOKEN";
  * no primitive for "is the header equal to the stored secret", so a value
  * that must be compared has to be one the script can read.
  *
- * What it is worth is bounded, which is what makes that acceptable. It
+ * *This* script, which is now a narrower claim than it was. `run_js` held
+ * `read_storage` until the egress question was answered, so for as long as
+ * both were true this constant was three lines of model-authored code away
+ * from anywhere — worth knowing as the shape of the bug rather than as
+ * history, because it is what a secret in a readable store costs the moment
+ * something untrusted can write code.
+ *
+ * What it is worth is bounded, which is what made that survivable. It
  * authenticates inbound calls and unlocks nothing outbound: somebody holding
  * it can pretend to be Telegram, but `enqueueFrom` still refuses a sender
  * nobody has linked, the run still belongs to whoever linked it, and the
@@ -4732,7 +4419,7 @@ function loadMessages(userId: string, runId: string): MessageRow[] {
   return queryRows(
     "messages",
     JSON.stringify({ user_id: userId, run_id: runId }),
-    MAX_HISTORY_ROWS + 1,
+    HISTORY_QUERY_LIMIT,
     "id",
     "asc",
   ) as MessageRow[];

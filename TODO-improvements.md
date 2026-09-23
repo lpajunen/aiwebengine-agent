@@ -85,60 +85,170 @@ The engine's own half has its own table, under
 
 Four things that belong on this list and have never had one written.
 
-- **A regression suite.** The engine ships `test`, `describe` and `expect`, and
-  a `run_tests` tool. Nothing here uses them — and the three most expensive
-  bugs on this page (the oldest-first `LIMIT`, an agent twice saying it had
-  saved a note it had not, a 30-second ceiling on every model call) were all
-  found by a person reading a database or a log.
+- **A regression suite.** 77 cases over five modules — see
+  [the first suite](#the-first-suite). Two of the three most expensive bugs on
+  this page now have a case named after them: the oldest-first `LIMIT` (as the
+  ceiling-and-read pair) and the prompt sizes that were summed when every turn
+  resends the one before. The third, an agent saying it had saved a note it
+  had not, is covered at its decode layer and not at its effects.
 - **Spend on a channel.** "Each person pays with their own key, so the bill is
   theirs to see" is true on the page and false everywhere else.
 - **Approval provenance.** An approval can only carry out what the _approver's_
   context may hold — which is why a skill approved from Telegram is refused.
   That is a general rule and will bind every deferred action after this one.
-- **Refreshing `types/aiwebengine.d.ts`.** The snapshot in this repository is
-  older than the engine it is checked against: it still says "A URL is never
-  substituted", which the Telegram adapter depends on no longer being true.
-  Everything on this page is verified against that file, so it is the first
-  thing to refresh.
+- **Refreshing `types/aiwebengine.d.ts`.** Done, and the premise was wrong in
+  a way worth keeping. The snapshot was not stale: it was byte-identical to
+  the engine's own `assets/aiwebengine.d.ts`. What was stale was that file —
+  it still said "A URL is never substituted", which the Telegram adapter
+  depends on no longer being true. So the fix was in the engine, and the
+  refresh here was a copy of the corrected file. **A snapshot can only be as
+  current as the thing it snapshots**, and diffing the two says nothing about
+  whether either matches the code.
 
 ## Where to start next
 
-1. **Refresh the type snapshot.** Everything else here is checked against it.
-2. **Decide the egress question**, below, before a second channel exists. At
-   minimum, stop `run_js` holding `use_network` and `read_storage` in the same
-   execution.
-3. **A regression suite** over the turn loop.
-4. Then a second channel (Slack, which needs no engine change) or the run list.
+1. **The suite against a real deployment.** 77 cases have run under a
+   stand-in for `test`, `describe` and `expect`; none has run under
+   `run_tests`. Until one has, this suite is checked against what
+   `aiwebengine.d.ts` says the matchers do.
+2. **The parts that are not pure**, which is everything left worth covering:
+   the state machine in `setRunState`, the ordering in `decide`, the swap in
+   `compactRun`. Each needs a fake of something, which is a bigger step than
+   any taken so far.
+3. Then a second channel (Slack, which needs no engine change) or the run list.
+
+Two items came off this list. The egress question was one: the half a script
+can answer is answered — `run_js` holds no `read_storage` — and the other half
+is engine work this repository cannot do. Refreshing the type snapshot was the
+other, and it was already in sync; what needed fixing was the engine's own
+copy. Both are described below.
 
 ### The egress question
 
 [What follows a channel](#what-follows-a-channel) files prompt injection as a
 thing to design for _before_ the first adapter. It was written when there was
-no adapter, and it is now out of date in the direction that matters: all three
-legs of the lethal trifecta are already here.
+no adapter, and it was out of date in the direction that matters: all three
+legs of the lethal trifecta were already here.
 
-`PLAN_CAPABILITIES` is `view_logs`, `use_network`, `read_assets`,
+`PLAN_CAPABILITIES` was `view_logs`, `use_network`, `read_assets`,
 `read_storage`. So one `run_js` call, **in plan mode, with nothing approved**,
-can read the person's notes and POST them anywhere. Untrusted content arrives
-through anything that call fetches, and now through a chat as well.
+could read the person's notes and POST them anywhere. Untrusted content
+arrives through anything that call fetches, and now through a chat as well.
 
-The defence this file proposes — a run from an unknown sender stays read-only —
-does not touch it, because **exfiltration needs no write capability**. That is
-not a flaw in plan mode; it is that `use_network` has no destination dimension.
-`Capability` names the verb and `FetchOptions` has no allowlist, so "may call
-the network" means "may call anything".
+The defence this file proposed — a run from an unknown sender stays read-only
+— did not touch it, because **exfiltration needs no write capability**. That
+is not a flaw in plan mode; it is that `use_network` has no destination
+dimension. `Capability` names the verb and `FetchOptions` has no allowlist, so
+"may call the network" means "may call anything".
 
-Two answers, and only one of them is structural:
+**The script half is done.** `read_storage` is out of `PLAN_CAPABILITIES`, and
+so out of `ACT_CAPABILITIES`, which concatenates it. `capabilitiesFor` drops it
+from any list that also holds `use_network`, so a later widening cannot put the
+pair back by accident: the lists are written so that the check never fires, and
+it is there because the next person to edit them will be adding a name for a
+good reason with a comment in front of them, and a comment is not a check.
 
-- **In the engine:** `use_network` narrowed to a set of hosts. This is the only
-  fix that holds regardless of what the untrusted text says, and it is why the
-  engine backlog below is no longer empty.
-- **In the script, today:** never let one `sandbox.run` hold `use_network` and
-  `read_storage` together. Notes already reach the loop through `recall` and
-  `list_memories`, so dropping `read_storage` from `run_js` costs little, and
-  it narrows the path to "the model must be talked into copying a note into a
-  URL" — which is the boundary [CaMeL and the dual-LLM
-  pattern](#the-security-reading) formalise.
+What that buys, stated no higher than it is. Code can no longer walk the store
+by itself, so a note reaches a URL only if the **model** carries it there
+through the transcript, in text that is sitting in the activity log. That is
+the boundary [CaMeL and the dual-LLM pattern](#the-security-reading)
+formalise, and it is the most a script can draw on its own. It narrows the
+data path; it does not close it. A model talked into pasting a note into a
+`fetch` still pastes it.
+
+Three things it cost, two of them small and one of them a surprise.
+
+- Notes reach code as a literal now: `recall` or `list_memories` first, then
+  the value passed into `source`. A turn, not a capability.
+- Read-modify-write inside one execution is gone, in `act` as well as in
+  `plan`, because `write_storage` now arrives without its pair.
+  `personalStorage.length` and `key(i)` refuse in an approved run, which is
+  what `list_memories` is for.
+- **`read_storage` covered `scriptStorage` too**, which is the part nobody had
+  counted. The Telegram webhook's shared secret lives there and has to,
+  because checking it means _comparing_ it and the engine never returns a
+  secret's value to JavaScript. So for as long as `run_js` held
+  `read_storage`, that constant was three lines of model-authored code away
+  from anywhere. What it is worth is bounded — forged messages from a sender
+  who already trusts the bot, since `enqueueFrom` still refuses an unlinked
+  one — which is why it was survivable, not why it was acceptable. The general
+  shape is worth keeping: **a secret in a readable store is worth whatever the
+  most permissive reader of that store can do**, and a tool that runs
+  model-written code is the most permissive reader there is.
+
+**What is left is engine work, and only the engine can do it.** `use_network`
+narrowed to a set of hosts is the one fix that holds regardless of what the
+untrusted text says, because it takes away the destination rather than the
+data. It is the top row of [the engine backlog](#the-engine-backlog) and it is
+why that table is no longer empty. Until it lands, the standing rule for
+anything added to `PLAN_CAPABILITIES` is the one the guard encodes: **nothing
+that reads private data goes into the same execution as `use_network`.**
+
+### The first suite
+
+34 cases over two modules, and the interesting part is not the cases.
+
+**A root script cannot `export`.** The module loader refuses it outright —
+"Root scripts cannot use export syntax; define global handlers instead" — and
+a test module reaches its subject by importing it. So every line of a 4,800-line
+`main.ts` was unreachable by a test, and no amount of test-writing discipline
+would have changed that. The suite began with a split, because it had to:
+
+- `agent/protocol.ts` — reading what the model sent. `frameData`,
+  `jsonStringPrefix`, `unescapeOne`, `readErrorMessage`, `proseKindFor`.
+- `agent/capabilities.ts` — `PLAN_CAPABILITIES`, `ACT_CAPABILITIES`,
+  `wantedCapabilities`, `withoutTheExfiltrationPair`.
+
+Those two first because they are where a mistake is _silent_. A half-decoded
+`\u00` is a wrong character on somebody's screen, not an exception; an answer
+misfiled as a note arrives in the voice the model uses talking to itself; and
+a capability list is prose until something reads it. Every bug this file
+records was found by a person reading a database or a log, which is the same
+property from the other side.
+
+**Nothing of a type crosses a module boundary.** The loader has no
+`import type`, and it rewrites every import into a `const` bound to a
+property — so importing a type compiles to a `const` bound to nothing. That is
+why `wantedCapabilities` takes a `string` rather than a `RunMode`, and why
+`proseKindFor` names the three fields it reads instead of taking a
+`ContentBlock`. Both turned out better than the versions that would have
+needed the type: a mode this script has never heard of now falls to the floor
+rather than throwing, which is a case the suite pins.
+
+**The second pass took the three that were named next**, and `main.ts` is
+4,489 lines from 4,802.
+
+- `agent/budget.ts` — what a run has spent and when it has had enough.
+  `MAX_HISTORY_ROWS`, `HISTORY_QUERY_LIMIT`, the compaction thresholds,
+  `spendOf`, `stepsFrom`.
+- `agent/skills.ts` — the SKILL.md format, written and read.
+- `agent/plans.ts` — decoding what an approval carries.
+
+Three things the second pass turned up that the first did not.
+
+**A constant is a better place for an invariant than a call site.** The
+oldest-first bug was a `LIMIT` and a comparison that had to agree, written
+three hundred lines apart. `HISTORY_QUERY_LIMIT = MAX_HISTORY_ROWS + 1` is
+now one line with the reason attached, and a case asserts the pair rather than
+either half. The extra row is the entire mechanism for telling "at the limit"
+from "past it", and nothing about reading the code made that visible.
+
+**The valuable case was the round trip, not either side of it.** `write_skill`
+renders a SKILL.md and a later run parses it back — a writer and a reader for
+a format nothing else validates, a hundred lines apart in one file. Testing
+either alone proves nothing; `skills.test.ts` asserts that what
+`renderSkillFile` writes is what `frontMatterValue` and `skillBody` read,
+including a body that contains `---` itself, which markdown bodies do.
+
+**Extracting the decode layer is most of the value of testing an effect.**
+`performApproved` is a database write and a storage write, so it is not pure
+and its test would need fakes. What made it worth extracting anyway is that
+every one of its failures answers `null`, and the caller reports `null` as
+"there was nothing to do" — which is correct, and is indistinguishable from
+success to the person reading the chat. That is the same silence as the bug
+the approval mechanism exists to fix. `rememberArgs` and `skillWriteArgs` are
+that layer, and the cases are mostly about which inputs must not quietly
+become nothing.
 
 ## The engine underneath
 
@@ -1325,10 +1435,14 @@ the model's own source. Same argument as every other output-shape decision
 here, just applied to the part nobody looks at.
 
 What it does not do is write anything **until somebody says so**. The tool
-holds `view_logs`, `use_network`, `read_assets` and `read_storage` while a run
-is planning, and gains `write_storage` once a plan has been approved — the
-approval step that was the next item when this was written is now
+holds `view_logs`, `use_network` and `read_assets` while a run is planning, and
+gains `write_storage` once a plan has been approved — the approval step that
+was the next item when this was written is now
 [built](#three-features-one-primitive), and this is what it buys.
+
+`read_storage` was on that list and is not any more; see
+[the egress question](#the-egress-question). Code gets a note as a literal that
+a `recall` fetched, which is a turn rather than a capability.
 
 ### OpenHands
 
