@@ -312,6 +312,13 @@ list — and two new rows have opened since, both found by building against it.
 - **`fetch` can return a body that is not text.**
   `fetch(url, { binary: true }).bodyBase64`, which unblocks a photo from a
   channel — the one attachment case that had no path.
+- **Long-running MCP calls have a shape.** `mcp.task({ handler, payload })`
+  hands the caller a task handle and moves the work to the durable queue; the
+  client polls `tasks/get`. Relevant here in one place and not obviously:
+  [background work](#tool-layer) — "start something long, keep talking, be told
+  when it finishes" — is this, if the thing waiting is an MCP client rather than
+  this agent's own page. It does nothing for the page, which has the SSE stream
+  already.
 - **The engine serves MCP resources.** `mcpRegistry.registerResource(uri,
 assetName, metadata)` publishes one of a script's own assets under a URI, and
   it is asset-backed rather than handler-backed on purpose. Two things here
