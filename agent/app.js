@@ -37,6 +37,9 @@ const el = {
   planStatus: document.getElementById("plan-status"),
   approve: document.getElementById("approve"),
   reject: document.getElementById("reject"),
+  grantPanel: document.getElementById("grant-panel"),
+  grantSummary: document.getElementById("grant-summary"),
+  grantLink: document.getElementById("grant-link"),
   memoryPanel: document.getElementById("memory-panel"),
   memoryDetails: document.getElementById("memory-details"),
   memoryCount: document.getElementById("memory-count"),
@@ -604,6 +607,73 @@ el.stop.addEventListener("click", async () => {
  * lapsed. The engine's consent page says what is being asked for and sends
  * them back here.
  */
+/**
+ * What this agent is allowed to do as this person, and the way to change it.
+ *
+ * Shown whether or not anything is granted, which is the point of it. The
+ * first-run prompt below covers "you have not been asked yet"; this covers
+ * every case after that — widening a grant so the agent can manage scripts
+ * and users, narrowing one, or taking it back — none of which had anywhere to
+ * be reached from.
+ *
+ * The consent URL is the engine's, handed over by the server rather than
+ * built here: it names this script, and a page guessing at its own URI is a
+ * page that gets it wrong the first time the script is renamed.
+ */
+function showGrant(auth) {
+  if (!auth || !auth.authenticated || !auth.consentUrl) {
+    el.grantPanel.hidden = true;
+    return;
+  }
+
+  el.grantPanel.hidden = false;
+  el.grantLink.href =
+    auth.consentUrl + "&redirect=" + encodeURIComponent("/agent");
+
+  if (!auth.granted) {
+    el.grantSummary.textContent = auth.expired
+      ? "Your permission has expired, so runs cannot start."
+      : "This agent has no permission to work while you are away yet.";
+    el.grantLink.textContent = "Give permission";
+    return;
+  }
+
+  // What was actually ticked, rather than a guess. The engine hands the
+  // scopes back with the grant, so the page can say which of them are on
+  // instead of describing the ones it assumes.
+  const granted = auth.scopes ?? [];
+  const manages =
+    granted.indexOf("administer") !== -1 || granted.indexOf("author") !== -1;
+
+  el.grantSummary.textContent =
+    "On: " +
+    granted.map(scopeLabel).join(", ") +
+    ". " +
+    (manages
+      ? "It can manage this engine as you, so it can answer questions about scripts and users."
+      : "To let it manage scripts and users \u2014 listing users, reading and writing scripts \u2014 add \u201cadminister\u201d or \u201cauthor\u201d.") +
+    " Changes apply to the next run you start.";
+  el.grantLink.textContent = "Change permissions";
+}
+
+/** A scope as the consent page words it, so the two pages agree. */
+function scopeLabel(scope) {
+  switch (scope) {
+    case "personal_storage":
+      return "your notes";
+    case "secrets":
+      return "your API key";
+    case "write":
+      return "changing things";
+    case "author":
+      return "authoring your scripts";
+    case "administer":
+      return "administering this engine";
+    default:
+      return scope;
+  }
+}
+
 function showAuthorizationNeeded(body) {
   setStatusWithAction(
     el.runStatus,
@@ -656,6 +726,7 @@ async function start() {
     // Say up front that a run will need permission, rather than letting them
     // write a prompt and meet the refusal afterwards.
     const auth = history.authorization;
+    showGrant(auth);
     if (auth && auth.authenticated && !auth.granted) {
       showAuthorizationNeeded({
         error: auth.expired

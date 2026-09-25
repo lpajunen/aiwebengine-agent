@@ -89,7 +89,13 @@
         flex-wrap: wrap;
         margin-top: 10px;
       }
-      button {
+      /* `.button` beside the element, so a link that goes somewhere can look
+         like the controls beside it. The permissions control is a link rather
+         than a button because it navigates to the engine's own consent page
+         rather than doing something here, and a link is what a browser expects
+         to be able to open in a new tab. */
+      button,
+      .button {
         padding: 9px 16px;
         border: 0;
         border-radius: 8px;
@@ -98,8 +104,12 @@
         font: inherit;
         font-weight: 600;
         cursor: pointer;
+        display: inline-block;
+        text-decoration: none;
+        line-height: normal;
       }
-      button.secondary {
+      button.secondary,
+      .button.secondary {
         background: transparent;
         color: var(--muted);
         border: 1px solid var(--line);
@@ -338,6 +348,23 @@
           <button id="save-key">Save key</button>
           <button id="forget-key" class="secondary" hidden>Remove key</button>
           <span id="key-status" class="status"></span>
+        </div>
+      </section>
+
+      <!-- What this agent is allowed to do as you, and the way to change it.
+           Beside the key rather than somewhere else, because the two are the
+           same kind of thing: what of yours this agent may spend while you are
+           away. Always here once you are signed in, not only the first time —
+           the consent page is also where you widen a grant to let the agent
+           manage scripts and users, and where you take it back, and neither is
+           something you should have to remember a URL for. -->
+      <section id="grant-panel" hidden>
+        <h2>What this agent may do</h2>
+        <p id="grant-summary" class="status"></p>
+        <div class="row">
+          <a id="grant-link" class="button secondary" href="#"
+            >Change permissions</a
+          >
         </div>
       </section>
 
