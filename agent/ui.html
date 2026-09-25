@@ -224,7 +224,15 @@
          because an agent that runs something nobody was shown is the thing
          people object to. Selected through the sibling rather than the row:
          the kind is the only element carrying what this entry is. */
-      .kind[data-kind="code"] + .message {
+      /* A management call, shown for the same reason the code is: this one
+         changes the engine rather than a sandbox, so it is the entry a person
+         scanning the log is most likely to be looking for. Same treatment as
+         code, since what it shows is a tool name and its arguments. */
+      .kind[data-kind="engine"] {
+        color: var(--warn);
+      }
+      .kind[data-kind="code"] + .message,
+      .kind[data-kind="engine"] + .message {
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         font-size: 12.5px;
         line-height: 1.5;

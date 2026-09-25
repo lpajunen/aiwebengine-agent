@@ -3234,11 +3234,198 @@ declare var personalTasks: PersonalTasks;
 declare var graphQLRegistry: GraphQLRegistry;
 declare var mcpRegistry: McpRegistry;
 declare var mcp: Mcp;
+/**
+ * The cryptography a solution should not be writing for itself.
+ *
+ * The engine asks scripts to verify their own webhook signatures — it cannot
+ * know whether a delivery is Telegram's scheme or Slack's — but the three
+ * things that takes are all things an engine can get right once: an HMAC, a
+ * comparison that does not leak where two strings differ, and a source of
+ * randomness.
+ *
+ * The secret is always **named**, never passed. `secretStorage` has no read
+ * from JavaScript, deliberately, and these keep that property: the value is
+ * resolved host-side at the point of use, exactly as `fetch` resolves
+ * `{{secret:NAME}}` in a header, so a script cannot log, forward or leak a key
+ * it is never given.
+ *
+ * @example A Slack request signature
+ * ```ts
+ * const base = `v0:${timestamp}:${rawBody}`;
+ * const ok = crypto.hmacVerify({
+ *   secretName: "SLACK_SIGNING_SECRET",
+ *   message: base,
+ *   signature: signatureHeader.replace("v0=", ""),
+ * });
+ * ```
+ *
+ * @example A Telegram webhook's shared secret
+ * ```ts
+ * // The header Telegram echoes back, compared without `===`.
+ * if (!crypto.secretEquals("TELEGRAM_WEBHOOK_SECRET", headerValue)) {
+ *   return { status: 401, body: "no" };
+ * }
+ * ```
+ */
+interface Crypto {
+  /**
+   * A random version 4 UUID. The same as the web platform's
+   * `crypto.randomUUID()`.
+   */
+  randomUUID(): string;
+
+  /**
+   * A fresh random token — for a webhook secret, a one-time link, anything
+   * that has to be unguessable.
+   *
+   * Refused below 16 bytes and above 64 rather than clamped: a token shorter
+   * than that is guessable, and a caller who asked for 8 and silently got 16
+   * would go on believing it had asked for something it did not get.
+   *
+   * @param bytes - Bytes of entropy, 16 to 64. Defaults to 32.
+   * @param encoding - `"hex"` (the default) or `"base64"`.
+   */
+  randomToken(bytes?: number, encoding?: "hex" | "base64"): string;
+
+  /**
+   * Compare two strings without revealing where they differ.
+   *
+   * For a value you already hold. When the value is a secret, prefer
+   * {@link Crypto.secretEquals}, which never brings it into JavaScript at all.
+   *
+   * Length is not secret — it is visible in anything that carries the value —
+   * so a length mismatch answers immediately. What stays constant is the time
+   * taken over two strings of equal length.
+   */
+  constantTimeEqual(a: string, b: string): boolean;
+
+  /**
+   * Whether `candidate` equals the secret stored under `secretName`, compared
+   * in constant time.
+   *
+   * The shape a shared-secret webhook header wants: Telegram's
+   * `X-Telegram-Bot-Api-Secret-Token` and anything else that echoes a value
+   * back for you to recognise.
+   *
+   * Throws when this script has no secret of that name. A missing key is a
+   * deployment that was never finished, and answering `false` would make it
+   * indistinguishable from an endpoint under attack.
+   *
+   * Requires the `read_secrets` capability.
+   */
+  secretEquals(secretName: string, candidate: string): boolean;
+
+  /**
+   * Whether `signature` is the HMAC of `message` under the secret stored as
+   * `secretName`.
+   *
+   * Everything that is not a match answers `false` — a signature over
+   * different bytes, one of the wrong length, one that is not valid hex at
+   * all — because from the script's side they are one event: something arrived
+   * that this key did not sign.
+   *
+   * Requires the `read_secrets` capability.
+   */
+  hmacVerify(options: HmacVerifyOptions): boolean;
+}
+
+interface HmacVerifyOptions {
+  /**
+   * The **name** of the secret to verify under, not its value. The value never
+   * enters JavaScript.
+   */
+  secretName: string;
+
+  /** The exact bytes that were signed. */
+  message: string;
+
+  /**
+   * The signature as it arrived, without any scheme prefix — strip `sha256=`
+   * or `v0=` yourself, since only the sender's documentation says what it is.
+   */
+  signature: string;
+
+  /**
+   * Defaults to `"sha256"`. `"sha1"` is here because webhooks still send it
+   * (GitHub's original `X-Hub-Signature`) and a verifier that cannot speak it
+   * cannot check those deliveries — it is not a choice to make for something
+   * new.
+   */
+  algorithm?: "sha256" | "sha512" | "sha1";
+
+  /** How the signature is written. Defaults to `"hex"`. */
+  encoding?: "hex" | "base64";
+}
+
+/**
+ * The engine's own management tools, called from a script.
+ *
+ * The same tools `/mcp` publishes — `list_users`, `write_file`, `read_logs`,
+ * `list_revisions` and the rest — dispatched through the same function, with
+ * the same authorization. **Every call is checked against whoever is calling**,
+ * so holding this global grants nothing: a script reaches exactly what the
+ * person driving it could reach over HTTP.
+ *
+ * **It is not always there.** `engine` is `undefined` outside the two
+ * executions whose authority came from a credential — a script serving a
+ * request, and a delegated task where somebody consented to `author` or
+ * `administer`. A scheduled job, `init()`, a message listener, a test run,
+ * `/engine/eval` and `sandbox.run` do not get it, because those run as the
+ * engine's own synthetic administrator or with a capability subset that cannot
+ * express the difference between reading your own `console` and reading every
+ * script's logs. Check for it before using it.
+ *
+ * @example Answering "who are the users"
+ * ```ts
+ * if (!engine) throw new Error("no management tools in this execution");
+ * const { users, count } = engine.call("list_users", {});
+ * ```
+ *
+ * @example Discovering what this engine serves
+ * ```ts
+ * const { tools } = engine.call ? engine.tools("revision") : { tools: [] };
+ * // → list_revisions, diff_revisions, label_revision, revert_script
+ * ```
+ */
+interface EngineApi {
+  /**
+   * The tools this engine serves, optionally narrowed to those whose name or
+   * description mentions `area`.
+   *
+   * Names and descriptions only — the input schemas are large, and
+   * `/engine/openapi.json` publishes them. Read this rather than hard-coding a
+   * list: what a deployment serves is a property of the deployment.
+   */
+  tools(area?: string): {
+    tools: { name: string; description: string }[];
+    count: number;
+  };
+
+  /**
+   * Call a tool and return its result.
+   *
+   * Throws an `Error` named `EngineError` when the tool refuses — which is
+   * what a missing capability, a script you do not own, or a bad argument all
+   * look like. Throws a plain `Error` when no tool has that name.
+   */
+  call(name: string, args?: Record<string, unknown>): any;
+
+  /**
+   * The same call, returning the tool's envelope instead of throwing.
+   *
+   * A refusal arrives as `{ error: string }`, which is the shape `/mcp` hands
+   * its clients. For a caller that would rather branch than catch.
+   */
+  callRaw(name: string, args?: Record<string, unknown>): any;
+}
+
 declare var database: Database;
 declare var console: Console;
 declare var dispatcher: MessageDispatcher;
 declare var sandbox: Sandbox;
 declare var convert: Convert;
+declare var crypto: Crypto;
+declare var engine: EngineApi | undefined;
 
 // ============================================================================
 // Testing

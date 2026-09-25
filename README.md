@@ -31,16 +31,18 @@ subject by importing it — so anything under test had to move out:
 | `budget.ts`       | what a run has spent, and when it has had enough        |
 | `skills.ts`       | the SKILL.md format, written and read                   |
 | `plans.ts`        | decoding the call an approval carries                   |
+| `engine.ts`       | which management tools only read, and their arguments   |
 
-Their tests are `agent/*.test.ts` — 77 cases — run with the `run_tests` tool
+Their tests are `agent/*.test.ts` — 88 cases — run with the `run_tests` tool
 or `POST /engine/run_tests?uri=<this script>`.
 
 The model gets five tools: `write_response` (the only way the person sees
 anything), `remember`, `list_memories` and `recall` over notes in that person's
 `personalStorage`, and `run_js`, which runs model-written JavaScript in a
-sandbox holding less than the turn around it. Three more appear conditionally:
+sandbox holding less than the turn around it. Five more appear conditionally:
 `request_approval` while a run is planning, `read_skill` when the deployment
-has skills, and `write_skill` with it.
+has skills, `write_skill` with it, and `engine_tools` / `engine_call` when the
+person has granted this app management authority.
 
 `list_memories` is what makes the notes readable rather than only writable:
 `recall` needs a key, so anything written in an earlier run was unreachable
@@ -204,6 +206,57 @@ features but the same question, _may this run take another turn_, and the half
 that stops a run was written once for all of them. `request_approval` sets
 `waiting` and the run suspends where it stands; `POST /agent/decide` — or a
 Telegram button — is the half that resumes it.
+
+## Managing the engine
+
+The agent can answer "who are the users", read a script, list revisions or
+deploy one — the engine's own management tools, the same ones `/mcp` publishes.
+
+**Two tools, not fifty-two.** `engine_tools(area)` asks the engine what it
+serves and `engine_call(name, args)` calls one. Handing the model fifty
+schemas would be ten to fifteen thousand tokens resent every turn, on a prompt
+whose cached prefix is otherwise a few hundred — and a list written into this
+script would drift from the engine the first time it gained a tool.
+
+**It is off unless somebody turned it on.** Two things have to be true and
+neither is this script's to decide:
+
+- The engine installs the `engine` global only where authority came from a
+  credential — a request, or a delegated task. A scheduled job runs as a
+  synthetic administrator and does not get it, and neither does `run_js`.
+- The person has granted `author` or `administer` on their account page.
+
+`hasEngineAuthority()` reads `sandbox.held()` to check the second, so a run
+with no grant is never offered the tools at all rather than being offered them
+and refused. A tool whose every answer is "you may not" is worse than no tool.
+
+**You are acting as them.** Every call is checked against what that person's
+account may do, so a refusal means their account may not do it — the agent is
+told to report that rather than look for another way round. Granting
+`administer` does not make the app an administrator; it lets it be one _as
+you_, and only if you are.
+
+**Reads answer; changes ask.** `engine.ts` classifies a tool by its name — the
+engine has no answer to give, since a tool reports what it did rather than what
+it would do — and **anything unrecognised counts as a write**. Being asked
+about a read costs a turn; not being asked about a write costs whatever it
+changed. A write in plan mode is refused with the name of the tool that lifts
+it, exactly as `run_js` writes are.
+
+Every call appears in the activity log before it runs, like the code `run_js`
+writes, for the same reason: an agent that does something nobody was shown is
+the thing people object to.
+
+### Setting it up
+
+```text
+set_script_limits script=<this script> jobTimeoutMs=120000
+```
+
+Then, as the person who wants the agent to manage things: open
+`/auth/delegate?script=<this script>`, tick **Administer this engine as you**,
+and start a run. The checkbox is disabled with a reason if the account is not
+an administrator.
 
 ## Skills
 

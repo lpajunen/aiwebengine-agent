@@ -32,6 +32,7 @@ import {
   skillBody,
   skillNameOf,
 } from "./skills.ts";
+import { onlyReads, parseArgs } from "./engine.ts";
 import { rememberArgs, skillWriteArgs } from "./plans.ts";
 
 /**
@@ -230,6 +231,27 @@ const SYSTEM_PROMPT = [
   "apiece to do, and you have twelve turns.",
 ].join(" ");
 
+/**
+ * Added only when the management tools are on the list.
+ *
+ * Kept out of [`SYSTEM_PROMPT`] rather than written conditionally into it,
+ * because most runs have no management authority and a paragraph about tools
+ * that are not there is a paragraph the model has to rule out on every turn.
+ * It joins the prefix in [`systemPromptFor`], where the tool list is decided,
+ * so the two never disagree about whether these exist.
+ */
+const ENGINE_PROMPT = [
+  "This engine's own management tools are available to you: scripts, assets,",
+  "users, secrets, logs, revisions and deployments. Call engine_tools to find",
+  "the one you want and engine_call to use it — do not guess a name, the list",
+  "is what this deployment actually serves.",
+  "You are acting as the person whose run this is, with what they granted, so",
+  "a refusal means their account may not do it. Report that rather than trying",
+  "another way round.",
+  "Reads answer straight away; anything that changes something needs",
+  "request_approval first.",
+].join(" ");
+
 // ============================================================================
 // Memory
 // ============================================================================
@@ -424,6 +446,16 @@ const MAX_CODE_CONSOLE_LINES = 40;
 const MAX_CODE_LINE_CHARS = 400;
 const MAX_CODE_RESULT_CHARS = 4000;
 
+/**
+ * The most of an engine tool's answer to put in front of the model.
+ *
+ * A listing is the shape that runs away: `list_users` on a real deployment, or
+ * `read_logs` without a narrow filter, is thousands of rows the model will
+ * summarise into one sentence. Cutting it costs that sentence some accuracy
+ * and saves a turn's budget; not cutting it costs the run.
+ */
+const MAX_ENGINE_RESULT_CHARS = 4000;
+
 /** Stack frames kept from a failure, once the engine's own are dropped. */
 const MAX_CODE_STACK_FRAMES = 5;
 
@@ -542,6 +574,70 @@ const TOOLS: ToolSpec[] = [
  * an approval rewrites the prefix. Once per run, on a run that has just been
  * given permission to do the expensive half of its work.
  */
+/**
+ * The engine's own management tools, as two tools rather than fifty-two.
+ *
+ * The engine publishes around fifty native tools — scripts, assets, users,
+ * secrets, logs, revisions, deployments, git. Handing the model all of their
+ * schemas would be ten to fifteen thousand tokens resent on every turn of
+ * every run, on a prompt whose whole cached prefix is a few hundred. So the
+ * list is something to *look at* rather than something to carry: `engine_tools`
+ * asks the engine what it serves, and `engine_call` calls one.
+ *
+ * That also keeps the list honest. What a deployment serves is a property of
+ * the deployment, and a list written here would drift from it the first time
+ * the engine gained a tool.
+ *
+ * Offered only when this execution actually holds management authority — see
+ * [`hasEngineAuthority`]. A tool whose every answer is "you may not" is worse
+ * than no tool: it spends a step to learn nothing and invites the model to
+ * keep trying.
+ */
+const ENGINE_TOOLS_TOOL: ToolSpec = {
+  name: "engine_tools",
+  description:
+    "List the engine's own management tools — for scripts, assets, users, secrets, logs, revisions and deployments. Call this before engine_call to find the right name and see what it takes. " +
+    "Pass `area` to narrow the list to tools whose name or description mentions it, such as 'user', 'script', 'log' or 'revision'. Pass an empty string for all of them.",
+  input_schema: {
+    type: "object",
+    properties: {
+      area: {
+        type: "string",
+        description:
+          "A word to narrow the list by, or an empty string for every tool.",
+      },
+    },
+    required: ["area"],
+    additionalProperties: false,
+  },
+  strict: true,
+};
+
+const ENGINE_CALL_TOOL: ToolSpec = {
+  name: "engine_call",
+  description:
+    "Call one of the engine's management tools by name. Use engine_tools first to find the name and what it takes. " +
+    "Every call is checked against what this person may do — you are acting as them, not as the engine — so a refusal means their account may not do it, and is not something to work around. " +
+    "Reads answer straight away. Anything that changes something needs the person's approval first: ask with request_approval and say what you intend to change.",
+  input_schema: {
+    type: "object",
+    properties: {
+      name: {
+        type: "string",
+        description: "The tool's name, exactly as engine_tools gave it.",
+      },
+      args: {
+        type: "string",
+        description:
+          'The tool\'s arguments as a JSON object, e.g. {"uri": "..."}. Pass {} for a tool that takes none.',
+      },
+    },
+    required: ["name", "args"],
+    additionalProperties: false,
+  },
+  strict: true,
+};
+
 const REQUEST_APPROVAL_TOOL: ToolSpec = {
   name: "request_approval",
   description:
@@ -3039,6 +3135,13 @@ function readAssetText(name: string): string | null {
  */
 function toolsFor(skills: Skill[], mode: RunMode): ToolSpec[] {
   let tools = TOOLS;
+  // A property of the grant rather than of the turn, so it is as stable
+  // across a run as the rest of the cached prefix — a person does not
+  // withdraw a delegation mid-run, and if they do the next call refuses
+  // rather than the tool list changing underneath a cached prefix.
+  if (hasEngineAuthority()) {
+    tools = tools.concat([ENGINE_TOOLS_TOOL, ENGINE_CALL_TOOL]);
+  }
   if (mode === "plan") tools = tools.concat([REQUEST_APPROVAL_TOOL]);
   if (skills.length > 0) tools = tools.concat([READ_SKILL_TOOL]);
   // Not conditional on the library existing, unlike reading: the first skill
@@ -3048,7 +3151,37 @@ function toolsFor(skills: Skill[], mode: RunMode): ToolSpec[] {
   return tools;
 }
 
+/**
+ * Whether this execution can reach the engine's management tools at all.
+ *
+ * Two things have to be true and neither is this script's to decide. The
+ * engine installs `engine` only where the authority came from a credential —
+ * a request, or a delegated task — so a scheduled job and a `sandbox.run`
+ * sub-execution do not have it. And the person has to have granted `author`
+ * or `administer` on the consent page, which is what puts a management
+ * capability in the delegated context.
+ *
+ * `sandbox.held()` answers the second cheaply and exactly: it reports what
+ * *this* execution holds, so there is no need to call a tool and read its
+ * refusal to find out.
+ */
+function hasEngineAuthority(): boolean {
+  if (typeof engine === "undefined") return false;
+  try {
+    const held = sandbox.held();
+    return (
+      held.indexOf("administer_engine") !== -1 ||
+      held.indexOf("write_scripts") !== -1
+    );
+  } catch (e) {
+    // Reading what we hold should not be the thing that breaks a run.
+    console.log("agent: could not read held capabilities: " + String(e));
+    return false;
+  }
+}
+
 function systemPromptFor(skills: Skill[], mode: RunMode): string {
+  const engine = hasEngineAuthority() ? " " + ENGINE_PROMPT : "";
   const preamble =
     mode === "act"
       ? SYSTEM_PROMPT +
@@ -3080,7 +3213,7 @@ function systemPromptFor(skills: Skill[], mode: RunMode): string {
   }
 
   const lines = [
-    preamble,
+    preamble + engine,
     "",
     "Skills are instructions for particular kinds of work. When one covers " +
       "what you have been asked to do, call read_skill and follow it before " +
@@ -3209,6 +3342,19 @@ function runTool(
 
     case "run_js": {
       return runJsTool(userId, runId, String(input.source ?? ""));
+    }
+
+    case "engine_tools": {
+      return engineToolsTool(String(input.area ?? ""));
+    }
+
+    case "engine_call": {
+      return engineCallTool(
+        userId,
+        runId,
+        String(input.name ?? "").trim(),
+        String(input.args ?? "{}"),
+      );
     }
 
     case "request_approval": {
@@ -3408,6 +3554,121 @@ function readSkillTool(
  * graph, so this turn cannot hand the narrowed one a function and have it
  * called.
  */
+/**
+ * What this engine serves, asked of the engine rather than remembered here.
+ */
+function engineToolsTool(area: string): { content: string; isError: boolean } {
+  if (typeof engine === "undefined") {
+    return {
+      content:
+        "This run cannot reach the engine's management tools. They are available while somebody is using the agent, and to a run they have granted 'author' or 'administer' to.",
+      isError: true,
+    };
+  }
+
+  try {
+    const listed = engine.tools(area.trim());
+    if (!listed.tools || listed.tools.length === 0) {
+      return {
+        content: area.trim()
+          ? `No management tool mentions "${area.trim()}". Call engine_tools with an empty area to see all of them.`
+          : "This engine serves no management tools.",
+        isError: false,
+      };
+    }
+    const lines = listed.tools.map(
+      (tool) => `${tool.name} — ${tool.description}`,
+    );
+    return {
+      content: cut(
+        `${listed.count} tool${listed.count === 1 ? "" : "s"}:\n` +
+          lines.join("\n"),
+        MAX_ENGINE_RESULT_CHARS,
+      ),
+      isError: false,
+    };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { content: `Could not list the tools: ${message}`, isError: true };
+  }
+}
+
+/**
+ * Call one management tool as the person whose run this is.
+ *
+ * Three refusals before the engine ever sees the call, and each is a different
+ * thing to tell the model. Arguments that are not JSON are the model's
+ * mistake and fixable on the next turn. A write while the run is planning is
+ * the agent's own rule and names the tool that lifts it. And a tool that
+ * refuses is the *person's* account saying no, which is not something to work
+ * around — said plainly so the model reports it rather than retrying.
+ */
+function engineCallTool(
+  userId: string,
+  runId: string,
+  name: string,
+  argsJson: string,
+): { content: string; isError: boolean } {
+  if (typeof engine === "undefined") {
+    return {
+      content:
+        "This run cannot reach the engine's management tools. Ask the person to grant this app 'administer' on their account page, then start a new run.",
+      isError: true,
+    };
+  }
+  if (!name) {
+    return {
+      content: "No tool was named. Put its name in `name`.",
+      isError: true,
+    };
+  }
+
+  const parsed = parseArgs(argsJson);
+  if (!parsed.ok) {
+    return {
+      content: `\`args\` has to be a JSON object, e.g. {"uri": "..."} — ${parsed.why}. Got: ${cut(argsJson, 200)}`,
+      isError: true,
+    };
+  }
+  const args = parsed.args;
+
+  // The same line `run_js` draws, drawn for the same reason: reading is free
+  // and changing is the thing a person is asked about. Withheld here rather
+  // than relying on the engine to refuse, because the engine would *allow* it
+  // — the person granted it — and the agent's plan step is what they are
+  // actually expecting to be asked at.
+  if (!onlyReads(name) && runModeOf(userId, runId) !== "act") {
+    return {
+      content: `${name} changes something, and this run has not been approved yet. Say what you intend to change with request_approval; if the person agrees you can call it on the turn after.`,
+      isError: true,
+    };
+  }
+
+  recordActivity(
+    userId,
+    runId,
+    "engine",
+    `${name} ${cut(JSON.stringify(args), 300)}`,
+  );
+
+  try {
+    const answer = engine.call(name, args);
+    return {
+      content: cut(
+        typeof answer === "string" ? answer : JSON.stringify(answer, null, 1),
+        MAX_ENGINE_RESULT_CHARS,
+      ),
+      isError: false,
+    };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    // An EngineError is the engine refusing or the arguments being wrong;
+    // either way the model gets the engine's own words, which name the
+    // capability or the argument rather than saying "failed".
+    return { content: `${name}: ${message}`, isError: true };
+  }
+}
+
 function runJsTool(
   userId: string,
   runId: string,
