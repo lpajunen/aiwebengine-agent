@@ -8,7 +8,7 @@
  * /// <reference path="https://your-engine.com/engine/types/v0.1.0/aiwebengine.d.ts" />
  *
  * IMPORTANT: Every script MUST export an init() function that registers routes,
- * GraphQL resolvers, or other initialization logic.
+ * MCP tools, or other initialization logic.
  *
  * @example
  * // Minimal script structure
@@ -28,7 +28,7 @@
 /**
  * Initialization function that must be exported by every script.
  * This function is called when the script is loaded and should register
- * routes, GraphQL resolvers, or perform other setup tasks.
+ * routes, MCP tools, or perform other setup tasks.
  *
  * @param context - Handler context (optional, may not be provided during init)
  * @example
@@ -36,14 +36,6 @@
  *   // Register HTTP routes
  *   routeRegistry.registerRoute("/api/users", "listUsers", "GET");
  *   routeRegistry.registerRoute("/api/users/:id", "getUser", "GET");
- *
- *   // Register GraphQL queries
- *   graphQLRegistry.registerQuery(
- *     "getUser",
- *     "getUser(id: ID!): User",
- *     "getUserResolver",
- *     "external",
- *   );
  *
  *   // Register streams
  *   routeRegistry.registerStreamRoute("/events/notifications");
@@ -60,7 +52,7 @@ declare function init(context?: HandlerContext): void;
 
 /**
  * Every global in this file is present in every execution context. A script
- * sees the same API whether it was entered through an HTTP route, a GraphQL
+ * sees the same API whether it was entered through an HTTP route, an MCP
  * resolver, an MCP tool, a scheduled job, a stream customizer, a message
  * listener or a test, so shared helpers never need `typeof x === "undefined"`
  * guards. What a call is *allowed* to do still depends on the caller's
@@ -70,10 +62,8 @@ declare function init(context?: HandlerContext): void;
  * `init()` runs in the registration phase. So these methods:
  *
  * - `routeRegistry.registerRoute` / `registerAssetRoute` / `registerStreamRoute`
- * - `graphQLRegistry.registerQuery` / `registerMutation` / `registerSubscription`
  * - `mcpRegistry.registerTool` / `registerPrompt` / `registerResource`
  * - `schedulerService.registerOnce` / `registerRecurring` / `clearAll`
- * - `dispatcher.registerListener`
  *
  * take effect during startup and `init()`, and elsewhere return a string saying
  * the entry was not registered. They never throw for being called at the wrong
@@ -83,8 +73,7 @@ declare function init(context?: HandlerContext): void;
  *
  * Everything else — `database`, `assetStorage`, `secretStorage`,
  * `scriptStorage`, `personalStorage`, `fetch`, `convert`, `console`,
- * `McpClient`, `dispatcher.sendMessage`, `graphQLRegistry.executeGraphQL`,
- * `routeRegistry.sendStreamMessage` — works in every context.
+ * `McpClient`, `routeRegistry.sendStreamMessage` — works in every context.
  *
  * Register in `init()`. Registering from a request handler silently does
  * nothing, which is rarely what the script intended.
@@ -107,78 +96,93 @@ declare function init(context?: HandlerContext): void;
  * **The execution model.** These are not numbers, and they are what surprises
  * people arriving from a browser or from Node:
  *
- * {{limits.notes}}
+ * - Every invocation gets a fresh runtime: no value assigned at module
+ *   scope survives one request into the next. Persist through
+ *   scriptStorage, personalStorage or the script database.
+ * - There are no timers. setTimeout and setInterval do not exist, and a
+ *   promise still pending when a handler returns can never settle.
+ * - There is no concurrency. Every host call — fetch, database, a
+ *   script's tables — blocks until it has an answer, so `await` sequences
+ *   work rather than overlapping it, and Promise.all over several fetches
+ *   runs them one after another.
+ * - Imports resolve to this script's own assets. A specifier is relative
+ *   ('./x.ts', '../y.ts') or an asset-root path ('server/x.ts'); there is
+ *   no dynamic import(), no npm and no node built-ins.
+ * - A script's execution budget is enforced between JavaScript operations
+ *   and as a ceiling on each host call, so a slow database statement cannot
+ *   outlive it — but only Postgres can end a statement already running.
+ * - Engine administration (scripts, assets, users, secrets, logs) is not
+ *   reachable from JavaScript at all; it lives on these /engine endpoints
+ *   and the engine MCP tools.
  *
  * **Budgets.** One invocation gets `javascript.execution_timeout_ms` of wall
- * clock ({{limits.execution.timeout}}), {{limits.execution.maxMemory}} of
- * memory and a {{limits.execution.stackSize}} stack — about
- * {{limits.execution.stackFrames}} frames of recursion, past which QuickJS
+ * clock (10 s), 128 MB of
+ * memory and a 1 MB stack — about
+ * 1,024 frames of recursion, past which QuickJS
  * throws an error the script can see. `init()` gets its own budget
- * (`javascript.init_timeout_ms`, {{limits.execution.initTimeout}}), because it
+ * (`javascript.init_timeout_ms`, 30 s), because it
  * runs once per deployment rather than once per request and a script whose
  * `init()` is cut off does not serve at all. A test module gets
- * {{limits.execution.testModuleTimeout}} and a whole test run
- * {{limits.execution.testRunTimeout}}.
+ * 30 s and a whole test run
+ * 5 min.
  *
  * The budget is enforced between JavaScript operations *and* as a ceiling on
  * each host call, so a slow database statement cannot outlive it. What it
  * cannot do is interrupt a statement already running inside Postgres: that is
  * what `repository.statement_timeout_ms`
- * ({{limits.database.statementTimeout}}), `lock_timeout_ms`
- * ({{limits.database.lockTimeout}}) and `idle_in_transaction_timeout_ms`
- * ({{limits.database.idleInTransactionTimeout}}) are for, and why
+ * (30 s), `lock_timeout_ms`
+ * (5 s) and `idle_in_transaction_timeout_ms`
+ * (5 min) are for, and why
  * `database.beginTransaction(timeoutMs)` can only tighten them.
  *
  * At most `javascript.max_concurrent_executions` scripts run at once
- * ({{limits.execution.maxConcurrent}}). Past that a request waits for a slot
+ * (64). Past that a request waits for a slot
  * inside the timeout it already had, rather than being refused. The number is
  * sized against the connection pool rather than against the CPU: a script
  * touching the database holds a slot and a connection until it answers, so
  * slots far above the pool would only deepen the queue.
  *
- * **Sizes.** A script's root source is {{limits.size.maxScriptSource}}, one
- * asset {{limits.size.maxAsset}} with a URI of at most
- * {{limits.size.maxAssetUriChars}} characters, one `scriptStorage` /
- * `personalStorage` value {{limits.size.maxStorageValue}}, one secret
- * {{limits.size.maxSecretValue}}, a `fetch` response
- * {{limits.fetch.maxResponse}}, and `convert.markdown_to_html` /
- * `render_handlebars_template` {{limits.size.maxMarkdown}} of input each. A
+ * **Sizes.** A script's root source is 1 MB, one
+ * asset 10,000,000 bytes with a URI of at most
+ * 255 characters, one `scriptStorage` /
+ * `personalStorage` value 1,000,000 bytes, one secret
+ * 1,000,000 bytes, a `fetch` response
+ * 10 MB, and `convert.markdown_to_html` /
+ * `render_handlebars_template` 1,000,000 bytes of input each. A
  * request arriving at one of your routes is bounded by
- * `security.max_request_body_bytes` ({{limits.size.maxRequestBody}}), or by
+ * `security.max_request_body_bytes` (10 MB), or by
  * `repository.max_upload_size_bytes` plus framing when it is form-encoded or
- * multipart ({{limits.size.maxUpload}}); past either, the caller gets a 413
- * and your handler is never entered. A GraphQL query executed through
- * `graphQLRegistry` is at most {{limits.graphql.maxQueryChars}} characters
- * with {{limits.graphql.maxVariablesChars}} of variables.
+ * multipart (10 MB); past either, the caller gets a 413
+ * and your handler is never entered.
  *
- * **The script database.** {{limits.database.maxTablesPerScript}} tables per
- * script, {{limits.database.maxColumnsPerTable}} columns per table, and
- * identifiers of at most {{limits.database.maxIdentifierChars}} characters
+ * **The script database.** 50 tables per
+ * script, 50 columns per table, and
+ * identifiers of at most 63 characters
  * matching `^[a-z][a-z0-9_]*$`. `database.query` returns
- * {{limits.database.defaultQueryLimit}} rows when you name no limit and clamps
- * a named one to {{limits.database.maxQueryLimit}} — silently, so a query
+ * 100 rows when you name no limit and clamps
+ * a named one to 1,000 — silently, so a query
  * wanting more has to page. The connection pool
- * ({{limits.database.maxConnections}}) is shared by every script on the
+ * (32) is shared by every script on the
  * instance, and each call holds a connection for its whole round trip.
  *
- * **Network.** `fetch` and `McpClient` speak {{limits.fetch.schemes}} only,
+ * **Network.** `fetch` and `McpClient` speak http and https only,
  * refuse localhost and private, loopback and link-local addresses — including
  * a public host that resolves to one, at every hop — follow at most
- * {{limits.fetch.maxRedirects}} redirects within one budget, and understand
- * `{{limits.fetch.encodings}}`. Asking for `br` or `zstd` is an error rather
+ * 5 redirects within one budget, and understand
+ * `gzip, deflate`. Asking for `br` or `zstd` is an error rather
  * than an unreadable body. An `McpClient` naming a blocked address is refused
  * when it is constructed, before its token is looked up.
  *
  * **Scheduled jobs.** A recurring interval is at least
- * {{limits.scheduler.minRecurringInterval}} and a job name
- * 1-{{limits.scheduler.maxJobNameChars}} characters.
+ * 100 ms and a job name
+ * 1-64 characters.
  *
  * **Retention.** Logs are not storage: a line survives only while it is within
- * both the newest {{limits.retention.logsKeepPerScript}} of its script and
- * {{limits.retention.logsRetentionHours}} hours of now, and either clause
+ * both the newest 10,000 of its script and
+ * 168 hours of now, and either clause
  * alone removes it. Revisions are kept for
- * {{limits.retention.revisionsRetentionDays}} days *and* the newest
- * {{limits.retention.revisionsKeepPerScript}} per script — a revision has to
+ * 30 days *and* the newest
+ * 50 per script — a revision has to
  * fall outside both before it goes — and a labelled revision, the newest that
  * initialised cleanly, and the newest of each script are kept regardless.
  */
@@ -224,7 +228,7 @@ interface HttpRequest {
    * The absolute URL the request arrived on, origin included.
    *
    * `path` cannot say which of the engine's hosts served a request; this can.
-   * Present only for HTTP routes — a GraphQL resolver, MCP tool or stream
+   * Present only for HTTP routes — an MCP tool or stream
    * customization has no URL behind it.
    * @example
    * console.log(req.url); // "https://example.com/api/notes?tag=a"
@@ -345,9 +349,6 @@ interface HttpResponse {
 /** What sort of invocation a handler is running under */
 type HandlerInvocationKind =
   | "httpRoute"
-  | "graphqlQuery"
-  | "graphqlMutation"
-  | "graphqlSubscription"
   | "streamCustomization"
   | "messageListener"
   | "init"
@@ -364,7 +365,7 @@ interface HandlerContext {
   /** HTTP request information (for HTTP route handlers) */
   request?: HttpRequest;
 
-  /** GraphQL or function arguments (for GraphQL resolvers) */
+  /** Function arguments */
   args?: Record<string, any>;
 
   /** Handler invocation type */
@@ -619,10 +620,10 @@ interface AssetStorage {
   /**
    * Create or update an asset owned by this script
    *
-   * The name is at most {{limits.size.maxAssetUriChars}} characters and may not traverse (`..`); the
+   * The name is at most 255 characters and may not traverse (`..`); the
    * content is at most 10,000,000 bytes. Either exceeded, this answers with
    * the reason rather than throwing.
-   * @param name - Asset name/URI (1-{{limits.size.maxAssetUriChars}} characters)
+   * @param name - Asset name/URI (1-255 characters)
    * @param mimetype - MIME type (e.g., "image/png", "text/css")
    * @param contentBase64 - Base64-encoded content (max 10,000,000 bytes)
    * @returns Operation result message
@@ -656,7 +657,7 @@ interface AssetStorage {
  *
  * Keys and values are coerced with `String()`, so `setItem("count", 1)` stores
  * `"1"`. Failures throw a `DOMException` rather than being returned:
- * `QuotaExceededError` when a value exceeds {{limits.size.maxStorageValue}}, `SecurityError` when the
+ * `QuotaExceededError` when a value exceeds 1,000,000 bytes, `SecurityError` when the
  * store is not available to the caller.
  *
  * Named access — `store.foo`, `"foo" in store`, `delete store.foo`,
@@ -686,7 +687,7 @@ interface Storage {
 
   /**
    * Store `value` under `key`, replacing any previous value.
-   * @throws DOMException `QuotaExceededError` if the value exceeds {{limits.size.maxStorageValue}},
+   * @throws DOMException `QuotaExceededError` if the value exceeds 1,000,000 bytes,
    * `SecurityError` if the store is not available to the caller.
    * @example
    * scriptStorage.setItem("pageViews", "42");
@@ -839,7 +840,7 @@ interface SecretStorage {
   /**
    * Store a secret for the authenticated user in the current script.
    * @param key - Secret key
-   * @param value - Secret value to store (max {{limits.size.maxSecretValue}})
+   * @param value - Secret value to store (max 1,000,000 bytes)
    * @returns Success message or error string if unauthenticated or validation fails
    * @example
    * const result = secretStorage.setSecret("API_TOKEN", "abc123");
@@ -874,8 +875,8 @@ interface SecretStorage {
 /**
  * Scheduler service for managing scheduled tasks.
  *
- * A scheduled handler gets {{limits.execution.jobTimeout}} rather than the
- * {{limits.execution.timeout}} a request handler gets: a job is not answering
+ * A scheduled handler gets 1 min rather than the
+ * 10 s a request handler gets: a job is not answering
  * a request, so it is not held to a budget chosen to keep pages responsive.
  * Everything else is the same — the same memory ceiling, and `fetch` still
  * shortened to whatever is left of that budget.
@@ -890,7 +891,7 @@ interface SchedulerService {
    * @param options - Job options
    * @param options.handler - Name of the handler function to call
    * @param options.runAt - UTC ISO timestamp when to run (e.g., "2025-12-17T15:30:00Z")
-   * @param options.name - Optional job name/key (1-{{limits.scheduler.maxJobNameChars}} characters)
+   * @param options.name - Optional job name/key (1-64 characters)
    * @returns Result message with job details
    * @example
    * const oneHourFromNow = new Date(Date.now() + 3600000).toISOString();
@@ -915,7 +916,7 @@ interface SchedulerService {
    * @param options.handler - Name of the handler function to call
    * @param options.intervalMilliseconds - Interval in milliseconds (minimum 100)
    * @param options.intervalMinutes - Interval in minutes (minimum 1, backward compatible)
-   * @param options.name - Optional job name/key (1-{{limits.scheduler.maxJobNameChars}} characters)
+   * @param options.name - Optional job name/key (1-64 characters)
    * @param options.startAt - Optional UTC ISO timestamp for first run
    * @returns Result message with job details
    * @example
@@ -999,7 +1000,7 @@ interface ScriptTask {
  * discard work already accepted, where a scheduled job is wiped and
  * re-declared on every `init()`.
  *
- * A handler runs with {{limits.execution.jobTimeout}} — the scheduled-handler
+ * A handler runs with 1 min — the scheduled-handler
  * budget, not the per-request one — and finds `context.meta.task` carrying the
  * payload, the attempt number, and the ceiling. It runs in **script context**:
  * it holds what the script holds, and nothing belonging to whoever enqueued
@@ -1030,7 +1031,7 @@ interface ScriptTasks {
   /**
    * Accept a piece of work.
    *
-   * @param options.handler - Name of the function to call. 1-{{limits.scheduler.maxJobNameChars}} characters.
+   * @param options.handler - Name of the function to call. 1-64 characters.
    * @param options.payload - A JSON object describing the work. At most 64KB;
    *   put the data itself in storage and name it here, so a retry reads what
    *   is current rather than a copy taken at enqueue time.
@@ -1293,138 +1294,6 @@ interface LinkInvitation {
 }
 
 // ============================================================================
-// GraphQL Registry API
-// ============================================================================
-
-/**
- * GraphQL schema and resolver registration
- */
-interface GraphQLRegistry {
-  /**
-   * Register a GraphQL query
-   * @param name - Query name
-   * @param sdl - GraphQL SDL (Schema Definition Language) for the query
-   * @param resolverFunction - Name of the resolver function
-   * @param visibility - Visibility level: "internal" (script-only), "engine" (all scripts), or "external" (authenticated API access)
-   * @returns Registration result message
-   * @example
-   * graphQLRegistry.registerQuery(
-   *   "getUser",
-   *   "getUser(id: ID!): User",
-   *   "getUserResolver",
-   *   "external"
-   * );
-   *
-   * Only takes effect during startup and `init()`. Called from a handler it
-   * returns a message saying nothing was registered, and does not throw.
-   */
-  registerQuery(
-    name: string,
-    sdl: string,
-    resolverFunction: string,
-    visibility: string,
-  ): string;
-
-  /**
-   * Register a GraphQL mutation
-   * @param name - Mutation name
-   * @param sdl - GraphQL SDL (Schema Definition Language) for the mutation
-   * @param resolverFunction - Name of the resolver function
-   * @param visibility - Visibility level: "internal" (script-only), "engine" (all scripts), or "external" (authenticated API access)
-   * @returns Registration result message
-   * @example
-   * graphQLRegistry.registerMutation(
-   *   "createUser",
-   *   "createUser(name: String!, email: String!): User",
-   *   "createUserResolver",
-   *   "external"
-   * );
-   *
-   * Only takes effect during startup and `init()`. Called from a handler it
-   * returns a message saying nothing was registered, and does not throw.
-   */
-  registerMutation(
-    name: string,
-    sdl: string,
-    resolverFunction: string,
-    visibility: string,
-  ): string;
-
-  /**
-   * Register a GraphQL subscription
-   * @param name - Subscription name
-   * @param sdl - GraphQL SDL (Schema Definition Language) for the subscription
-   * @param resolverFunction - Name of the resolver function
-   * @param visibility - Visibility level: "internal" (script-only), "engine" (all scripts), or "external" (authenticated API access)
-   * @returns Registration result message
-   * @example
-   * graphQLRegistry.registerSubscription(
-   *   "messageAdded",
-   *   "messageAdded(chatId: ID!): Message",
-   *   "messageAddedResolver",
-   *   "external"
-   * );
-   *
-   * Only takes effect during startup and `init()`. Called from a handler it
-   * returns a message saying nothing was registered, and does not throw.
-   */
-  registerSubscription(
-    name: string,
-    sdl: string,
-    resolverFunction: string,
-    visibility: string,
-  ): string;
-
-  /**
-   * Execute a GraphQL query internally
-   * @param query - GraphQL query string (1 to {{limits.graphql.maxQueryChars}} characters)
-   * @param variables - Query variables as JSON (optional, max {{limits.graphql.maxVariablesChars}} characters)
-   * @returns JSON string with query results
-   * @example
-   * const result = graphQLRegistry.executeGraphQL(
-   *   "query { getUser(id: \"123\") { name } }",
-   *   "{}"
-   * );
-   */
-  executeGraphQL(query: string, variables?: string): string;
-
-  /**
-   * Send a message to all connections subscribed to a GraphQL subscription
-   * @param subscriptionName - Name of the subscription
-   * @param message - Message to send (will be JSON serialized)
-   * @returns Send result message
-   * @example
-   * graphQLRegistry.sendSubscriptionMessage(
-   *   "messageAdded",
-   *   JSON.stringify({ id: "123", text: "Hello" })
-   * );
-   */
-  sendSubscriptionMessage(subscriptionName: string, message: string): string;
-
-  /**
-   * Send a message to filtered connections based on metadata
-   * @param subscriptionName - Name of the subscription
-   * @param message - Message to send (will be JSON serialized)
-   * @param filterJson - JSON filter criteria for connection metadata (optional)
-   * @param matchMode - Optional filter matching mode. Defaults to "subset".
-   * @returns Send result message
-   * @example
-   * graphQLRegistry.sendSubscriptionMessageFiltered(
-   *   "messageAdded",
-   *   JSON.stringify({ id: "123", text: "Admin message" }),
-   *   JSON.stringify({ role: "admin" }),
-   *   "subset"
-   * );
-   */
-  sendSubscriptionMessageFiltered(
-    subscriptionName: string,
-    message: string,
-    filterJson?: string,
-    matchMode?: "subset" | "overlap",
-  ): string;
-}
-
-// ============================================================================
 // MCP (Model Context Protocol) Registry API
 // ============================================================================
 
@@ -1514,10 +1383,9 @@ interface McpRegistry {
    * so that a listed resource is never one a client cannot read.
    *
    * Published on the hosts this script publishes on, like every other
-   * registration, and requires `manage_graphql` — the same capability the rest
-   * of `mcpRegistry` takes, since what is being decided is whether the
-   * solution exposes an MCP surface rather than whether the asset may be
-   * written.
+   * registration, and requires `manage_mcp` — the same capability the rest of
+   * `mcpRegistry` takes, since what is being decided is whether the solution
+   * exposes an MCP surface rather than whether the asset may be written.
    *
    * @param uri - How clients name it. Must carry a scheme (`docs://handbook`,
    *   `https://example.com/spec`), 3-500 characters, no whitespace.
@@ -1824,11 +1692,11 @@ interface FetchResponse {
  * `Promise.all` over several fetches gives the right answers and runs them one
  * after another.
  *
- * Limits: {{limits.fetch.schemes}} only; localhost and private, loopback and link-local
+ * Limits: http and https only; localhost and private, loopback and link-local
  * addresses are refused, including a public host that resolves to one and
- * every hop of a redirect chain; at most {{limits.fetch.maxRedirects}} redirects and
- * {{limits.fetch.maxResponse}} of response;
- * and the {{limits.fetch.defaultTimeout}} default timeout is shortened to whatever is left of the
+ * every hop of a redirect chain; at most 5 redirects and
+ * 10 MB of response;
+ * and the 30 s default timeout is shortened to whatever is left of the
  * handler's execution budget, so a request cannot outlive the script that made
  * it.
  *
@@ -2298,7 +2166,7 @@ interface Database {
    *
    * @param tableName - Table name
    * @param filters - JSON string with filter conditions (optional)
-   * @param limit - Maximum rows to return (default {{limits.database.defaultQueryLimit}}, max {{limits.database.maxQueryLimit}})
+   * @param limit - Maximum rows to return (default 100, max 1,000)
    * @param orderBy - Column to sort by (optional)
    * @param orderDir - Sort direction: `"asc"` (default) or `"desc"`. Anything
    *                   else is refused rather than sorted ascending
@@ -2472,20 +2340,6 @@ interface Database {
    * database.addUniqueIndex("scores", JSON.stringify(["user_id", "world_id"]));
    */
   addUniqueIndex(tableName: string, columns: string): DatabaseAnswer;
-
-  /**
-   * Auto-generate GraphQL operations for a table
-   * @param tableName - Table name
-   * @param options - JSON string with options (optional): {visibility: "script_internal" | "public" | "authenticated"}
-   * @returns JSON string with result: {success: boolean, table: string, queries: string[], mutations: string[]} or {error: string}
-   * @example
-   * const result = database
-   *   .generateGraphQLForTable("users", JSON.stringify({visibility: "authenticated"}))
-   *   .json();
-   * // Automatically creates queries like: getUser, listUsers
-   * // And mutations like: createUser, updateUser, deleteUser
-   */
-  generateGraphQLForTable(tableName: string, options?: string): DatabaseAnswer;
 
   // Transaction Management
 
@@ -2748,70 +2602,6 @@ interface Console {
 }
 
 // ============================================================================
-// Message Dispatcher API
-// ============================================================================
-
-/**
- * Message dispatcher for inter-script communication
- */
-interface MessageDispatcher {
-  /**
-   * Register a listener for a message type
-   * @param messageType - Type of message to listen for (e.g., "user.created")
-   * @param handlerName - Name of the handler function to call
-   * @returns Registration result message
-   * @throws If messageType or handlerName is empty
-   * @example
-   * dispatcher.registerListener("user.created", "handleUserCreated");
-   *
-   * Only takes effect during startup and `init()`. Called from a handler it
-   * returns a message saying nothing was registered, and does not throw.
-   */
-  registerListener(messageType: string, handlerName: string): string;
-
-  /**
-   * Send a message to all listeners of a message type
-   * @param messageType - Type of message to send
-   * @param messageData - Optional data to send with the message (will be JSON serialized)
-   * @returns Send result message with delivery count
-   * @example
-   * dispatcher.sendMessage("user.created", { userId: "123", email: "user@example.com" });
-   */
-  sendMessage(messageType: string, messageData?: any): string;
-
-  /**
-   * The same fan-out, queued rather than run.
-   *
-   * `sendMessage` runs every listener inline: in your execution, on your
-   * budget, under your context, and it does not return until they all have.
-   * `post` enqueues one task per listener instead, so this returns at once and
-   * each listener gets a budget of its own ({{limits.execution.jobTimeout}}),
-   * its own retries, and a row in `/engine/tasks` saying how it went.
-   *
-   * The listener is the same registration and the same code either way — it
-   * still reads `context.messageType` and `context.messageData`. A queued one
-   * additionally has `context.meta.task` if it wants to know it is a retry.
-   *
-   * Two differences worth knowing. Listeners are resolved now, so the fan-out
-   * goes to whoever is listening at this moment rather than whenever the queue
-   * gets to it. And a queued listener runs in **script context** — it holds
-   * what its own script holds, not what you hold — because there is no caller
-   * left to borrow authority from by the time it runs.
-   *
-   * @returns What was queued: `{messageType, queued, taskIds}`.
-   * @throws Error if the message type is empty or the queue could not accept
-   *   them. A partial failure says how many were queued before it.
-   * @example
-   * // Answer now; let the listeners do the slow part.
-   * const { queued } = dispatcher.post("order.placed", { orderId });
-   */
-  post(
-    messageType: string,
-    messageData?: any,
-  ): { messageType: string; queued: number; taskIds: string[] };
-}
-
-// ============================================================================
 // Conversion Functions API
 // ============================================================================
 
@@ -2821,7 +2611,7 @@ interface MessageDispatcher {
 interface Convert {
   /**
    * Convert markdown string to HTML
-   * @param markdown - Markdown content to convert (1 byte to {{limits.size.maxMarkdown}})
+   * @param markdown - Markdown content to convert (1 byte to 1,000,000 bytes)
    * @returns HTML string
    * @example
    * const html = convert.markdown_to_html("# Hello\n\nThis is **bold**");
@@ -2830,7 +2620,7 @@ interface Convert {
 
   /**
    * Render a Handlebars template with data
-   * @param template - Handlebars template string (1 byte to {{limits.size.maxTemplate}})
+   * @param template - Handlebars template string (1 byte to 1,000,000 bytes)
    * @param dataJson - JSON string with template data
    * @returns Rendered template string
    * @example
@@ -2879,7 +2669,7 @@ type Capability =
   | "delete_logs"
   | "view_logs"
   | "manage_streams"
-  | "manage_graphql"
+  | "manage_mcp"
   | "read_script_data"
   | "write_script_data"
   | "manage_script_database"
@@ -3231,7 +3021,6 @@ declare var secretStorage: SecretStorage;
 declare var schedulerService: SchedulerService;
 declare var scriptTasks: ScriptTasks;
 declare var personalTasks: PersonalTasks;
-declare var graphQLRegistry: GraphQLRegistry;
 declare var mcpRegistry: McpRegistry;
 declare var mcp: Mcp;
 /**
@@ -3421,7 +3210,6 @@ interface EngineApi {
 
 declare var database: Database;
 declare var console: Console;
-declare var dispatcher: MessageDispatcher;
 declare var sandbox: Sandbox;
 declare var convert: Convert;
 declare var crypto: Crypto;
