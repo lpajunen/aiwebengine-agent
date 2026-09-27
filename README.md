@@ -534,8 +534,9 @@ not access to the bot and not access to anybody's account.
 ```
 agent/
   main.ts     the script
-  ui.html     the page          (asset)
-  app.js      the browser loop  (asset)
+  public/
+    ui.html   the page          (asset)
+    app.js    the browser loop  (asset)
 types/
   aiwebengine.d.ts   snapshot for typechecking
 ```

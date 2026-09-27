@@ -1083,8 +1083,8 @@ function init(): void {
     'creating the table "turn_usage"',
   );
 
-  routeRegistry.registerAssetRoute("/agent", "ui.html");
-  routeRegistry.registerAssetRoute("/agent/app.js", "app.js");
+  routeRegistry.registerAssetRoute("/agent", "public/ui.html");
+  routeRegistry.registerAssetRoute("/agent/app.js", "public/app.js");
 
   routeRegistry.registerRoute("/agent/prompt", "startRun", "POST", {
     tags: ["Agent"],
