@@ -1083,58 +1083,82 @@ function init(): void {
     'creating the table "turn_usage"',
   );
 
-  routeRegistry.registerAssetRoute("/agent", "public/ui.html");
-  routeRegistry.registerAssetRoute("/agent/app.js", "public/app.js");
+  routeRegistry.registerRoute("/agent", { file: "public/ui.html" });
+  routeRegistry.registerRoute("/agent/app.js", { file: "public/app.js" });
 
-  routeRegistry.registerRoute("/agent/prompt", "startRun", "POST", {
+  routeRegistry.registerRoute("/agent/prompt", {
+    handler: "startRun",
+    method: "POST",
     tags: ["Agent"],
     summary: "Accept a prompt and open a run",
   });
-  routeRegistry.registerRoute("/agent/cancel", "cancelRun", "POST", {
+  routeRegistry.registerRoute("/agent/cancel", {
+    handler: "cancelRun",
+    method: "POST",
     tags: ["Agent"],
     summary: "Stop a run that is still working",
   });
-  routeRegistry.registerRoute("/agent/say", "interject", "POST", {
+  routeRegistry.registerRoute("/agent/say", {
+    handler: "interject",
+    method: "POST",
     tags: ["Agent"],
     summary: "Say something to a run already in progress",
   });
-  routeRegistry.registerRoute("/agent/decide", "decideRun", "POST", {
+  routeRegistry.registerRoute("/agent/decide", {
+    handler: "decideRun",
+    method: "POST",
     tags: ["Agent"],
     summary: "Approve or reject the plan a run is waiting on",
   });
-  routeRegistry.registerRoute("/agent/history", "readHistory", "GET", {
+  routeRegistry.registerRoute("/agent/history", {
+    handler: "readHistory",
+    method: "GET",
     tags: ["Agent"],
     summary: "Everything this person's agent has done",
   });
   // The one route nobody signs in to reach. See `handleTelegram` for what
   // that costs and what stands in for a session.
-  routeRegistry.registerRoute("/agent/telegram", "handleTelegram", "POST", {
+  routeRegistry.registerRoute("/agent/telegram", {
+    handler: "handleTelegram",
+    method: "POST",
     tags: ["Agent"],
     summary: "Telegram webhook",
   });
 
-  routeRegistry.registerRoute("/agent/memories", "readMemories", "GET", {
+  routeRegistry.registerRoute("/agent/memories", {
+    handler: "readMemories",
+    method: "GET",
     tags: ["Agent"],
     summary: "Every note this agent has stored about you",
   });
-  routeRegistry.registerRoute("/agent/memories", "writeMemory", "POST", {
+  routeRegistry.registerRoute("/agent/memories", {
+    handler: "writeMemory",
+    method: "POST",
     tags: ["Agent"],
     summary: "Correct a note",
   });
-  routeRegistry.registerRoute("/agent/memories", "forgetMemory", "DELETE", {
+  routeRegistry.registerRoute("/agent/memories", {
+    handler: "forgetMemory",
+    method: "DELETE",
     tags: ["Agent"],
     summary: "Delete a note",
   });
 
-  routeRegistry.registerRoute("/agent/key", "readKeyStatus", "GET", {
+  routeRegistry.registerRoute("/agent/key", {
+    handler: "readKeyStatus",
+    method: "GET",
     tags: ["Agent"],
     summary: "Whether this person has stored an API key",
   });
-  routeRegistry.registerRoute("/agent/key", "storeKey", "POST", {
+  routeRegistry.registerRoute("/agent/key", {
+    handler: "storeKey",
+    method: "POST",
     tags: ["Agent"],
     summary: "Store this person's own API key",
   });
-  routeRegistry.registerRoute("/agent/key", "forgetKey", "DELETE", {
+  routeRegistry.registerRoute("/agent/key", {
+    handler: "forgetKey",
+    method: "DELETE",
     tags: ["Agent"],
     summary: "Remove this person's stored API key",
   });
@@ -1142,7 +1166,9 @@ function init(): void {
   // No route advances a run: `advanceRun` is reached by the queue, named by
   // the `handler` each enqueue carries.
 
-  routeRegistry.registerStreamRoute(STREAM_PATH, "tagConnection", {
+  routeRegistry.registerRoute(STREAM_PATH, {
+    stream: true,
+    authorize: "tagConnection",
     tags: ["Agent"],
     summary: "Live activity for the signed-in person",
   });
@@ -2460,7 +2486,7 @@ function flush(turn: Turn, userId: string, runId: string): void {
   routeRegistry.sendStreamMessageFiltered(
     STREAM_PATH,
     { runId: runId, kind: "delta", message: turn.outbound, at: Date.now() },
-    JSON.stringify({ userId: userId }),
+    { userId: userId },
     "subset",
   );
   turn.outbound = "";
@@ -2897,7 +2923,7 @@ function recordUsage(userId: string, runId: string, usage: StreamUsage): void {
         largestPrompt: cached + wrote + fresh,
       },
     },
-    JSON.stringify({ userId: userId }),
+    { userId: userId },
     "subset",
   );
 }
@@ -4722,7 +4748,7 @@ function recordActivity(
   routeRegistry.sendStreamMessageFiltered(
     STREAM_PATH,
     { runId: runId, kind: kind, message: message, at: at },
-    JSON.stringify({ userId: userId }),
+    { userId: userId },
     "subset",
   );
 }

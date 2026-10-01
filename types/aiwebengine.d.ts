@@ -17,7 +17,7 @@
  * }
  *
  * function init() {
- *   routeRegistry.registerRoute("/api/hello", "myHandler", "GET");
+ *   routeRegistry.registerRoute("/api/hello", { handler: "myHandler", method: "GET" });
  * }
  */
 
@@ -34,11 +34,11 @@
  * @example
  * function init() {
  *   // Register HTTP routes
- *   routeRegistry.registerRoute("/api/users", "listUsers", "GET");
- *   routeRegistry.registerRoute("/api/users/:id", "getUser", "GET");
+ *   routeRegistry.registerRoute("/api/users", { handler: "listUsers", method: "GET" });
+ *   routeRegistry.registerRoute("/api/users/:id", { handler: "getUser", method: "GET" });
  *
  *   // Register streams
- *   routeRegistry.registerStreamRoute("/events/notifications");
+ *   routeRegistry.registerRoute("/events/notifications", { stream: true });
  *
  *   // Log initialization
  *   console.log("Script initialized successfully");
@@ -61,7 +61,7 @@ declare function init(context?: HandlerContext): void;
  * A script's top-level program is re-evaluated on every invocation, and only
  * `init()` runs in the registration phase. So these methods:
  *
- * - `routeRegistry.registerRoute` / `registerAssetRoute` / `registerStreamRoute`
+ * - `routeRegistry.registerRoute`
  * - `mcpRegistry.registerTool` / `registerPrompt` / `registerResource`
  * - `schedulerService.registerOnce` / `registerRecurring` / `clearAll`
  *
@@ -96,93 +96,76 @@ declare function init(context?: HandlerContext): void;
  * **The execution model.** These are not numbers, and they are what surprises
  * people arriving from a browser or from Node:
  *
- * - Every invocation gets a fresh runtime: no value assigned at module
- *   scope survives one request into the next. Persist through
- *   scriptStorage, personalStorage or the script database.
- * - There are no timers. setTimeout and setInterval do not exist, and a
- *   promise still pending when a handler returns can never settle.
- * - There is no concurrency. Every host call — fetch, database, a
- *   script's tables — blocks until it has an answer, so `await` sequences
- *   work rather than overlapping it, and Promise.all over several fetches
- *   runs them one after another.
- * - Imports resolve to this script's own assets. A specifier is relative
- *   ('./x.ts', '../y.ts') or an asset-root path ('server/x.ts'); there is
- *   no dynamic import(), no npm and no node built-ins.
- * - A script's execution budget is enforced between JavaScript operations
- *   and as a ceiling on each host call, so a slow database statement cannot
- *   outlive it — but only Postgres can end a statement already running.
- * - Engine administration (scripts, assets, users, secrets, logs) is not
- *   reachable from JavaScript at all; it lives on these /engine endpoints
- *   and the engine MCP tools.
+ * {{limits.notes}}
  *
  * **Budgets.** One invocation gets `javascript.execution_timeout_ms` of wall
- * clock (10 s), 128 MB of
- * memory and a 1 MB stack — about
- * 1,024 frames of recursion, past which QuickJS
+ * clock ({{limits.execution.timeout}}), {{limits.execution.maxMemory}} of
+ * memory and a {{limits.execution.stackSize}} stack — about
+ * {{limits.execution.stackFrames}} frames of recursion, past which QuickJS
  * throws an error the script can see. `init()` gets its own budget
- * (`javascript.init_timeout_ms`, 30 s), because it
+ * (`javascript.init_timeout_ms`, {{limits.execution.initTimeout}}), because it
  * runs once per deployment rather than once per request and a script whose
  * `init()` is cut off does not serve at all. A test module gets
- * 30 s and a whole test run
- * 5 min.
+ * {{limits.execution.testModuleTimeout}} and a whole test run
+ * {{limits.execution.testRunTimeout}}.
  *
  * The budget is enforced between JavaScript operations *and* as a ceiling on
  * each host call, so a slow database statement cannot outlive it. What it
  * cannot do is interrupt a statement already running inside Postgres: that is
  * what `repository.statement_timeout_ms`
- * (30 s), `lock_timeout_ms`
- * (5 s) and `idle_in_transaction_timeout_ms`
- * (5 min) are for, and why
+ * ({{limits.database.statementTimeout}}), `lock_timeout_ms`
+ * ({{limits.database.lockTimeout}}) and `idle_in_transaction_timeout_ms`
+ * ({{limits.database.idleInTransactionTimeout}}) are for, and why
  * `database.beginTransaction(timeoutMs)` can only tighten them.
  *
  * At most `javascript.max_concurrent_executions` scripts run at once
- * (64). Past that a request waits for a slot
+ * ({{limits.execution.maxConcurrent}}). Past that a request waits for a slot
  * inside the timeout it already had, rather than being refused. The number is
  * sized against the connection pool rather than against the CPU: a script
  * touching the database holds a slot and a connection until it answers, so
  * slots far above the pool would only deepen the queue.
  *
- * **Sizes.** A script's root source is 1 MB, one
- * asset 10,000,000 bytes with a URI of at most
- * 255 characters, one `scriptStorage` /
- * `personalStorage` value 1,000,000 bytes, one secret
- * 1,000,000 bytes, a `fetch` response
- * 10 MB, and `convert.markdown_to_html` /
- * `render_handlebars_template` 1,000,000 bytes of input each. A
+ * **Sizes.** A script's root source is {{limits.size.maxScriptSource}}, one
+ * asset {{limits.size.maxAsset}} with a URI of at most
+ * {{limits.size.maxAssetUriChars}} characters, one `scriptStorage` /
+ * `personalStorage` value {{limits.size.maxStorageValue}}, one secret
+ * {{limits.size.maxSecretValue}}, a `fetch` response
+ * {{limits.fetch.maxResponse}}, and `convert.markdown_to_html` /
+ * `render_handlebars_template` {{limits.size.maxMarkdown}} of input each. A
  * request arriving at one of your routes is bounded by
- * `security.max_request_body_bytes` (10 MB), or by
+ * `security.max_request_body_bytes` ({{limits.size.maxRequestBody}}), or by
  * `repository.max_upload_size_bytes` plus framing when it is form-encoded or
- * multipart (10 MB); past either, the caller gets a 413
+ * multipart ({{limits.size.maxUpload}}); past either, the caller gets a 413
  * and your handler is never entered.
  *
- * **The script database.** 50 tables per
- * script, 50 columns per table, and
- * identifiers of at most 63 characters
+ * **The script database.** {{limits.database.maxTablesPerScript}} tables per
+ * script, {{limits.database.maxColumnsPerTable}} columns per table, and
+ * identifiers of at most {{limits.database.maxIdentifierChars}} characters
  * matching `^[a-z][a-z0-9_]*$`. `database.query` returns
- * 100 rows when you name no limit and clamps
- * a named one to 1,000 — silently, so a query
+ * {{limits.database.defaultQueryLimit}} rows when you name no limit and clamps
+ * a named one to {{limits.database.maxQueryLimit}} — silently, so a query
  * wanting more has to page. The connection pool
- * (32) is shared by every script on the
+ * ({{limits.database.maxConnections}}) is shared by every script on the
  * instance, and each call holds a connection for its whole round trip.
  *
- * **Network.** `fetch` and `McpClient` speak http and https only,
+ * **Network.** `fetch` and `McpClient` speak {{limits.fetch.schemes}} only,
  * refuse localhost and private, loopback and link-local addresses — including
  * a public host that resolves to one, at every hop — follow at most
- * 5 redirects within one budget, and understand
- * `gzip, deflate`. Asking for `br` or `zstd` is an error rather
+ * {{limits.fetch.maxRedirects}} redirects within one budget, and understand
+ * `{{limits.fetch.encodings}}`. Asking for `br` or `zstd` is an error rather
  * than an unreadable body. An `McpClient` naming a blocked address is refused
  * when it is constructed, before its token is looked up.
  *
  * **Scheduled jobs.** A recurring interval is at least
- * 100 ms and a job name
- * 1-64 characters.
+ * {{limits.scheduler.minRecurringInterval}} and a job name
+ * 1-{{limits.scheduler.maxJobNameChars}} characters.
  *
  * **Retention.** Logs are not storage: a line survives only while it is within
- * both the newest 10,000 of its script and
- * 168 hours of now, and either clause
+ * both the newest {{limits.retention.logsKeepPerScript}} of its script and
+ * {{limits.retention.logsRetentionHours}} hours of now, and either clause
  * alone removes it. Revisions are kept for
- * 30 days *and* the newest
- * 50 per script — a revision has to
+ * {{limits.retention.revisionsRetentionDays}} days *and* the newest
+ * {{limits.retention.revisionsKeepPerScript}} per script — a revision has to
  * fall outside both before it goes — and a labelled revision, the newest that
  * initialised cleanly, and the newest of each script are kept regardless.
  */
@@ -413,157 +396,166 @@ interface TaskContext {
 // ============================================================================
 
 /**
- * Route registry for HTTP endpoints and streaming
+ * What a path leads to. Exactly one of `handler`, `stream` or `file`.
+ */
+type RouteSpec = HandlerRouteSpec | StreamRouteSpec | FileRouteSpec;
+
+/** OpenAPI documentation every kind of route may carry. */
+interface RouteDocs {
+  summary?: string;
+  description?: string;
+  /** Swagger group. Defaults to "Streams" for a stream and "Assets" for a file. */
+  tags?: string[];
+}
+
+/** A script function answering one HTTP method. */
+interface HandlerRouteSpec extends RouteDocs {
+  /** Name of the handler function to call. */
+  handler: string;
+  /**
+   * HTTP method. Defaults to GET. Registering GET also serves HEAD, running
+   * the same handler and returning its headers with an empty body; register
+   * HEAD explicitly to answer it differently.
+   */
+  method?: string;
+  /** OpenAPI parameters array. */
+  parameters?: unknown[];
+  /** OpenAPI requestBody object. */
+  requestBody?: Record<string, unknown>;
+  stream?: never;
+  file?: never;
+  /** A handler decides who may call it itself; there is nothing to name. */
+  authorize?: never;
+}
+
+/** A Server-Sent Events stream the engine holds open. GET only. */
+interface StreamRouteSpec extends RouteDocs {
+  stream: true;
+  /**
+   * Name of the function that **decides who may subscribe**. Without one,
+   * anyone who can reach the host gets the stream. See {@link AuthorizeFunction}.
+   */
+  authorize?: string;
+  handler?: never;
+  file?: never;
+}
+
+/** A file of the script's tree, served by the engine. GET only. */
+interface FileRouteSpec extends RouteDocs {
+  /** Path of the file in the script's tree. Must be under `public/`. */
+  file: string;
+  /**
+   * Name of the function that decides who may read the file. Without one,
+   * it is served to anyone who can reach the host — right for a stylesheet,
+   * and why a served file lives under `public/`. See {@link AuthorizeFunction}.
+   */
+  authorize?: string;
+  handler?: never;
+  stream?: never;
+}
+
+/**
+ * The function a stream's or a file route's `authorize` names.
+ *
+ * Whose order `/orders/1234/events` is, is a fact about your data model rather
+ * than one the engine can know, so this is where that decision lives. It runs
+ * under the requester's own context and answers either an allow — any object
+ * without `deny`; for a stream, a flat object of strings that
+ * `sendStreamMessageFiltered` matches against — or a refusal:
+ *
+ * ```ts
+ * function mayWatchOrder(context) {
+ *   if (!context.auth?.userId) return { deny: 401 };
+ *   const orderId = context.request.params.id;
+ *   if (!ownsOrder(context.auth.userId, orderId)) {
+ *     return { deny: 403, reason: "not your order" };
+ *   }
+ *   return { orderId };
+ * }
+ * ```
+ *
+ * `deny` is `true` for a plain refusal or any 4xx status — `401` "sign in",
+ * `403` "not yours", `404` "and I will not tell you it exists". `reason` is
+ * returned to whoever was refused and trimmed to 200 characters. Throwing is
+ * **not** how you deny: it means the function itself failed, answers 500, and
+ * a file it guards is not served.
+ */
+type AuthorizeFunction = (
+  context: HandlerContext,
+) => Record<string, string> | { deny: true | number; reason?: string };
+
+/** What `registerRoute` answers. A refusal is a value, not an exception. */
+type RegisterRouteResult = { ok: true } | { ok: false; reason: string };
+
+/** What sending to a stream answers. */
+interface StreamSendResult {
+  /** Connections the message reached. */
+  delivered: number;
+  /** Connections open on the path when it was sent. */
+  connections: number;
+  /** Connections that could not be written to. */
+  failed: number;
+}
+
+/**
+ * Route registry for HTTP endpoints, streams and served files
  */
 interface RouteRegistry {
   /**
-   * Register an HTTP route handler
-   * @param path - URL path pattern (e.g., "/blog/post/:id")
-   * @param handlerName - Name of the handler function to call
-   * @param method - HTTP method (GET, POST, PUT, DELETE, etc.). Registering
-   *   GET automatically serves HEAD requests too, running the same handler
-   *   and returning its headers with an empty body. Register HEAD explicitly
-   *   to override this with custom behavior.
-   * @param metadata - Optional OpenAPI metadata (summary, description, tags, parameters, requestBody)
-   * @returns Registration result message
-   * @example
-   * routeRegistry.registerRoute("/api/users", "listUsers", "GET");
-   * routeRegistry.registerRoute("/api/users", "createUser", "POST", {
-   *   summary: "Create user",
-   *   description: "Create a new user account",
-   *   tags: ["Users"]
-   * });
-   * routeRegistry.registerRoute("/api/users/:id", "updateUser", "PUT", {
+   * Publish a path. The spec says what it leads to:
+   *
+   * ```ts
+   * routeRegistry.registerRoute("/api/users", { handler: "listUsers" });
+   * routeRegistry.registerRoute("/api/users/:id", {
+   *   handler: "updateUser",
+   *   method: "PUT",
    *   summary: "Update user",
-   *   description: "Update an existing user account",
    *   tags: ["Users"],
-   *   parameters: JSON.stringify([
-   *     {
-   *       name: "id",
-   *       in: "path",
-   *       required: true,
-   *       schema: { type: "string" }
-   *     }
-   *   ]),
-   *   requestBody: JSON.stringify({
-   *     required: true,
-   *     content: {
-   *       "application/json": {
-   *         schema: {
-   *           type: "object"
-   *         }
-   *       }
-   *     }
-   *   })
+   *   parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+   *   requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } },
    * });
+   * routeRegistry.registerRoute("/orders/:id/events", { stream: true, authorize: "mayWatchOrder" });
+   * routeRegistry.registerRoute("/styles/main.css", { file: "public/main.css" });
+   * ```
    *
-   * Only takes effect during startup and `init()`. Called from a handler it
-   * returns a message saying nothing was registered, and does not throw.
+   * `:param` and a trailing `/*` work for all three. A mistake in the call —
+   * a spec naming no target or two, an unknown key, a reserved path, a
+   * capability you do not hold — throws. A **refusal** is returned:
+   * `{ ok: false, reason }` for a file outside `public/` or not in the tree,
+   * and for any call made outside startup and `init()`, where there is
+   * nothing to register into.
    */
-  registerRoute(
-    path: string,
-    handlerName: string,
-    method: string,
-    metadata?: {
-      summary?: string;
-      description?: string;
-      tags?: string[];
-      parameters?: string; // JSON string of OpenAPI parameters array
-      requestBody?: string; // JSON string of OpenAPI requestBody object
-    },
-  ): string;
+  registerRoute(path: string, spec: RouteSpec): RegisterRouteResult;
 
   /**
-   * Register a Server-Sent Events (SSE) stream endpoint
-   * @param path - URL path for the stream (must start with /)
-   * @param customizationFunction - Optional name of a function that returns connection filter criteria
-   * @param metadata - Optional OpenAPI metadata. `tags` sets the Swagger group
-   *   (defaults to "Streams"); `summary`/`description` override the
-   *   auto-generated documentation text.
-   * @returns Registration result message
-   * @example
-   * routeRegistry.registerStreamRoute("/events/notifications");
-   * routeRegistry.registerStreamRoute("/events/chat", "chatCustomizer");
-   * routeRegistry.registerStreamRoute("/events/alerts", undefined, {
-   *   tags: ["Alerts"],
-   *   summary: "Alert stream",
-   * });
-   *
-   * Only takes effect during startup and `init()`. Called from a handler it
-   * returns a message saying nothing was registered, and does not throw.
-   */
-  registerStreamRoute(
-    path: string,
-    customizationFunction?: string,
-    metadata?: {
-      summary?: string;
-      description?: string;
-      tags?: string[];
-    },
-  ): string;
-
-  /**
-   * Register a static asset route
-   * @param httpPath - HTTP path where asset will be served (e.g., "/styles/main.css")
-   * @param assetName - Name of the asset in the asset storage (e.g., "main.css")
-   * @param metadata - Optional OpenAPI metadata. `tags` sets the Swagger group
-   *   (defaults to "Assets"); `summary`/`description` override the
-   *   auto-generated documentation text.
-   * @returns Registration result message
-   * @example
-   * routeRegistry.registerAssetRoute("/styles/main.css", "main.css");
-   * routeRegistry.registerAssetRoute("/logo.svg", "logo.svg", {
-   *   tags: ["Branding"],
-   *   summary: "Company logo",
-   * });
-   *
-   * Only takes effect during startup and `init()`. Called from a handler it
-   * returns a message saying nothing was registered, and does not throw.
-   */
-  registerAssetRoute(
-    httpPath: string,
-    assetName: string,
-    metadata?: {
-      summary?: string;
-      description?: string;
-      tags?: string[];
-    },
-  ): string;
-
-  /**
-   * Broadcast a message to all connections on a stream
-   * @param path - Stream path
-   * @param data - Data to send (will be JSON serialized)
-   * @returns Broadcast result message
+   * Send a message to every connection on a stream.
+   * @param data - Any JSON-serializable value
    * @example
    * routeRegistry.sendStreamMessage("/events/notifications", {
    *   type: "alert",
-   *   message: "New update available"
+   *   message: "New update available",
    * });
    */
-  sendStreamMessage(path: string, data: any): string;
+  sendStreamMessage(path: string, data: any): StreamSendResult;
 
   /**
-   * Send a message to filtered connections based on metadata
-   * @param path - Stream path
-   * @param data - Data to send (will be JSON serialized)
-   * @param filterJson - JSON filter criteria for connection metadata
-   * @param matchMode - Optional filter matching mode. Defaults to "subset".
-   * @returns Broadcast result message
+   * Send a message to the connections whose authorize function returned
+   * criteria matching `filter`.
+   * @param matchMode - "subset" (default): every filter entry must match.
+   *   "overlap": any one may.
    * @example
    * routeRegistry.sendStreamMessageFiltered(
    *   "/events/notifications",
    *   { message: "Admin alert" },
-   *   JSON.stringify({ role: "admin" }),
-   *   "subset"
+   *   { role: "admin" },
    * );
    */
   sendStreamMessageFiltered(
     path: string,
     data: any,
-    filterJson: string,
+    filter?: Record<string, string>,
     matchMode?: "subset" | "overlap",
-  ): string;
+  ): StreamSendResult;
 }
 
 // ============================================================================
@@ -619,10 +611,10 @@ interface AssetStorage {
   /**
    * Create or update an asset owned by this script
    *
-   * The name is at most 255 characters and may not traverse (`..`); the
+   * The name is at most {{limits.size.maxAssetUriChars}} characters and may not traverse (`..`); the
    * content is at most 10,000,000 bytes. Either exceeded, this answers with
    * the reason rather than throwing.
-   * @param name - Asset name/URI (1-255 characters)
+   * @param name - Asset name/URI (1-{{limits.size.maxAssetUriChars}} characters)
    * @param mimetype - MIME type (e.g., "image/png", "text/css")
    * @param contentBase64 - Base64-encoded content (max 10,000,000 bytes)
    * @returns Operation result message
@@ -656,7 +648,7 @@ interface AssetStorage {
  *
  * Keys and values are coerced with `String()`, so `setItem("count", 1)` stores
  * `"1"`. Failures throw a `DOMException` rather than being returned:
- * `QuotaExceededError` when a value exceeds 1,000,000 bytes, `SecurityError` when the
+ * `QuotaExceededError` when a value exceeds {{limits.size.maxStorageValue}}, `SecurityError` when the
  * store is not available to the caller.
  *
  * Named access — `store.foo`, `"foo" in store`, `delete store.foo`,
@@ -686,7 +678,7 @@ interface Storage {
 
   /**
    * Store `value` under `key`, replacing any previous value.
-   * @throws DOMException `QuotaExceededError` if the value exceeds 1,000,000 bytes,
+   * @throws DOMException `QuotaExceededError` if the value exceeds {{limits.size.maxStorageValue}},
    * `SecurityError` if the store is not available to the caller.
    * @example
    * scriptStorage.setItem("pageViews", "42");
@@ -839,7 +831,7 @@ interface SecretStorage {
   /**
    * Store a secret for the authenticated user in the current script.
    * @param key - Secret key
-   * @param value - Secret value to store (max 1,000,000 bytes)
+   * @param value - Secret value to store (max {{limits.size.maxSecretValue}})
    * @returns Success message or error string if unauthenticated or validation fails
    * @example
    * const result = secretStorage.setSecret("API_TOKEN", "abc123");
@@ -874,8 +866,8 @@ interface SecretStorage {
 /**
  * Scheduler service for managing scheduled tasks.
  *
- * A scheduled handler gets 1 min rather than the
- * 10 s a request handler gets: a job is not answering
+ * A scheduled handler gets {{limits.execution.jobTimeout}} rather than the
+ * {{limits.execution.timeout}} a request handler gets: a job is not answering
  * a request, so it is not held to a budget chosen to keep pages responsive.
  * Everything else is the same — the same memory ceiling, and `fetch` still
  * shortened to whatever is left of that budget.
@@ -890,7 +882,7 @@ interface SchedulerService {
    * @param options - Job options
    * @param options.handler - Name of the handler function to call
    * @param options.runAt - UTC ISO timestamp when to run (e.g., "2025-12-17T15:30:00Z")
-   * @param options.name - Optional job name/key (1-64 characters)
+   * @param options.name - Optional job name/key (1-{{limits.scheduler.maxJobNameChars}} characters)
    * @returns Result message with job details
    * @example
    * const oneHourFromNow = new Date(Date.now() + 3600000).toISOString();
@@ -915,7 +907,7 @@ interface SchedulerService {
    * @param options.handler - Name of the handler function to call
    * @param options.intervalMilliseconds - Interval in milliseconds (minimum 100)
    * @param options.intervalMinutes - Interval in minutes (minimum 1, backward compatible)
-   * @param options.name - Optional job name/key (1-64 characters)
+   * @param options.name - Optional job name/key (1-{{limits.scheduler.maxJobNameChars}} characters)
    * @param options.startAt - Optional UTC ISO timestamp for first run
    * @returns Result message with job details
    * @example
@@ -999,7 +991,7 @@ interface ScriptTask {
  * discard work already accepted, where a scheduled job is wiped and
  * re-declared on every `init()`.
  *
- * A handler runs with 1 min — the scheduled-handler
+ * A handler runs with {{limits.execution.jobTimeout}} — the scheduled-handler
  * budget, not the per-request one — and finds `context.meta.task` carrying the
  * payload, the attempt number, and the ceiling. It runs in **script context**:
  * it holds what the script holds, and nothing belonging to whoever enqueued
@@ -1030,7 +1022,7 @@ interface ScriptTasks {
   /**
    * Accept a piece of work.
    *
-   * @param options.handler - Name of the function to call. 1-64 characters.
+   * @param options.handler - Name of the function to call. 1-{{limits.scheduler.maxJobNameChars}} characters.
    * @param options.payload - A JSON object describing the work. At most 64KB;
    *   put the data itself in storage and name it here, so a retry reads what
    *   is current rather than a copy taken at enqueue time.
@@ -1365,8 +1357,8 @@ interface McpRegistry {
   /**
    * Publish one of this script's assets as an MCP resource.
    *
-   * This is `routeRegistry.registerAssetRoute` aimed at `/mcp` instead of at
-   * a path: the same asset, under a name a different protocol reaches. A
+   * This is a file route (`routeRegistry.registerRoute(path, { file })`)
+   * aimed at `/mcp` instead of at a path: the same asset, under a name a different protocol reaches. A
    * resource is the *read* half of MCP — content a client fetches by URI and
    * puts in front of a model — as against a tool, which is something it runs.
    *
@@ -1691,11 +1683,11 @@ interface FetchResponse {
  * `Promise.all` over several fetches gives the right answers and runs them one
  * after another.
  *
- * Limits: http and https only; localhost and private, loopback and link-local
+ * Limits: {{limits.fetch.schemes}} only; localhost and private, loopback and link-local
  * addresses are refused, including a public host that resolves to one and
- * every hop of a redirect chain; at most 5 redirects and
- * 10 MB of response;
- * and the 30 s default timeout is shortened to whatever is left of the
+ * every hop of a redirect chain; at most {{limits.fetch.maxRedirects}} redirects and
+ * {{limits.fetch.maxResponse}} of response;
+ * and the {{limits.fetch.defaultTimeout}} default timeout is shortened to whatever is left of the
  * handler's execution budget, so a request cannot outlive the script that made
  * it.
  *
@@ -2165,7 +2157,7 @@ interface Database {
    *
    * @param tableName - Table name
    * @param filters - JSON string with filter conditions (optional)
-   * @param limit - Maximum rows to return (default 100, max 1,000)
+   * @param limit - Maximum rows to return (default {{limits.database.defaultQueryLimit}}, max {{limits.database.maxQueryLimit}})
    * @param orderBy - Column to sort by (optional)
    * @param orderDir - Sort direction: `"asc"` (default) or `"desc"`. Anything
    *                   else is refused rather than sorted ascending
@@ -2610,7 +2602,7 @@ interface Console {
 interface Convert {
   /**
    * Convert markdown string to HTML
-   * @param markdown - Markdown content to convert (1 byte to 1,000,000 bytes)
+   * @param markdown - Markdown content to convert (1 byte to {{limits.size.maxMarkdown}})
    * @returns HTML string
    * @example
    * const html = convert.markdown_to_html("# Hello\n\nThis is **bold**");
@@ -2619,7 +2611,7 @@ interface Convert {
 
   /**
    * Render a Handlebars template with data
-   * @param template - Handlebars template string (1 byte to 1,000,000 bytes)
+   * @param template - Handlebars template string (1 byte to {{limits.size.maxTemplate}})
    * @param dataJson - JSON string with template data
    * @returns Rendered template string
    * @example
@@ -3403,6 +3395,31 @@ declare function Fragment(
   props: { children?: any } | null,
   ...children: any[]
 ): string;
+
+/**
+ * Markdown and plain-text files are modules whose default export is their
+ * content.
+ *
+ * ```ts
+ * import refundPolicy from "./skills/refund.md";
+ * ```
+ *
+ * The import resolves when the script is bundled, is cached in the prepared
+ * program, is dropped when the file is written, and is part of what a
+ * revision pins — so a system prompt or a skill definition costs nothing per
+ * request and travels with the version of the code that was written against
+ * it. `assetStorage.fetchAsset` is for the other case: content that changes
+ * without a redeploy.
+ */
+declare module "*.md" {
+  const content: string;
+  export default content;
+}
+
+declare module "*.txt" {
+  const content: string;
+  export default content;
+}
 
 declare module "react/jsx-runtime" {
   export { Fragment };
