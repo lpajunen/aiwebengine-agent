@@ -882,7 +882,7 @@ interface ActivityRow {
  */
 function queryRows(
   table: string,
-  filter: string,
+  filter: WhereClause,
   limit: number,
   orderBy: string,
   direction: "asc" | "desc",
@@ -890,10 +890,12 @@ function queryRows(
   let last: unknown = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const rows = must(
-        database.query(table, filter, limit, orderBy, direction),
-        `reading ${table}`,
-      );
+      const rows = database.query(table, {
+        where: filter,
+        limit: limit,
+        orderBy: orderBy,
+        order: direction,
+      });
       return Array.isArray(rows) ? rows : [];
     } catch (e) {
       last = e;
@@ -912,11 +914,11 @@ function queryRows(
  * the same row. That is a property of these callers and not of writes in
  * general, so it belongs in this comment rather than being assumed.
  */
-function writeRow(run: () => DatabaseAnswer, what: string): boolean {
+function writeRow(run: () => unknown, what: string): boolean {
   let last: unknown = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      must(run(), what);
+      run();
       return true;
     } catch (e) {
       last = e;
@@ -926,156 +928,107 @@ function writeRow(run: () => DatabaseAnswer, what: string): boolean {
   return false;
 }
 
-function must(answer: DatabaseAnswer, what: string): unknown {
-  const value = answer.json();
-  if (
-    value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    "error" in value
-  ) {
-    throw new Error(`${what}: ${String((value as { error: unknown }).error)}`);
-  }
-  return value;
-}
-
 function init(): void {
   // Column names are validated against `^[a-z][a-z0-9_]*$` *and* refused when
   // they are SQL reserved words, which is why this is `speaker` rather than
   // the obvious `role`.
-  must(
-    database.ensureTable(
-      "messages",
-      JSON.stringify({
-        columns: [
-          { name: "user_id", type: "text" },
-          { name: "run_id", type: "text" },
-          { name: "speaker", type: "text" },
-          { name: "blocks", type: "text" },
-          { name: "created_ms", type: "bigint" },
-        ],
-      }),
-    ),
-    'creating the table "messages"',
-  );
+  database.ensureTable("messages", {
+    columns: [
+      { name: "user_id", type: "text" },
+      { name: "run_id", type: "text" },
+      { name: "speaker", type: "text" },
+      { name: "blocks", type: "text" },
+      { name: "created_ms", type: "bigint" },
+    ],
+  });
 
-  must(
-    database.ensureTable(
-      "activities",
-      JSON.stringify({
-        columns: [
-          { name: "user_id", type: "text" },
-          { name: "run_id", type: "text" },
-          { name: "kind", type: "text" },
-          { name: "message", type: "text" },
-          { name: "created_ms", type: "bigint" },
-        ],
-      }),
-    ),
-    'creating the table "activities"',
-  );
+  database.ensureTable("activities", {
+    columns: [
+      { name: "user_id", type: "text" },
+      { name: "run_id", type: "text" },
+      { name: "kind", type: "text" },
+      { name: "message", type: "text" },
+      { name: "created_ms", type: "bigint" },
+    ],
+  });
 
   // A run's own row: what state it is in, and which queued task will take it
   // forward. Without one there was nothing to cancel — the run was only ever
   // implied by the rows that mentioned its id.
-  must(
-    database.ensureTable(
-      "runs",
-      JSON.stringify({
-        columns: [
-          { name: "user_id", type: "text" },
-          { name: "run_id", type: "text" },
-          { name: "run_state", type: "text" },
-          // What this run may do, not what it is doing: `run_state` is the
-          // gate every stop goes through, this is the gate every write goes
-          // through. Added after the table existed, which the read retry in
-          // `queryRows` is there for.
-          { name: "run_mode", type: "text" },
-          // Where this run came from and where its answer goes. Empty for a
-          // run started on the page, which is why nothing about the web path
-          // had to change to add a channel.
-          { name: "channel", type: "text" },
-          { name: "chat_id", type: "text" },
-          { name: "task_id", type: "text" },
-          { name: "steps", type: "bigint" },
-          { name: "created_ms", type: "bigint" },
-          { name: "updated_ms", type: "bigint" },
-        ],
-      }),
-    ),
-    'creating the table "runs"',
-  );
+  database.ensureTable("runs", {
+    columns: [
+      { name: "user_id", type: "text" },
+      { name: "run_id", type: "text" },
+      { name: "run_state", type: "text" },
+      // What this run may do, not what it is doing: `run_state` is the
+      // gate every stop goes through, this is the gate every write goes
+      // through. Added after the table existed, which the read retry in
+      // `queryRows` is there for.
+      { name: "run_mode", type: "text" },
+      // Where this run came from and where its answer goes. Empty for a
+      // run started on the page, which is why nothing about the web path
+      // had to change to add a channel.
+      { name: "channel", type: "text" },
+      { name: "chat_id", type: "text" },
+      { name: "task_id", type: "text" },
+      { name: "steps", type: "bigint" },
+      { name: "created_ms", type: "bigint" },
+      { name: "updated_ms", type: "bigint" },
+    ],
+  });
 
   // What the person said while the agent was working. A table rather than a
   // column on the run, so two tabs interjecting at once cannot lose one to a
   // read-modify-write, and so the text lands in the conversation at a defined
   // point rather than wherever it happened to arrive.
-  must(
-    database.ensureTable(
-      "interjections",
-      JSON.stringify({
-        columns: [
-          { name: "user_id", type: "text" },
-          { name: "run_id", type: "text" },
-          { name: "body", type: "text" },
-          { name: "created_ms", type: "bigint" },
-        ],
-      }),
-    ),
-    'creating the table "interjections"',
-  );
+  database.ensureTable("interjections", {
+    columns: [
+      { name: "user_id", type: "text" },
+      { name: "run_id", type: "text" },
+      { name: "body", type: "text" },
+      { name: "created_ms", type: "bigint" },
+    ],
+  });
 
   // A plan put to the person, and what they said about it. A table rather
   // than a column on the run for the reason `interjections` is one: two tabs
   // answering at once must not lose one to a read-modify-write, and the row
   // is worth keeping after the decision — "what was I approving" is the
   // question somebody asks a week later, and the run's state cannot answer it.
-  must(
-    database.ensureTable(
-      "plans",
-      JSON.stringify({
-        columns: [
-          { name: "user_id", type: "text" },
-          { name: "run_id", type: "text" },
-          { name: "body", type: "text" },
-          // What approving this plan actually does, when the plan was raised
-          // by a tool rather than written by the model. Empty for a plan the
-          // model composed itself, which approval can only re-authorise.
-          { name: "action", type: "text" },
-          { name: "payload", type: "text" },
-          { name: "decision", type: "text" },
-          // What the person said as they decided. A rejection with nothing
-          // attached tells the model it was wrong and not how, which spends
-          // a turn to learn one bit.
-          { name: "note", type: "text" },
-          { name: "created_ms", type: "bigint" },
-          { name: "decided_ms", type: "bigint" },
-        ],
-      }),
-    ),
-    'creating the table "plans"',
-  );
+  database.ensureTable("plans", {
+    columns: [
+      { name: "user_id", type: "text" },
+      { name: "run_id", type: "text" },
+      { name: "body", type: "text" },
+      // What approving this plan actually does, when the plan was raised
+      // by a tool rather than written by the model. Empty for a plan the
+      // model composed itself, which approval can only re-authorise.
+      { name: "action", type: "text" },
+      { name: "payload", type: "text" },
+      { name: "decision", type: "text" },
+      // What the person said as they decided. A rejection with nothing
+      // attached tells the model it was wrong and not how, which spends
+      // a turn to learn one bit.
+      { name: "note", type: "text" },
+      { name: "created_ms", type: "bigint" },
+      { name: "decided_ms", type: "bigint" },
+    ],
+  });
 
   // Column names avoid anything SQL might claim: `output` and `usage` are
   // both words a database has opinions about, and a rejected ensureTable is
   // the failure this script has already shipped once.
-  must(
-    database.ensureTable(
-      "turn_usage",
-      JSON.stringify({
-        columns: [
-          { name: "user_id", type: "text" },
-          { name: "run_id", type: "text" },
-          { name: "cached_tokens", type: "bigint" },
-          { name: "wrote_tokens", type: "bigint" },
-          { name: "fresh_tokens", type: "bigint" },
-          { name: "out_tokens", type: "bigint" },
-          { name: "created_ms", type: "bigint" },
-        ],
-      }),
-    ),
-    'creating the table "turn_usage"',
-  );
+  database.ensureTable("turn_usage", {
+    columns: [
+      { name: "user_id", type: "text" },
+      { name: "run_id", type: "text" },
+      { name: "cached_tokens", type: "bigint" },
+      { name: "wrote_tokens", type: "bigint" },
+      { name: "fresh_tokens", type: "bigint" },
+      { name: "out_tokens", type: "bigint" },
+      { name: "created_ms", type: "bigint" },
+    ],
+  });
 
   routeRegistry.registerRoute("/agent", { file: "public/ui.html" });
   routeRegistry.registerRoute("/agent/app.js", { file: "public/app.js" });
@@ -1711,15 +1664,11 @@ function decide(
   if (plan) {
     writeRow(
       () =>
-        database.update(
-          "plans",
-          Number(plan.id),
-          JSON.stringify({
-            decision: approved ? "approved" : "rejected",
-            note: note,
-            decided_ms: Date.now(),
-          }),
-        ),
+        database.update("plans", Number(plan.id), {
+          decision: approved ? "approved" : "rejected",
+          note: note,
+          decided_ms: Date.now(),
+        }),
       "recording a decision",
     );
   }
@@ -1729,11 +1678,10 @@ function decide(
     // that reads it cannot see the old one.
     writeRow(
       () =>
-        database.update(
-          "runs",
-          Number(row.id),
-          JSON.stringify({ run_mode: "act", updated_ms: Date.now() }),
-        ),
+        database.update("runs", Number(row.id), {
+          run_mode: "act",
+          updated_ms: Date.now(),
+        }),
       "widening a run",
     );
   }
@@ -1844,18 +1792,12 @@ function interject(context: HandlerContext): HttpResponse {
   }
 
   try {
-    must(
-      database.insert(
-        "interjections",
-        JSON.stringify({
-          user_id: userId,
-          run_id: runId,
-          body: text,
-          created_ms: Date.now(),
-        }),
-      ),
-      "queueing something to say",
-    );
+    database.insert("interjections", {
+      user_id: userId,
+      run_id: runId,
+      body: text,
+      created_ms: Date.now(),
+    });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return json(500, { error: message });
@@ -1872,16 +1814,12 @@ function readHistory(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
   if (!userId) return json(401, { error: "Sign in first." });
 
-  const rows = must(
-    database.query(
-      "activities",
-      JSON.stringify({ user_id: userId }),
-      MAX_HISTORY_ROWS,
-      "id",
-      "desc",
-    ),
-    "reading the history",
-  ) as ActivityRow[];
+  const rows = database.query("activities", {
+    where: { user_id: userId },
+    limit: MAX_HISTORY_ROWS,
+    orderBy: "id",
+    order: "desc",
+  }) as unknown as ActivityRow[];
 
   const ordered = Array.isArray(rows) ? rows.slice().reverse() : [];
 
@@ -2502,7 +2440,7 @@ function runRow(userId: string, runId: string): RunRow | null {
   try {
     const rows = queryRows(
       "runs",
-      JSON.stringify({ user_id: userId, run_id: runId }),
+      { user_id: userId, run_id: runId },
       1,
       "id",
       "desc",
@@ -2525,7 +2463,7 @@ function alreadyAnswered(userId: string, runId: string): boolean {
   try {
     const rows = queryRows(
       "activities",
-      JSON.stringify({ user_id: userId, run_id: runId, kind: "response" }),
+      { user_id: userId, run_id: runId, kind: "response" },
       1,
       "id",
       "desc",
@@ -2587,7 +2525,7 @@ function pendingPlan(userId: string, runId: string): PlanRow | null {
   try {
     const rows = queryRows(
       "plans",
-      JSON.stringify({ user_id: userId, run_id: runId, decision: "pending" }),
+      { user_id: userId, run_id: runId, decision: "pending" },
       1,
       "id",
       "desc",
@@ -2610,22 +2548,19 @@ function openRun(userId: string, runId: string, taskId: string): void {
   // so a failure here is logged and not raised.
   writeRow(
     () =>
-      database.insert(
-        "runs",
-        JSON.stringify({
-          user_id: userId,
-          run_id: runId,
-          run_state: "running",
-          // Every run starts able to read and unable to write, which is what
-          // `run_js` could already do — so this is not a new restriction on
-          // anything, it is the floor the approval raises.
-          run_mode: "plan",
-          task_id: taskId,
-          steps: 0,
-          created_ms: Date.now(),
-          updated_ms: Date.now(),
-        }),
-      ),
+      database.insert("runs", {
+        user_id: userId,
+        run_id: runId,
+        run_state: "running",
+        // Every run starts able to read and unable to write, which is what
+        // `run_js` could already do — so this is not a new restriction on
+        // anything, it is the floor the approval raises.
+        run_mode: "plan",
+        task_id: taskId,
+        steps: 0,
+        created_ms: Date.now(),
+        updated_ms: Date.now(),
+      }),
     "opening a run",
   );
 }
@@ -2657,7 +2592,7 @@ function setRunState(
   if (taskId !== undefined) patch.task_id = taskId;
 
   return writeRow(
-    () => database.update("runs", Number(row.id), JSON.stringify(patch)),
+    () => database.update("runs", Number(row.id), patch),
     "moving a run along",
   );
 }
@@ -2676,7 +2611,7 @@ function takeInterjections(userId: string, runId: string): string[] {
   try {
     rows = queryRows(
       "interjections",
-      JSON.stringify({ user_id: userId, run_id: runId }),
+      { user_id: userId, run_id: runId },
       MAX_INTERJECTIONS,
       "id",
       "asc",
@@ -2689,10 +2624,7 @@ function takeInterjections(userId: string, runId: string): string[] {
   for (const row of rows) {
     said.push(String(row.body ?? ""));
     try {
-      must(
-        database.delete("interjections", Number(row.id)),
-        "clearing what was said mid-run",
-      );
+      database.delete("interjections", Number(row.id));
     } catch (e) {
       // Left on the queue it would be delivered again next turn. Dropping it
       // from this turn's batch is the lesser of the two.
@@ -2730,11 +2662,10 @@ function countStep(userId: string, runId: string, taken: number): void {
   if (!row) return;
   writeRow(
     () =>
-      database.update(
-        "runs",
-        Number(row.id),
-        JSON.stringify({ steps: taken + 1, updated_ms: Date.now() }),
-      ),
+      database.update("runs", Number(row.id), {
+        steps: taken + 1,
+        updated_ms: Date.now(),
+      }),
     "counting a turn",
   );
 }
@@ -2815,27 +2746,22 @@ function compactRun(
   // nor a summary of it has lost the thread entirely, and there is nothing to
   // recover it from.
   try {
-    must(database.beginTransaction(), "opening the swap");
-    for (const row of history) {
-      must(database.delete("messages", Number(row.id)), "clearing a message");
-    }
-    appendMessage(userId, runId, "user", [
-      {
-        type: "text",
-        text:
-          "[Everything before this point has been summarised to save space. " +
-          "These are your own notes on the run so far.]\n\n" +
-          summary +
-          "\n\n[End of summary. Continue the work from here.]",
-      },
-    ]);
-    must(database.commitTransaction(), "closing the swap");
+    database.transaction(() => {
+      for (const row of history) {
+        database.delete("messages", Number(row.id));
+      }
+      appendMessage(userId, runId, "user", [
+        {
+          type: "text",
+          text:
+            "[Everything before this point has been summarised to save space. " +
+            "These are your own notes on the run so far.]\n\n" +
+            summary +
+            "\n\n[End of summary. Continue the work from here.]",
+        },
+      ]);
+    });
   } catch (e) {
-    try {
-      database.rollbackTransaction();
-    } catch (inner) {
-      // Nothing further to do: the handler exiting rolls it back anyway.
-    }
     console.log("agent: could not swap in the summary: " + String(e));
     return false;
   }
@@ -2881,21 +2807,15 @@ function recordUsage(userId: string, runId: string, usage: StreamUsage): void {
   if (cached + wrote + fresh + output === 0) return;
 
   try {
-    must(
-      database.insert(
-        "turn_usage",
-        JSON.stringify({
-          user_id: userId,
-          run_id: runId,
-          cached_tokens: cached,
-          wrote_tokens: wrote,
-          fresh_tokens: fresh,
-          out_tokens: output,
-          created_ms: Date.now(),
-        }),
-      ),
-      "storing what a turn cost",
-    );
+    database.insert("turn_usage", {
+      user_id: userId,
+      run_id: runId,
+      cached_tokens: cached,
+      wrote_tokens: wrote,
+      fresh_tokens: fresh,
+      out_tokens: output,
+      created_ms: Date.now(),
+    });
   } catch (e) {
     console.log("agent: could not record what a turn cost: " + String(e));
     return;
@@ -2929,7 +2849,7 @@ function runSpend(userId: string, runId: string) {
     return spendOf(
       queryRows(
         "turn_usage",
-        JSON.stringify({ user_id: userId, run_id: runId }),
+        { user_id: userId, run_id: runId },
         MAX_STEPS + 1,
         "id",
         "asc",
@@ -3779,20 +3699,17 @@ function requestApprovalTool(
 
   writeRow(
     () =>
-      database.insert(
-        "plans",
-        JSON.stringify({
-          user_id: userId,
-          run_id: runId,
-          body: body,
-          action: action ?? "",
-          payload: payload === undefined ? "" : JSON.stringify(payload),
-          decision: "pending",
-          note: "",
-          created_ms: Date.now(),
-          decided_ms: 0,
-        }),
-      ),
+      database.insert("plans", {
+        user_id: userId,
+        run_id: runId,
+        body: body,
+        action: action ?? "",
+        payload: payload === undefined ? "" : JSON.stringify(payload),
+        decision: "pending",
+        note: "",
+        created_ms: Date.now(),
+        decided_ms: 0,
+      }),
     "recording a plan",
   );
 
@@ -4559,15 +4476,11 @@ function startTelegramRun(context: HandlerContext): void {
     if (row) {
       writeRow(
         () =>
-          database.update(
-            "runs",
-            Number(row.id),
-            JSON.stringify({
-              channel: TELEGRAM_CHANNEL,
-              chat_id: chatId,
-              updated_ms: Date.now(),
-            }),
-          ),
+          database.update("runs", Number(row.id), {
+            channel: TELEGRAM_CHANNEL,
+            chat_id: chatId,
+            updated_ms: Date.now(),
+          }),
         "recording where a run came from",
       );
     }
@@ -4640,19 +4553,13 @@ function appendMessage(
   speaker: "user" | "assistant",
   blocks: ContentBlock[],
 ): void {
-  must(
-    database.insert(
-      "messages",
-      JSON.stringify({
-        user_id: userId,
-        run_id: runId,
-        speaker: speaker,
-        blocks: JSON.stringify(blocks),
-        created_ms: Date.now(),
-      }),
-    ),
-    "storing a message",
-  );
+  database.insert("messages", {
+    user_id: userId,
+    run_id: runId,
+    speaker: speaker,
+    blocks: JSON.stringify(blocks),
+    created_ms: Date.now(),
+  });
 }
 
 /**
@@ -4677,7 +4584,7 @@ function appendMessage(
 function loadMessages(userId: string, runId: string): MessageRow[] {
   return queryRows(
     "messages",
-    JSON.stringify({ user_id: userId, run_id: runId }),
+    { user_id: userId, run_id: runId },
     HISTORY_QUERY_LIMIT,
     "id",
     "asc",
@@ -4704,19 +4611,13 @@ function recordActivity(
   message: string,
 ): void {
   const at = Date.now();
-  must(
-    database.insert(
-      "activities",
-      JSON.stringify({
-        user_id: userId,
-        run_id: runId,
-        kind: kind,
-        message: message,
-        created_ms: at,
-      }),
-    ),
-    "storing an activity",
-  );
+  database.insert("activities", {
+    user_id: userId,
+    run_id: runId,
+    kind: kind,
+    message: message,
+    created_ms: at,
+  });
   routeRegistry.sendStreamMessageFiltered(
     STREAM_PATH,
     { runId: runId, kind: kind, message: message, at: at },
