@@ -2016,9 +2016,10 @@ function storeKey(context: HandlerContext): HttpResponse {
   }
   if (!key) return json(400, { error: "A key is required." });
 
-  const outcome = secretStorage.setSecret(SECRET_NAME, key);
-  if (outcome.indexOf("Error") === 0) {
-    return json(400, { error: outcome });
+  try {
+    secretStorage.setSecret(SECRET_NAME, key);
+  } catch (e) {
+    return json(400, { error: e instanceof Error ? e.message : String(e) });
   }
   return json(200, { hasKey: true });
 }

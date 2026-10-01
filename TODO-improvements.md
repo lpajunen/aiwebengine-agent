@@ -319,8 +319,7 @@ list — and two new rows have opened since, both found by building against it.
   when it finishes" — is this, if the thing waiting is an MCP client rather than
   this agent's own page. It does nothing for the page, which has the SSE stream
   already.
-- **The engine serves MCP resources.** `mcpRegistry.registerResource(uri,
-assetName, metadata)` publishes one of a script's own assets under a URI, and
+- **The engine serves MCP resources.** `mcpRegistry.registerResource(uri, { file: assetName, ...metadata })` publishes one of a script's own assets under a URI, and
   it is asset-backed rather than handler-backed on purpose. Two things here
   might want it: the [artifacts](#presentation) item, if an artifact should be
   readable by a client and not only by a browser, and an image — a resource
