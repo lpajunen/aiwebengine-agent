@@ -390,12 +390,6 @@ interface Skill {
   description: string;
 }
 
-/** One entry of `assetStorage.listAssets()`. */
-interface AssetInfo {
-  name: string;
-  updatedAt?: number;
-}
-
 // ============================================================================
 // Code as the action
 // ============================================================================
@@ -3039,10 +3033,9 @@ function missingNote(key: string): string {
 // Skills
 // ============================================================================
 
-function listAssetInfo(): AssetInfo[] {
+function listAssetInfo(): FileInfo[] {
   try {
-    const parsed = JSON.parse(assetStorage.listAssets()) as AssetInfo[];
-    return Array.isArray(parsed) ? parsed : [];
+    return files.list();
   } catch (e) {
     return [];
   }
@@ -3068,18 +3061,18 @@ function listAssetInfo(): AssetInfo[] {
  * collision costs a rebuild rather than serving a stale library.
  */
 function loadSkills(): Skill[] {
-  const files: AssetInfo[] = [];
+  const skillFiles: FileInfo[] = [];
   for (const asset of listAssetInfo()) {
-    if (skillNameOf(asset.name) !== null) files.push(asset);
+    if (skillNameOf(asset.path) !== null) skillFiles.push(asset);
   }
-  if (files.length === 0) return [];
+  if (skillFiles.length === 0) return [];
 
-  files.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  const capped = files.slice(0, MAX_SKILLS);
+  skillFiles.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const capped = skillFiles.slice(0, MAX_SKILLS);
 
   const marks: string[] = [];
   for (const file of capped) {
-    marks.push(file.name + "@" + String(file.updatedAt ?? 0));
+    marks.push(file.path + "@" + String(file.updatedAt ?? 0));
   }
   const mark = marks.join(",");
   const key = "skills:" + shortHash(mark);
@@ -3098,9 +3091,9 @@ function loadSkills(): Skill[] {
 
   const skills: Skill[] = [];
   for (const file of capped) {
-    const name = skillNameOf(file.name);
+    const name = skillNameOf(file.path);
     if (name === null) continue;
-    const text = readAssetText(file.name);
+    const text = readAssetText(file.path);
     if (text === null) continue;
     skills.push({
       name: name,
@@ -3125,13 +3118,11 @@ function loadSkills(): Skill[] {
  */
 /** An asset's content as text, or null if it is not there. */
 function readAssetText(name: string): string | null {
-  // `fetchAsset` answers a missing asset with a sentence rather than by
-  // failing, and that sentence is not base64 — so callers check the listing
-  // first and only ask for names they have already seen.
-  const encoded = assetStorage.fetchAsset(name);
   try {
-    return convert.atob(encoded);
+    return files.read(name);
   } catch (e) {
+    // Not text, or not readable by this caller: either way there is no
+    // skill to load from it.
     return null;
   }
 }
@@ -3522,9 +3513,9 @@ function readSkillTool(
   const folder = SKILLS_PREFIX + resolved + "/";
   let exists = false;
   for (const asset of listAssetInfo()) {
-    if (asset.name === assetName) exists = true;
-    if (asset.name.indexOf(folder) === 0) {
-      siblings.push(asset.name.slice(folder.length));
+    if (asset.path === assetName) exists = true;
+    if (asset.path.indexOf(folder) === 0) {
+      siblings.push(asset.path.slice(folder.length));
     }
   }
   if (!exists) {
@@ -3856,41 +3847,22 @@ function performSkillWrite(
   const name = args.name;
   const file = renderSkillFile(name, args.description, args.body);
 
-  let answer = "";
   try {
-    answer = assetStorage.upsertAsset(
-      skillAssetPath(name),
-      "text/markdown",
-      convert.btoa(file),
-    );
+    files.write(skillAssetPath(name), file);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    recordActivity(
-      userId,
-      runId,
-      "error",
-      `Could not write the skill: ${message}`,
-    );
-    return `it could not be written: ${message}`;
-  }
-
-  // "Asset '...' upserted successfully" on the way through; anything else is
-  // a refusal wearing a return value.
-  if (answer.indexOf("successfully") === -1) {
     const why =
-      answer.indexOf("Insufficient capabilities") !== -1
+      message.indexOf("Insufficient capabilities") !== -1
         ? "writing a skill needs the rights to author this script, which a queued approval does not have — approve it on the agent page instead"
-        : answer;
+        : message;
     recordActivity(userId, runId, "error", `The skill was not written: ${why}`);
     return `it was not written: ${why}`;
   }
 
   // Said where the person is looking, because nothing else will tell them.
-  // An asset written from JavaScript records **no revision** and does not move
-  // the git binding off `in_sync` — verified by writing one and watching both
-  // report nothing — so a skill sitting only in the asset store is invisible
-  // to `list_revisions` and to `get_git_status` alike, right up until a pull
-  // deletes it for not being in the repository.
+  // The write is recorded as a revision of this script, but a skill that lives
+  // only in this engine is still one a pull from the repository deletes for
+  // not being there.
   recordActivity(
     userId,
     runId,
