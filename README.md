@@ -34,7 +34,7 @@ subject by importing it — so anything under test had to move out:
 | `engine.ts`       | which management tools only read, and their arguments   |
 
 Their tests are `agent/*.test.ts` — 88 cases — run with the `run_tests` tool
-or `POST /engine/run_tests?uri=<this script>`.
+or `POST /engine/run_tests` with `{"uri": "<this script>"}`.
 
 The model gets five tools: `write_response` (the only way the person sees
 anything), `remember`, `list_memories` and `recall` over notes in that person's
