@@ -731,7 +731,7 @@ Which is a narrower thing than the agent this already is, and the narrowness is
 the point. Decide that before wiring anything.
 
 **And there is a sharper version of the catch, which is the reason to decide it
-rather than drift into it.** `McpClient.constructor` takes the _name of a
+rather than drift into it.** `new McpClient(url, secret)` takes the _name of a
 secret_, and the token is resolved host-side at the point of the call. So
 mounting the engine's own MCP server with an owner-scoped token does not merely
 reach past the delegation cap — it **launders** it: a delegated turn would be
