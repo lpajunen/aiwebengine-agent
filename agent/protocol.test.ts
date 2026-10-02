@@ -9,7 +9,7 @@
  * anything. Text handling fails the same way: a half-decoded escape is a wrong
  * character on somebody's screen, not an exception.
  *
- * Run with `POST /engine/run_tests` with `{"uri": "<this script>"}`, or the `run_tests` tool.
+ * Run with `POST /engine/run_tests` with `{"script": "<this script>"}`, or the `run_tests` tool.
  */
 
 import {

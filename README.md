@@ -34,7 +34,7 @@ subject by importing it — so anything under test had to move out:
 | `engine.ts`       | which management tools only read, and their arguments   |
 
 Their tests are `agent/*.test.ts` — 88 cases — run with the `run_tests` tool
-or `POST /engine/run_tests` with `{"uri": "<this script>"}`.
+or `POST /engine/run_tests` with `{"script": "<this script>"}`.
 
 The model gets five tools: `write_response` (the only way the person sees
 anything), `remember`, `list_memories` and `recall` over notes in that person's
@@ -415,7 +415,7 @@ Every turn also logs what it spent, because a prefix that stops matching still
 answers and is simply billed in full:
 
 ```
-read_logs uri=<this script> contains="agent: prompt"
+read_logs script=<this script> contains="agent: prompt"
 agent: prompt 5312 tokens (cached 5000, wrote 300, new 12), reply 44
 ```
 
