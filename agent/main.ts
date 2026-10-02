@@ -663,7 +663,7 @@ const REQUEST_APPROVAL_TOOL: ToolSpec = {
  * it keeps doing so until somebody notices. That is not a thing to hand a run
  * a standing licence for.
  *
- * The second reason is that it could not work otherwise. `write_assets` is an
+ * The second reason is that it could not work otherwise. `write_files` is an
  * editor-tier capability and [`delegation`] caps background work at
  * `authenticated` on purpose — a delegated task must not be the way to get a
  * context that can author a solution. So the write cannot happen in the turn
@@ -3743,7 +3743,7 @@ function requestApprovalTool(
  * Write the skill a person approved.
  *
  * The one deferred action that can fail for a reason worth explaining rather
- * than logging. `write_assets` is editor-tier and ownership-checked, and a
+ * than logging. `write_files` is editor-tier and ownership-checked, and a
  * delegated task is capped below it — so this succeeds when the approval came
  * from the page, in the person's own request, and is **refused when it came
  * from a Telegram button**, which runs as a queued task.

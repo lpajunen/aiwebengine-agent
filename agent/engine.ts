@@ -11,7 +11,7 @@
  * a tool reports what it did, not what it would do, so there is no asking
  * first. What there is instead is a naming convention the engine keeps
  * consistently — `read_file`, `list_users`, `get_deployment`, `search_files`,
- * `diff_revisions`, `check_script` read; `write_file`, `delete_asset`,
+ * `diff_revisions`, `check_script` read; `write_file`, `delete_file`,
  * `add_user_role`, `revert_script`, `deploy_script`, `pull_from_git` do not.
  *
  * **Anything unrecognised counts as a write.** A tool this file has not heard

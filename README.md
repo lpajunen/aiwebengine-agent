@@ -296,7 +296,7 @@ too, from that folder and nowhere else.
 Write one with the engine's own asset tools:
 
 ```
-write_asset script=<this script> name="skills/refunds/SKILL.md" content="---
+write_file script=<this script> name="skills/refunds/SKILL.md" content="---
 description: Handling a refund request.
 ---
 
@@ -319,7 +319,7 @@ It **always** pauses and asks, in both modes, because a skill is an asset of
 the script — it changes what this agent does for everyone who uses it, and
 keeps doing so until somebody notices. A note is one person's; a skill is not.
 
-It also cannot write one itself. `write_assets` is editor-tier and
+It also cannot write one itself. `write_files` is editor-tier and
 `delegation.rs` caps background work at `authenticated` on purpose, so a
 delegated turn can never hold it. The write happens where the _approval_ does,
 in your own request under your own rights — which is why a skill approved on
@@ -339,7 +339,7 @@ by committing them:
 
 ```bash
 # 1. Read what the agent wrote
-read_asset script=<this script> asset="skills/<name>/SKILL.md"
+read_file script=<this script> path="skills/<name>/SKILL.md"
 
 # 2. Put it in the repository, editing it on the way through
 agent/skills/<name>/SKILL.md
@@ -364,7 +364,7 @@ What does tell you is the asset list, compared against the repository:
 
 ```bash
 # what the engine has
-list_assets script=<this script>     # skills/<name>/SKILL.md entries
+list_files script=<this script>     # skills/<name>/SKILL.md entries
 
 # what the repository has
 ls agent/skills/
@@ -554,7 +554,7 @@ With the repository pushed to GitHub, from an engine you administer:
 pull_from_git  repository=<owner>/aiwebengine-agent
 ```
 
-Or push the two files directly with `write_assets` / `write_file`.
+Or push the two files directly with `write_files` / `write_file`.
 
 Each person signs in, stores their own key at `/agent`, and grants the agent
 permission to work while they are away — all three from that page.
