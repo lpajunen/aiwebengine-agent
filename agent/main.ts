@@ -3995,7 +3995,10 @@ function createScriptTool(
       "This run already created its script. Keep working on it with write_files.",
     );
   }
-  if (engineAnswer("list_files", { script: name }).ok) {
+  // `list_files` answers a script that does not exist with no files rather
+  // than with an error, so what says it exists is that it has some.
+  const existing = engineAnswer("list_files", { script: name });
+  if (existing.ok && ((existing.value.files ?? []) as unknown[]).length > 0) {
     return failed(
       `A script called "${name}" already exists. Choose another name.`,
     );
