@@ -217,6 +217,79 @@ export function testsPassed(report: unknown): boolean {
 }
 
 // ============================================================================
+// What a small model sends
+// ============================================================================
+
+/** The files of a `write_files` call, read leniently, or why they cannot be. */
+export function readFilesArgument(raw: unknown): {
+  files: { name: string; text: string }[];
+  problem: string | null;
+} {
+  let value = raw;
+  // A model that has been asked for an array of objects will sometimes send
+  // the JSON of one, as a string.
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch (e) {
+      return {
+        files: [],
+        problem:
+          "'files' must be an array of {path, text} objects, not a string. " +
+          "Send it as an array.",
+      };
+    }
+  }
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    // One file sent on its own.
+    value = [value];
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    return {
+      files: [],
+      problem:
+        "'files' must be a non-empty array of {path, text} objects, e.g. " +
+        '[{"path": "lib/dates.ts", "text": "export function f() {}"}].',
+    };
+  }
+  const files: { name: string; text: string }[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const item = (value[i] ?? {}) as Record<string, unknown>;
+    const path = String(item.path ?? item.name ?? item.file ?? "").trim();
+    const text = item.text ?? item.content;
+    if (!path) {
+      return { files: [], problem: `files[${i}] has no 'path'.` };
+    }
+    if (typeof text !== "string") {
+      return {
+        files: [],
+        problem: `files[${i}] ("${path}") has no 'text': send the file's whole contents as a string.`,
+      };
+    }
+    files.push({ name: path, text: text });
+  }
+  return { files: files, problem: null };
+}
+
+/** The `remove` argument: paths, as an array or as one string. */
+export function readRemoveArgument(raw: unknown): string[] {
+  if (Array.isArray(raw))
+    return raw.map((p) => String(p).trim()).filter(Boolean);
+  if (typeof raw === "string" && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.map((p) => String(p).trim()).filter(Boolean);
+      }
+    } catch (e) {
+      // Not JSON: a single path.
+    }
+    return [raw.trim()];
+  }
+  return [];
+}
+
+// ============================================================================
 // Not looping
 // ============================================================================
 

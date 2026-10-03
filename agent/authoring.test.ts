@@ -9,6 +9,8 @@ import {
   handoffNote,
   isAuthorTool,
   leftoverPlaceholders,
+  readFilesArgument,
+  readRemoveArgument,
   maxStepsFor,
   maxTokensFor,
   nextFailureCount,
@@ -248,5 +250,40 @@ describe("leftoverPlaceholders", () => {
   });
   test("a script with its own files has none", () => {
     expect(leftoverPlaceholders(["main.ts", "lib/length.ts"])).toEqual([]);
+  });
+});
+
+describe("readFilesArgument", () => {
+  test("an array of path and text", () => {
+    const r = readFilesArgument([{ path: "a.ts", text: "x" }]);
+    expect(r.problem).toBe(null);
+    expect(r.files).toEqual([{ name: "a.ts", text: "x" }]);
+  });
+  test("the JSON of an array sent as a string", () => {
+    const r = readFilesArgument('[{"path":"a.ts","text":"x"}]');
+    expect(r.files).toEqual([{ name: "a.ts", text: "x" }]);
+  });
+  test("one file sent on its own, and the names a model reaches for", () => {
+    const r = readFilesArgument({ name: "a.ts", content: "x" });
+    expect(r.files).toEqual([{ name: "a.ts", text: "x" }]);
+  });
+  test("a string that is not JSON says what to send", () => {
+    expect(readFilesArgument("a.ts: x").problem).toContain("not a string");
+  });
+  test("empty, or a file with no text, is refused with the reason", () => {
+    expect(readFilesArgument([]).problem).toContain("non-empty array");
+    expect(readFilesArgument([{ path: "a.ts" }]).problem).toContain(
+      "has no 'text'",
+    );
+    expect(readFilesArgument([{ text: "x" }]).problem).toContain("no 'path'");
+  });
+});
+
+describe("readRemoveArgument", () => {
+  test("an array, a single path, or the JSON of an array", () => {
+    expect(readRemoveArgument(["a", " b "])).toEqual(["a", "b"]);
+    expect(readRemoveArgument("lib/example.ts")).toEqual(["lib/example.ts"]);
+    expect(readRemoveArgument('["a","b"]')).toEqual(["a", "b"]);
+    expect(readRemoveArgument(undefined)).toEqual([]);
   });
 });

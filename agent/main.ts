@@ -51,6 +51,8 @@ import {
   maxStepsFor,
   maxTokensFor,
   nextFailureCount,
+  readFilesArgument,
+  readRemoveArgument,
   runKindOf,
   scriptNameProblem,
   shouldEscalate,
@@ -3845,7 +3847,32 @@ function initSentence(init: Record<string, any> | undefined): string {
     : "init() FAILED: " + clip(String(init.error ?? ""), 400);
 }
 
+/**
+ * Run an authoring tool, and leave a line on the activity log for a refusal.
+ *
+ * What a tool answered is otherwise only in the conversation, so a run that
+ * kept being refused looked, from outside, like a run that kept calling the
+ * same tool for no reason.
+ */
 function authorTool(
+  userId: string,
+  runId: string,
+  name: string,
+  input: Record<string, unknown>,
+): { content: string; isError: boolean } {
+  const outcome = runAuthorTool(userId, runId, name, input);
+  if (outcome.isError) {
+    recordActivity(
+      userId,
+      runId,
+      "engine",
+      `${name} refused: ${clip(outcome.content, 240)}`,
+    );
+  }
+  return outcome;
+}
+
+function runAuthorTool(
   userId: string,
   runId: string,
   name: string,
@@ -3861,21 +3888,14 @@ function authorTool(
 
   switch (name) {
     case "write_files": {
-      const given = Array.isArray(input.files) ? input.files : [];
-      const writes: { name: string; text: string }[] = [];
-      for (const file of given as { path?: unknown; text?: unknown }[]) {
-        const path = String(file?.path ?? "").trim();
-        if (!path || typeof file?.text !== "string") {
-          return failed("Every file needs a 'path' and its 'text'.");
-        }
-        writes.push({ name: path, text: file.text });
-      }
-      const remove = Array.isArray(input.remove)
-        ? (input.remove as unknown[]).map((p) => String(p))
-        : [];
-      if (writes.length === 0 && remove.length === 0) {
-        return failed("Nothing to write: 'files' is empty.");
-      }
+      const remove = readRemoveArgument(input.remove);
+      // Files may be left out only when the call is just removing some.
+      const given =
+        input.files === undefined && remove.length > 0
+          ? { files: [], problem: null }
+          : readFilesArgument(input.files);
+      if (given.problem) return failed(given.problem);
+      const writes = given.files;
       const answer = engineAnswer("write_files", {
         script: script,
         files: writes,
