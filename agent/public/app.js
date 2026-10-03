@@ -23,6 +23,7 @@ const el = {
   forgetKey: document.getElementById("forget-key"),
   keyStatus: document.getElementById("key-status"),
   prompt: document.getElementById("prompt"),
+  author: document.getElementById("author"),
   run: document.getElementById("run"),
   stop: document.getElementById("stop"),
   runStatus: document.getElementById("run-status"),
@@ -552,7 +553,10 @@ el.run.addEventListener("click", async () => {
 
     await api("/agent/prompt", {
       method: "POST",
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({
+        prompt,
+        kind: el.author && el.author.checked ? "author" : "chat",
+      }),
     });
     el.prompt.value = "";
     // The engine has it now. Everything from here — each turn, each tool, the
@@ -570,6 +574,8 @@ el.run.addEventListener("click", async () => {
       );
     } else if (e.body?.needsAuthorization) {
       showAuthorizationNeeded(e.body);
+    } else if (e.body?.needsAuthority) {
+      setStatus(el.runStatus, e.message, true);
     } else if (e.body?.needsKey) {
       setStatus(el.runStatus, e.message, true);
       showKeyState(false);

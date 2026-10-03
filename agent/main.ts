@@ -33,6 +33,30 @@ import {
   skillNameOf,
 } from "./skills.ts";
 import { onlyReads, parseArgs } from "./engine.ts";
+import {
+  AUTHOR_PROMPT,
+  AUTHOR_TOOLS,
+  ESCALATE_AT,
+  MAX_NUDGES,
+  MOST_STEPS,
+  NUDGE,
+  STUB_SOURCE,
+  clip,
+  failureSignature,
+  handoffNote,
+  isAuthorTool,
+  isShape,
+  maxStepsFor,
+  maxTokensFor,
+  nextFailureCount,
+  runKindOf,
+  scriptNameProblem,
+  shouldEscalate,
+  summariseCheck,
+  summariseTests,
+  templateScriptFor,
+  testsPassed,
+} from "./authoring.ts";
 import { rememberArgs, skillWriteArgs } from "./plans.ts";
 
 /**
@@ -62,7 +86,7 @@ import { rememberArgs, skillWriteArgs } from "./plans.ts";
  * And a turn is attempted exactly once. The queue retries a failed task by
  * default, which for a turn would mean re-sending the whole conversation and
  * paying for a second model call on somebody's personal key — so every enqueue
- * here passes `maxAttempts: 1` and lets `MAX_STEPS` do the bounding.
+ * here passes `maxAttempts: 1` and lets the run's step ceiling do the bounding.
  *
  * The answer arrives as it is written. `callModel` reads the model's response
  * with `fetchStream` and pushes the text on as it becomes readable, so the
@@ -132,39 +156,16 @@ const API_URL = "https://api.anthropic.com/v1/messages";
 const SECRET_NAME = "ANTHROPIC_API_KEY";
 
 /**
- * One turn's output ceiling.
- *
- * A turn now runs as a queued task, so its budget is `javascript.job_timeout_ms`
- * — 60 s by default rather than the 10 s a request gets, and raisable for this
- * script alone:
+ * Output and turn ceilings are per kind of run — see `authoring.ts`. A chat
+ * run keeps the small ones; a run that builds a script gets room to write
+ * several files, and needs the job budget raised to match:
  *
  *     set_script_limits script=<this script> jobTimeoutMs=120000
  *
- * That is the dial to turn before this one. 1024 was chosen when a turn had
- * ten seconds and 2048 measurably did not fit; with a job's budget there is
- * room to raise it, and room to move up a model tier — see MODEL above for the
- * three things that change with it.
- *
  * `fetch` is still synchronous and its timeout still clamped to what is left
- * of the budget, so generation remains the part that scales with this number.
+ * of the budget, so generation remains the part that scales with the token
+ * ceiling.
  */
-const MAX_TOKENS = 8000;
-
-/**
- * Assistant turns one run may take before the script stops it (25: a run that
- * writes, checks and fixes a script needs more than a chat answer does).
- *
- * This is now the only thing bounding the length of a run: compaction keeps
- * the conversation from growing without limit, so a run ends because it has
- * taken enough turns rather than because it ran out of room. Raising it is
- * therefore a decision about money rather than about correctness — every turn
- * is a model call on somebody's own key.
- *
- * Counted on the run's row rather than by scanning the history, which stopped
- * working when compaction started throwing the history away: a compacted run
- * has no assistant messages left to count.
- */
-const MAX_STEPS = 25;
 
 /**
  * How long one model call may take.
@@ -177,7 +178,7 @@ const MAX_STEPS = 25;
  *
  * Which was invisible while answers were short and became a wall as soon as
  * one turn had something long to write: a whole `SKILL.md` body is close to
- * `MAX_TOKENS`, and on this tier that does not reliably finish inside thirty
+ * the token ceiling, and on this tier that does not reliably finish inside thirty
  * seconds. It surfaced as `fetchStream ... Request timed out` on exactly the
  * turns that were doing the most work, which reads like a network fault and
  * is not one.
@@ -337,6 +338,9 @@ interface RunRow {
   chat_id?: string;
   task_id: string;
   steps?: number;
+  run_kind?: string;
+  fail_sig?: string;
+  nudges?: number;
 }
 
 /** A plan put to the person, before and after they answer it. */
@@ -410,6 +414,7 @@ interface Skill {
  * and only writing has to be asked for.
  */
 type RunMode = "plan" | "act";
+type RunKind = "chat" | "author";
 
 /**
  * How long model-written code may run.
@@ -975,6 +980,26 @@ function init(): void {
       { name: "steps", type: "bigint" },
       { name: "created_ms", type: "bigint" },
       { name: "updated_ms", type: "bigint" },
+      // "chat" or "author": what the run is for, which decides its tools,
+      // its budgets and what it is told.
+      { name: "run_kind", type: "text" },
+      // JSON: for the check and for the tests, the failure an authoring run
+      // last met and how many times in a row, so the third time stops it
+      // instead of going round again.
+      { name: "fail_sig", type: "text" },
+      // Turns that spoke and did nothing, in an authoring run.
+      { name: "nudges", type: "bigint" },
+    ],
+  });
+
+  // The scripts an authoring run created, which are the only ones its tools
+  // may touch.
+  database.ensureTable("run_scripts", {
+    columns: [
+      { name: "user_id", type: "text" },
+      { name: "run_id", type: "text" },
+      { name: "script", type: "text" },
+      { name: "created_ms", type: "bigint" },
     ],
   });
 
@@ -1160,13 +1185,25 @@ function startRun(context: HandlerContext): HttpResponse {
   }
 
   let prompt = "";
+  let kind: RunKind = "chat";
   try {
-    const body = (context.request?.json() ?? {}) as { prompt?: string };
+    const body = (context.request?.json() ?? {}) as {
+      prompt?: string;
+      kind?: string;
+    };
     prompt = String(body.prompt ?? "").trim();
+    kind = runKindOf(body.kind);
   } catch (e) {
     return json(400, { error: "Expected a JSON body." });
   }
   if (!prompt) return json(400, { error: "A prompt is required." });
+  if (kind === "author" && !hasEngineAuthority()) {
+    return json(400, {
+      error:
+        "Building a script needs this app to hold 'author' on your account. Grant it on your account page, then try again.",
+      needsAuthority: true,
+    });
+  }
 
   const authorization = personalTasks.authorization();
   if (!authorization.granted) {
@@ -1194,7 +1231,7 @@ function startRun(context: HandlerContext): HttpResponse {
       payload: { runId: runId },
       maxAttempts: 1,
     });
-    openRun(userId, runId, task.taskId);
+    openRun(userId, runId, task.taskId, kind);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     recordActivity(
@@ -1280,14 +1317,27 @@ function advanceRun(context: HandlerContext): void {
     return;
   }
 
+  const kind = kindOf(userId, runId);
+  const stepLimit = maxStepsFor(kind);
   const taken = stepsTaken(userId, runId, history);
-  if (taken >= MAX_STEPS) {
+  if (taken >= stepLimit) {
     recordActivity(
       userId,
       runId,
       "error",
-      `Stopped after ${MAX_STEPS} turns without finishing.`,
+      `Stopped after ${stepLimit} turns without finishing.`,
     );
+    // A run that was building a script leaves the person something to act on
+    // rather than only a reason.
+    if (kind === "author") {
+      escalate(
+        userId,
+        runId,
+        "",
+        `I used all ${stepLimit} turns without finishing.`,
+        "(no verdict: the run ran out of turns)",
+      );
+    }
     finishRun(userId, runId, "step-limit");
     return;
   }
@@ -1352,7 +1402,17 @@ function advanceRun(context: HandlerContext): void {
   // system prompt and then settled here, since a weaker model will sometimes
   // answer in prose however firmly it was told to use the tool — and the
   // person is owed their answer either way.
-  const proseKind = proseKindFor(blocks);
+  // An authoring turn that spoke and called nothing has done nothing, and
+  // ending the run there is how a small model ends it having only announced
+  // the work. It is told to act instead, a few times, before it is believed.
+  const spoke = blocks.some((block) => block.type === "text" && block.text);
+  const calledATool = blocks.some(
+    (block) => block.type === "tool_use" && block.id && block.name,
+  );
+  const nudgesSoFar = Number(runRow(userId, runId)?.nudges ?? 0);
+  const nudging =
+    kind === "author" && !calledATool && spoke && nudgesSoFar < MAX_NUDGES;
+  const proseKind = nudging ? "note" : proseKindFor(blocks);
 
   let said = false;
   const results: ContentBlock[] = [];
@@ -1384,6 +1444,34 @@ function advanceRun(context: HandlerContext): void {
     });
   }
 
+  if (nudging) {
+    const row = runRow(userId, runId);
+    if (row) {
+      writeRow(
+        () =>
+          database.update("runs", Number(row.id), {
+            nudges: nudgesSoFar + 1,
+            updated_ms: Date.now(),
+          }),
+        "counting a nudge",
+      );
+    }
+    appendMessage(userId, runId, "user", [{ type: "text", text: NUDGE }]);
+    try {
+      const task = personalTasks.enqueue({
+        handler: "advanceRun",
+        payload: { runId: runId },
+        maxAttempts: 1,
+      });
+      setRunState(userId, runId, "running", task.taskId, "running");
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      recordActivity(userId, runId, "error", `The run stopped: ${message}`);
+      finishRun(userId, runId, "error");
+    }
+    return;
+  }
+
   // A turn that neither spoke nor did anything would end the run in silence,
   // which reads as the agent having crashed.
   //
@@ -1398,7 +1486,7 @@ function advanceRun(context: HandlerContext): void {
         userId,
         runId,
         "error",
-        "The reply was cut off before anything was said. MAX_TOKENS may be too low.",
+        "The reply was cut off before anything was said. The token ceiling may be too low.",
       );
     } else if (!alreadyAnswered(userId, runId)) {
       recordActivity(
@@ -1622,7 +1710,7 @@ function decideRun(context: HandlerContext): HttpResponse {
  *
  * A rejection resumes the run rather than ending it. The model is told what
  * was wrong and gets to propose something else, which is the difference
- * between a decision and a stop — and `MAX_STEPS` bounds how many times that
+ * between a decision and a stop — and the step ceiling bounds how many times that
  * can go round.
  *
  * Separate from the HTTP handler because a decision arrives two ways now: a
@@ -1674,7 +1762,9 @@ function decide(
     );
   }
 
-  if (approved) {
+  // An authoring run's one approval is for one deploy and is carried out
+  // below; it does not widen the run, so its next deploy asks again.
+  if (approved && kindOf(userId, runId) !== "author") {
     // What the mode is for. Written before the turn is queued, so the turn
     // that reads it cannot see the old one.
     writeRow(
@@ -1825,7 +1915,7 @@ function readHistory(context: HandlerContext): HttpResponse {
   const ordered = Array.isArray(rows) ? rows.slice().reverse() : [];
 
   // The run the page is about to show the tail of — its spend is the one
-  // worth loading, and it is the only one bounded by `MAX_STEPS`.
+  // worth loading, and it is the only one bounded by the step ceiling.
   const latestRun =
     ordered.length > 0 ? String(ordered[ordered.length - 1].run_id ?? "") : "";
 
@@ -2082,6 +2172,7 @@ function callModel(
   // in a run — when a plan is approved. That rewrites the cached prefix, since
   // the tools sit at the front of it; see `REQUEST_APPROVAL_TOOL`.
   const mode = summarising ? "plan" : runModeOf(userId, runId);
+  const kind: RunKind = kindOf(userId, runId);
   const stream = fetchStream(API_URL, {
     method: "POST",
     // Without this the call inherits the engine's 30-second default. See
@@ -2094,12 +2185,14 @@ function callModel(
     },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: MAX_TOKENS,
+      max_tokens: maxTokensFor(kind),
       // Both of these follow the skill library rather than the turn, so they
       // are as stable across a run as anything else in the cached prefix.
-      system: summarising ? COMPACT_PROMPT : systemPromptFor(skills, mode),
+      system: summarising
+        ? COMPACT_PROMPT
+        : systemPromptFor(skills, mode, kind),
       messages: messages,
-      tools: summarising ? undefined : toolsFor(skills, mode),
+      tools: summarising ? undefined : toolsFor(skills, mode, kind),
       stream: true,
       // Cache the prompt, which for this loop means the conversation.
       //
@@ -2521,6 +2614,11 @@ function runModeOf(userId: string, runId: string): RunMode {
   return String(row?.run_mode ?? "") === "act" ? "act" : "plan";
 }
 
+/** What this run is for. A run opened before kinds existed is a chat. */
+function kindOf(userId: string, runId: string): RunKind {
+  return runKindOf(runRow(userId, runId)?.run_kind);
+}
+
 /** The plan this run is waiting on, if it is waiting on one. */
 function pendingPlan(userId: string, runId: string): PlanRow | null {
   if (!runId) return null;
@@ -2544,7 +2642,12 @@ function runIsLive(userId: string, runId: string): boolean {
   return state === "running" || state === "waiting";
 }
 
-function openRun(userId: string, runId: string, taskId: string): void {
+function openRun(
+  userId: string,
+  runId: string,
+  taskId: string,
+  kind: string,
+): void {
   // A run without a row still runs; it just cannot be cancelled or counted.
   // Losing the answer to keep the bookkeeping would be the wrong way round,
   // so a failure here is logged and not raised.
@@ -2558,6 +2661,7 @@ function openRun(userId: string, runId: string, taskId: string): void {
         // `run_js` could already do — so this is not a new restriction on
         // anything, it is the floor the approval raises.
         run_mode: "plan",
+        run_kind: kind,
         task_id: taskId,
         steps: 0,
         created_ms: Date.now(),
@@ -2789,7 +2893,7 @@ function compactRun(
  *
  * Written as one row per turn rather than a running total updated in place.
  * Appending cannot lose an earlier turn to a read-modify-write, and the sum
- * of twelve rows is not worth a column — `MAX_STEPS` is the bound on how many
+ * of twelve rows is not worth a column — the step ceiling is the bound on how many
  * there can be.
  *
  * Sent as a delta rather than a total because the page is already keeping one:
@@ -2852,7 +2956,7 @@ function runSpend(userId: string, runId: string) {
       queryRows(
         "turn_usage",
         { user_id: userId, run_id: runId },
-        MAX_STEPS + 1,
+        MOST_STEPS + 1,
         "id",
         "asc",
       ),
@@ -3072,7 +3176,14 @@ function readAssetText(name: string): string | null {
  * cached prefix, which is what a breakpoint at the end of the conversation
  * needs it to be.
  */
-function toolsFor(skills: Skill[], mode: RunMode): ToolSpec[] {
+function toolsFor(skills: Skill[], mode: RunMode, kind: RunKind): ToolSpec[] {
+  // A run that builds a script has its own short list, bound to the scripts
+  // it creates: no discovering the engine's tools, no skills to write, no
+  // notes. The less there is to choose between, the less a small model
+  // chooses wrongly.
+  if (kind === "author") {
+    return [TOOLS[0]].concat(AUTHOR_TOOLS as unknown as ToolSpec[]);
+  }
   let tools = TOOLS;
   // A property of the grant rather than of the turn, so it is as stable
   // across a run as the rest of the cached prefix — a person does not
@@ -3119,7 +3230,17 @@ function hasEngineAuthority(): boolean {
   }
 }
 
-function systemPromptFor(skills: Skill[], mode: RunMode): string {
+function systemPromptFor(
+  skills: Skill[],
+  mode: RunMode,
+  kind: RunKind,
+): string {
+  if (kind === "author") {
+    return (
+      AUTHOR_PROMPT +
+      "\nAnswer by calling write_response; that is how the person sees what you say."
+    );
+  }
   const engine = hasEngineAuthority() ? " " + ENGINE_PROMPT : "";
   const preamble =
     mode === "act"
@@ -3148,7 +3269,7 @@ function systemPromptFor(skills: Skill[], mode: RunMode): string {
     "asks, because a skill changes this agent for everyone.";
 
   if (skills.length === 0) {
-    return preamble + "\n\n" + authoring;
+    return preamble + engine + "\n\n" + authoring;
   }
 
   const lines = [
@@ -3318,6 +3439,9 @@ function runTool(
     }
 
     default:
+      if (isAuthorTool(name) && kindOf(userId, runId) === "author") {
+        return authorTool(userId, runId, name, input);
+      }
       return { content: `No tool called "${name}".`, isError: true };
   }
 }
@@ -3608,6 +3732,538 @@ function engineCallTool(
   }
 }
 
+// ============================================================================
+// Building a script
+// ============================================================================
+
+type EngineAnswer =
+  | { ok: true; value: Record<string, any> }
+  | { ok: false; error: string };
+
+/**
+ * One engine operation, with refusals told apart from answers.
+ *
+ * Operations report a refusal as an object carrying `error` rather than by
+ * throwing, so both forms are folded into one: callers read `ok`.
+ */
+function engineAnswer(
+  name: string,
+  args: Record<string, unknown>,
+): EngineAnswer {
+  if (typeof engine === "undefined") {
+    return {
+      ok: false,
+      error:
+        "This run cannot reach the engine. Ask the person to grant 'author'.",
+    };
+  }
+  try {
+    const raw = engine.call(name, args);
+    const value = (typeof raw === "string" ? JSON.parse(raw) : raw) as Record<
+      string,
+      any
+    >;
+    if (value && typeof value === "object" && value.error !== undefined) {
+      const detail =
+        typeof value.error === "string"
+          ? value.error
+          : String(value.error?.message ?? JSON.stringify(value.error));
+      return {
+        ok: false,
+        error: detail + (value.message ? ` ${value.message}` : ""),
+      };
+    }
+    return { ok: true, value: value ?? {} };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+function failed(text: string): { content: string; isError: boolean } {
+  return { content: text, isError: true };
+}
+
+function done(text: string): { content: string; isError: boolean } {
+  return { content: text, isError: false };
+}
+
+/** The scripts this run created, which are the only ones its tools may touch. */
+function createdScripts(userId: string, runId: string): string[] {
+  const rows = queryRows(
+    "run_scripts",
+    { user_id: userId, run_id: runId },
+    10,
+    "id",
+    "asc",
+  ) as { script?: string }[];
+  return rows.map((row) => String(row.script ?? "")).filter(Boolean);
+}
+
+/** Why a call may not touch `script`, or `null` when it may. */
+function notYours(
+  userId: string,
+  runId: string,
+  script: string,
+): string | null {
+  if (!script) return "A script name is required.";
+  const own = createdScripts(userId, runId);
+  if (own.indexOf(script) !== -1) return null;
+  return own.length === 0
+    ? "No script has been created in this run yet. Call create_script first."
+    : `"${script}" is not a script this run created. You may only work on ${own
+        .map((name) => `"${name}"`)
+        .join(", ")}.`;
+}
+
+function guideText(name: string): string {
+  try {
+    return files.read("authoring/" + name + ".md") ?? "";
+  } catch (e) {
+    return "";
+  }
+}
+
+/** What a template file says once the script's own name is in it. */
+function fillTemplate(text: string, name: string): string {
+  return text
+    .replace(/__NAME__/g, name)
+    .replace(/__SNAKE__/g, name.replace(/-/g, "_"));
+}
+
+/** What a write answered about `init()`, in a sentence. */
+function initSentence(init: Record<string, any> | undefined): string {
+  if (!init) return "init() was not run.";
+  if (init.ran === false) {
+    return init.reason === "pinned"
+      ? "init() not run: a placeholder is serving until you deploy, and the check below ran it as a dry run."
+      : `init() not run (${String(init.reason ?? "")}).`;
+  }
+  return init.success === true
+    ? "init() ran."
+    : "init() FAILED: " + clip(String(init.error ?? ""), 400);
+}
+
+function authorTool(
+  userId: string,
+  runId: string,
+  name: string,
+  input: Record<string, unknown>,
+): { content: string; isError: boolean } {
+  if (name === "create_script") return createScriptTool(userId, runId, input);
+
+  const script = String(input.script ?? "").trim();
+  const refusal = notYours(userId, runId, script);
+  if (refusal) return failed(refusal);
+
+  recordActivity(userId, runId, "engine", `${name} ${script}`);
+
+  switch (name) {
+    case "write_files": {
+      const given = Array.isArray(input.files) ? input.files : [];
+      const writes: { name: string; text: string }[] = [];
+      for (const file of given as { path?: unknown; text?: unknown }[]) {
+        const path = String(file?.path ?? "").trim();
+        if (!path || typeof file?.text !== "string") {
+          return failed("Every file needs a 'path' and its 'text'.");
+        }
+        writes.push({ name: path, text: file.text });
+      }
+      const remove = Array.isArray(input.remove)
+        ? (input.remove as unknown[]).map((p) => String(p))
+        : [];
+      if (writes.length === 0 && remove.length === 0) {
+        return failed("Nothing to write: 'files' is empty.");
+      }
+      const answer = engineAnswer("write_files", {
+        script: script,
+        files: writes,
+        remove: remove,
+      });
+      if (!answer.ok) return failed(`write_files: ${answer.error}`);
+      return reportWrite(userId, runId, script, answer.value, writes.length);
+    }
+
+    case "edit_file": {
+      const path = String(input.path ?? "").trim();
+      const answer = engineAnswer("edit_file", {
+        script: script,
+        path: path,
+        edits: [
+          {
+            old_string: String(input.old_string ?? ""),
+            new_string: String(input.new_string ?? ""),
+            replace_all: input.replace_all === true,
+          },
+        ],
+      });
+      if (!answer.ok) return failed(`edit_file: ${answer.error}`);
+      return reportWrite(userId, runId, script, answer.value, 1);
+    }
+
+    case "read_file": {
+      const path = String(input.path ?? "").trim();
+      if (!path) {
+        const listed = engineAnswer("list_files", { script: script });
+        if (!listed.ok) return failed(`list_files: ${listed.error}`);
+        const names = ((listed.value.files ?? []) as { uri?: string }[]).map(
+          (f) => String(f.uri ?? ""),
+        );
+        return done(names.join("\n"));
+      }
+      const answer = engineAnswer("read_file", { script: script, path: path });
+      if (!answer.ok) return failed(`read_file: ${answer.error}`);
+      const text =
+        typeof answer.value.content === "string"
+          ? answer.value.content
+          : "(not a text file)";
+      return done(cut(text, 6000));
+    }
+
+    case "check_script": {
+      const answer = engineAnswer("check_script", { script: script });
+      if (!answer.ok) return failed(`check_script: ${answer.error}`);
+      const stop = trackVerdict(userId, runId, script, "check", answer.value);
+      return stop ?? done(summariseCheck(answer.value));
+    }
+
+    case "run_tests": {
+      const args: Record<string, unknown> = { script: script };
+      const filter = String(input.filter ?? "").trim();
+      if (filter) args.filter = filter;
+      const answer = engineAnswer("run_tests", args);
+      if (!answer.ok) return failed(`run_tests: ${answer.error}`);
+      const stop = trackVerdict(userId, runId, script, "tests", answer.value);
+      return stop ?? done(summariseTests(answer.value));
+    }
+
+    case "read_logs": {
+      const args: Record<string, unknown> = { script: script, limit: 20 };
+      const level = String(input.level ?? "").trim();
+      if (level) args.level = level;
+      const answer = engineAnswer("read_logs", args);
+      if (!answer.ok) return failed(`read_logs: ${answer.error}`);
+      const rows = (answer.value.logs ?? answer.value.entries ?? []) as {
+        level?: string;
+        message?: string;
+      }[];
+      if (!Array.isArray(rows) || rows.length === 0)
+        return done("No log lines.");
+      return done(
+        rows
+          .map((r) => `${r.level ?? ""} ${clip(String(r.message ?? ""), 300)}`)
+          .join("\n"),
+      );
+    }
+
+    case "request_deploy":
+      return requestDeployTool(
+        userId,
+        runId,
+        script,
+        String(input.summary ?? ""),
+      );
+
+    default:
+      return failed(`No tool called "${name}".`);
+  }
+}
+
+/**
+ * Start a script from the shape's template, and pin the placeholder.
+ *
+ * The first thing written is a stub that registers nothing, and it is pinned at
+ * once. Everything after that advances head while the stub keeps serving, so
+ * a half-written script is never what visitors reach; the person's approval of
+ * a deploy is what moves the pin.
+ */
+function createScriptTool(
+  userId: string,
+  runId: string,
+  input: Record<string, unknown>,
+): { content: string; isError: boolean } {
+  const name = String(input.name ?? "")
+    .trim()
+    .toLowerCase();
+  const shape = String(input.shape ?? "").trim();
+  const problem = scriptNameProblem(name);
+  if (problem) return failed(problem);
+  if (!isShape(shape)) {
+    return failed(`shape must be one of: site, tool, agent. Got "${shape}".`);
+  }
+  if (createdScripts(userId, runId).length > 0) {
+    return failed(
+      "This run already created its script. Keep working on it with write_files.",
+    );
+  }
+  if (engineAnswer("list_files", { script: name }).ok) {
+    return failed(
+      `A script called "${name}" already exists. Choose another name.`,
+    );
+  }
+
+  const template = templateScriptFor(shape);
+  const listed = engineAnswer("list_files", { script: template });
+  if (!listed.ok) {
+    return failed(
+      `The ${shape} template is not installed on this engine (a script called "${template}"). ` +
+        'Tell the person to pull it: pull_from_git lpajunen/aiwebengine-template with prefix "template".',
+    );
+  }
+  const starter = ((listed.value.files ?? []) as { uri?: string }[])
+    .map((f) => String(f.uri ?? ""))
+    .filter((path) => path.indexOf("starter/") === 0);
+  if (starter.length === 0) {
+    return failed(`The ${shape} template has no starter files.`);
+  }
+
+  const copies: { name: string; text: string }[] = [];
+  for (const path of starter) {
+    const file = engineAnswer("read_file", { script: template, path: path });
+    if (!file.ok || typeof file.value.content !== "string") continue;
+    copies.push({
+      name: path.slice("starter/".length),
+      text: fillTemplate(file.value.content, name),
+    });
+  }
+
+  // The stub first, and pinned: see above.
+  const stub = engineAnswer("write_files", {
+    script: name,
+    files: [{ name: "main.ts", text: STUB_SOURCE }],
+    check: false,
+  });
+  if (!stub.ok) return failed(`Could not create the script: ${stub.error}`);
+  const pin = engineAnswer("deploy_script", { script: name, revision: "head" });
+  if (!pin.ok) return failed(`Could not hold the placeholder: ${pin.error}`);
+
+  writeRow(
+    () =>
+      database.insert("run_scripts", {
+        user_id: userId,
+        run_id: runId,
+        script: name,
+        created_ms: Date.now(),
+      }),
+    "recording a created script",
+  );
+  recordActivity(
+    userId,
+    runId,
+    "tool",
+    `Created the script "${name}" (${shape}).`,
+  );
+
+  const written = engineAnswer("write_files", { script: name, files: copies });
+  if (!written.ok)
+    return failed(`Could not copy the starter: ${written.error}`);
+
+  return done(
+    [
+      `Created "${name}" from the ${shape} starter. A placeholder is serving; nothing you write is served until you call request_deploy and the person approves.`,
+      `Starter files: ${copies.map((c) => c.name).join(", ")}.`,
+      initSentence(written.value.init),
+      summariseCheck(written.value.check),
+      "",
+      "Read the primer and the guide, then change the starter to do what was asked.",
+      "",
+      guideText("primer"),
+      "",
+      guideText("build-" + shape),
+    ].join("\n"),
+  );
+}
+
+/** The answer to a write: what changed, what `init()` did, and the check. */
+function reportWrite(
+  userId: string,
+  runId: string,
+  script: string,
+  value: Record<string, any>,
+  count: number,
+): { content: string; isError: boolean } {
+  const stop = trackVerdict(userId, runId, script, "check", value.check);
+  if (stop) return stop;
+  return done(
+    [
+      `Wrote ${count} file(s)` +
+        (value.revision !== undefined && value.revision !== null
+          ? ` (revision ${value.revision}).`
+          : "."),
+      initSentence(value.init),
+      value.check ? summariseCheck(value.check) : "check: not run",
+    ].join("\n"),
+  );
+}
+
+/**
+ * Count a verdict, and stop the run if the same failure keeps coming back.
+ *
+ * Returns a tool result only when the run has been stopped, which the caller
+ * hands to the model in place of the verdict.
+ */
+function trackVerdict(
+  userId: string,
+  runId: string,
+  script: string,
+  kind: string,
+  report: unknown,
+): { content: string; isError: boolean } | null {
+  if (report === undefined || report === null) return null;
+  const row = runRow(userId, runId);
+  if (!row) return null;
+  let counts: Record<string, { sig: string; count: number } | null> = {};
+  try {
+    counts = JSON.parse(String(row.fail_sig ?? "") || "{}");
+  } catch (e) {
+    counts = {};
+  }
+  const next = nextFailureCount(
+    counts[kind] ?? null,
+    failureSignature(kind, report),
+  );
+  counts[kind] = next;
+  writeRow(
+    () =>
+      database.update("runs", Number(row.id), {
+        fail_sig: JSON.stringify(counts),
+        updated_ms: Date.now(),
+      }),
+    "counting a failure",
+  );
+  if (!shouldEscalate(next)) return null;
+
+  const verdict =
+    kind === "check" ? summariseCheck(report) : summariseTests(report);
+  escalate(
+    userId,
+    runId,
+    script,
+    `The same ${kind === "check" ? "check" : "test"} failure came back ${ESCALATE_AT} times, so I am stopping rather than trying again.`,
+    verdict,
+  );
+  finishRun(userId, runId, "handoff");
+  return failed(
+    "Stopped: the same failure came back three times. A note for a developer has been written; do nothing more.",
+  );
+}
+
+/** Write the handoff note where the person will read it. */
+function escalate(
+  userId: string,
+  runId: string,
+  script: string,
+  reason: string,
+  lastVerdict: string,
+): void {
+  const prompts = queryRows(
+    "activities",
+    { user_id: userId, run_id: runId, kind: "prompt" },
+    1,
+    "id",
+    "asc",
+  ) as { message?: string }[];
+  const steps = queryRows(
+    "activities",
+    { user_id: userId, run_id: runId, kind: "engine" },
+    40,
+    "id",
+    "desc",
+  ) as { message?: string }[];
+  let revision = "";
+  if (script) {
+    const revisions = engineAnswer("list_revisions", {
+      script: script,
+      limit: 1,
+    });
+    if (revisions.ok) {
+      const head = (revisions.value.revisions ?? [])[0];
+      if (head) revision = String(head.revision ?? "");
+    }
+  }
+  const note = handoffNote({
+    request: String(prompts[0]?.message ?? ""),
+    script: script || createdScripts(userId, runId)[0] || "",
+    revision: revision,
+    lastVerdict: lastVerdict,
+    tried: steps
+      .slice(0, 8)
+      .reverse()
+      .map((row) => String(row.message ?? "")),
+    reason: reason,
+  });
+  recordActivity(userId, runId, "response", note);
+  notifyChannel(userId, runId, note);
+}
+
+/**
+ * Ask the person to approve serving the script, once it is worth asking.
+ *
+ * The check and the tests run here rather than being trusted from earlier: the
+ * person is shown the verdict the deploy would rest on, and a script that does
+ * not pass is refused before anybody is asked.
+ */
+function requestDeployTool(
+  userId: string,
+  runId: string,
+  script: string,
+  summary: string,
+): { content: string; isError: boolean } {
+  const check = engineAnswer("check_script", { script: script });
+  if (!check.ok) return failed(`check_script: ${check.error}`);
+  const tests = engineAnswer("run_tests", { script: script });
+  if (!tests.ok) return failed(`run_tests: ${tests.error}`);
+  const checkText = summariseCheck(check.value);
+  const testsText = summariseTests(tests.value);
+  if (check.value.ok !== true || !testsPassed(tests.value)) {
+    trackVerdict(userId, runId, script, "check", check.value);
+    return failed(
+      "Not ready to deploy. Fix this first:\n" + checkText + "\n" + testsText,
+    );
+  }
+  return requestApprovalTool(
+    userId,
+    runId,
+    `Deploy "${script}" — this makes it live.\n\n${summary.trim()}\n\n${checkText}\n${testsText}`,
+    "deploy_script",
+    { script: script },
+  );
+}
+
+/**
+ * Move the pin to head, which is the whole of a deploy.
+ *
+ * Runs at the approval, in the person's own request, so the script is served
+ * only when they said so. The script is looked up again against what this run
+ * created: an approval row carries a name, and a name is not authority.
+ */
+function performDeploy(
+  userId: string,
+  runId: string,
+  plan: PlanRow,
+): string | null {
+  let script = "";
+  try {
+    script = String(
+      (JSON.parse(String(plan.payload ?? "")) as { script?: string }).script ??
+        "",
+    );
+  } catch (e) {
+    return null;
+  }
+  const refusal = notYours(userId, runId, script);
+  if (refusal) return refusal;
+  const answer = engineAnswer("deploy_script", {
+    script: script,
+    revision: "head",
+  });
+  if (!answer.ok) {
+    recordActivity(userId, runId, "error", `Could not deploy: ${answer.error}`);
+    return `it could not be deployed: ${answer.error}`;
+  }
+  recordActivity(userId, runId, "tool", `Deployed "${script}".`);
+  return `"${script}" is deployed and now serving`;
+}
+
 function runJsTool(
   userId: string,
   runId: string,
@@ -3824,6 +4480,10 @@ function performApproved(
 
   if (action === "write_skill") {
     return performSkillWrite(userId, runId, plan);
+  }
+
+  if (action === "deploy_script") {
+    return performDeploy(userId, runId, plan);
   }
 
   if (action !== "remember") {
@@ -4471,7 +5131,7 @@ function startTelegramRun(context: HandlerContext): void {
       payload: { runId: runId },
       maxAttempts: 1,
     });
-    openRun(userId, runId, next.taskId);
+    openRun(userId, runId, next.taskId, "chat");
     // Written after opening rather than as part of it, so `openRun` stays the
     // one shape every run starts in and the page path is untouched.
     const row = runRow(userId, runId);
