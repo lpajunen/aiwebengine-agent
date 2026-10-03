@@ -3966,6 +3966,12 @@ function runAuthorTool(
               editArgs(loose.oldString, loose.newString),
             );
             note = "(old_string matched ignoring whitespace.)\n";
+            recordActivity(
+              userId,
+              runId,
+              "engine",
+              `edit_file recovered: old_string matched ignoring whitespace in ${path}`,
+            );
           } else {
             const near = nearestRegion(text, oldString);
             return failed(
