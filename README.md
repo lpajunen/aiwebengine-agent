@@ -24,16 +24,17 @@ There is no endpoint that advances a run. Each turn queues the next.
 it, because a root script cannot `export` and a test module reaches its
 subject by importing it — so anything under test had to move out:
 
-| Module            | What it holds                                           |
-| ----------------- | ------------------------------------------------------- |
-| `protocol.ts`     | reading what the model sent, half-written JSON included |
-| `capabilities.ts` | what model-written code may do, and the pair it may not |
-| `budget.ts`       | what a run has spent, and when it has had enough        |
-| `skills.ts`       | the SKILL.md format, written and read                   |
-| `plans.ts`        | decoding the call an approval carries                   |
-| `engine.ts`       | which management tools only read, and their arguments   |
+| Module            | What it holds                                             |
+| ----------------- | --------------------------------------------------------- |
+| `protocol.ts`     | reading what the model sent, half-written JSON included   |
+| `capabilities.ts` | what model-written code may do, and the pair it may not   |
+| `budget.ts`       | what a run has spent, and when it has had enough          |
+| `skills.ts`       | the SKILL.md format, written and read                     |
+| `plans.ts`        | decoding the call an approval carries                     |
+| `engine.ts`       | which management tools only read, and their arguments     |
+| `authoring.ts`    | what a script-building run is given, and how it is judged |
 
-Their tests are `agent/*.test.ts` — 88 cases — run with the `run_tests` tool
+Their tests are `agent/*.test.ts` — 110 cases — run with the `run_tests` tool
 or `POST /engine/run_tests` with `{"script": "<this script>"}`.
 
 The model gets five tools: `write_response` (the only way the person sees
@@ -63,6 +64,41 @@ Moving up a tier is more than the `MODEL` string — `output_config.effort`, the
 the comment above the constant says which go back. So do `PRICES`, and so does
 the minimum cacheable prefix, which is the one that changes nothing visible
 until a bill arrives.
+
+## Building scripts
+
+A run started with `kind: "author"` (the **Build a script** box on the page)
+builds a script instead of chatting. It needs the `author` grant, and it has its
+own tools, budgets and prompt; chat runs are unchanged.
+
+| Tool                                                  | What it does                                                                                                                                                                         |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `create_script`                                       | Copies the starter for a shape (`site`, `tool` or `agent`) from `template-<shape>`, writes a placeholder first and pins it, and answers with the primer and the guide for that shape |
+| `write_files`, `edit_file`                            | Change the script; each answers with the engine's `check`                                                                                                                            |
+| `read_file`, `check_script`, `run_tests`, `read_logs` | Look and verify                                                                                                                                                                      |
+| `request_deploy`                                      | Runs the check and the tests, refuses if either fails, and asks the person; approving moves the pin to head                                                                          |
+
+What keeps a small model on the rails:
+
+- **Drafts are pins.** The placeholder keeps serving while the draft advances,
+  so nothing half-written is ever what visitors reach.
+- **Only its own scripts.** Every tool is bound to what `create_script` made in
+  this run (`run_scripts`); there is no argument that reaches another script.
+- **A turn that talks and calls nothing is nudged** to call a tool, up to three
+  times, rather than ending the run having only announced the work.
+- **The same failure three times stops the run** and writes a handoff note — the
+  request, the script and revision, the last verdict and what was tried — for a
+  person to give a developer. Running out of turns writes one too.
+- **Budgets:** 8,000 output tokens and 25 turns, against 1,024 and 12 for chat.
+  Set the job timeout for this script to 120 s:
+  `set_script_limits script=agent jobTimeoutMs=120000`.
+
+The starters live in
+[`aiwebengine-template`](https://github.com/lpajunen/aiwebengine-template) and
+are pulled with `pull_from_git(repo: "lpajunen/aiwebengine-template", prefix:
+"template")`. The guides are `agent/authoring/*.md`; `primer.md` is a copy of
+`assets/script-primer.md` in `aiwebengine` and is refreshed from it when that
+changes. `eval/` holds the tasks that measure all of this.
 
 ## The one structural decision
 

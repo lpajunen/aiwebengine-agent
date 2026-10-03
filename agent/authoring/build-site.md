@@ -14,7 +14,7 @@ a `renderPage` helper in `lib/page.ts`. Keep the routes under `/<name>`.
    text, read, changed and written back in one handler.
 4. Put the logic that decides things in `lib/*.ts` and test it in
    `lib/*.test.ts`. `main.ts` parses the request, calls `lib/`, and answers.
-5. Write all the files in one `write_files` call, read the check it returns,
+5. Remove starter files you no longer use. Write all the files in one `write_files` call, read the check it returns,
    fix every error, then `run_tests`, then `request_deploy`.
 
 ## Pitfalls

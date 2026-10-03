@@ -13,7 +13,9 @@ handler. The starter has `main.ts` (registration and a thin handler) and
 3. The handler in `main.ts` reads `context.args`, calls the function, and
    returns plain data (an object). It does not build an HTTP response.
 4. Throw an `Error` for input the tool cannot accept; the caller sees it.
-5. Write tests in `lib/<something>.test.ts` for the normal case, an edge and
+5. Delete the starter's placeholder `lib/example.ts` and `lib/example.test.ts`
+   (use `remove` in `write_files`) once your own files replace them.
+6. Write tests in `lib/<something>.test.ts` for the normal case, an edge and
    the error. Write everything in one `write_files` call, read the check,
    fix errors, `run_tests`, then `request_deploy`.
 
