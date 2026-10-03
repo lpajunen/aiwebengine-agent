@@ -8,6 +8,7 @@ import {
   failureSignature,
   handoffNote,
   isAuthorTool,
+  leftoverPlaceholders,
   maxStepsFor,
   maxTokensFor,
   nextFailureCount,
@@ -236,5 +237,16 @@ describe("the tools", () => {
   });
   test("the listing stays small", () => {
     expect(JSON.stringify(AUTHOR_TOOLS).length < 6000).toBe(true);
+  });
+});
+
+describe("leftoverPlaceholders", () => {
+  test("names the starter files that are still there", () => {
+    expect(
+      leftoverPlaceholders(["main.ts", "lib/example.ts", "lib/length.ts"]),
+    ).toEqual(["lib/example.ts"]);
+  });
+  test("a script with its own files has none", () => {
+    expect(leftoverPlaceholders(["main.ts", "lib/length.ts"])).toEqual([]);
   });
 });

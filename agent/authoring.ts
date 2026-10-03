@@ -74,6 +74,23 @@ export function scriptNameProblem(name: string): string | null {
   return null;
 }
 
+/** Starter files that exist to be replaced, whatever shape the script is. */
+export const PLACEHOLDER_PATHS = ["lib/example.ts", "lib/example.test.ts"];
+
+/** The line the agent starter's instructions file opens with. */
+export const INSTRUCTIONS_PLACEHOLDER = "Replace this with the instructions";
+
+/**
+ * Which of a script's files are still the starter's placeholders.
+ *
+ * A small model given a file called `lib/example.ts` will fill it in rather
+ * than create the `lib/length.ts` the request names, so the answer is for the
+ * harness to check, not for the model to remember.
+ */
+export function leftoverPlaceholders(paths: string[]): string[] {
+  return paths.filter((path) => PLACEHOLDER_PATHS.indexOf(path) !== -1);
+}
+
 // ============================================================================
 // What the engine said, in the size a small model can use
 // ============================================================================
@@ -505,6 +522,7 @@ export const AUTHOR_PROMPT = [
   "3. Every write answers with the engine's check. Fix every error it lists before anything else: it names the file and the fix. check_script and run_tests check again.",
   "4. When the check and the tests pass, call request_deploy once. Nothing is served until the person approves it.",
   "5. Then call write_response to say what you built and where.",
+  "Use exactly the file names, function names, routes and tool names the request gives. The starter's names (lib/example.ts and so on) are placeholders: put your code in the files the request names and delete the placeholders.",
   "A turn that says what you are about to do without calling a tool does nothing: call the tool in the same turn.",
   "Never say you created, wrote or deployed something that a tool has not confirmed.",
   "If the same failure comes back three times, the run stops and writes a note for a developer. That is the intended outcome, not a failure to hide.",

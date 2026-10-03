@@ -36,6 +36,7 @@ import { onlyReads, parseArgs } from "./engine.ts";
 import {
   AUTHOR_PROMPT,
   AUTHOR_TOOLS,
+  INSTRUCTIONS_PLACEHOLDER,
   ESCALATE_AT,
   MAX_NUDGES,
   MOST_STEPS,
@@ -46,6 +47,7 @@ import {
   handoffNote,
   isAuthorTool,
   isShape,
+  leftoverPlaceholders,
   maxStepsFor,
   maxTokensFor,
   nextFailureCount,
@@ -4067,7 +4069,7 @@ function createScriptTool(
       initSentence(written.value.init),
       summariseCheck(written.value.check),
       "",
-      "Read the primer and the guide, then change the starter to do what was asked.",
+      "Read the primer and the guide, then change the starter to do what was asked. Use the exact file, function, route and tool names the request gives, and delete the placeholder files.",
       "",
       guideText("primer"),
       "",
@@ -4211,6 +4213,35 @@ function requestDeployTool(
   script: string,
   summary: string,
 ): { content: string; isError: boolean } {
+  // Placeholders first: a script whose logic sits in the starter's
+  // `lib/example.ts` passes everything else and still is not what was asked.
+  const listed = engineAnswer("list_files", { script: script });
+  if (listed.ok) {
+    const paths = ((listed.value.files ?? []) as { uri?: string }[]).map((f) =>
+      String(f.uri ?? ""),
+    );
+    const left = leftoverPlaceholders(paths);
+    const instructions = engineAnswer("read_file", {
+      script: script,
+      path: "skills/instructions.md",
+    });
+    if (
+      instructions.ok &&
+      String(instructions.value.content ?? "").indexOf(
+        INSTRUCTIONS_PLACEHOLDER,
+      ) !== -1
+    ) {
+      left.push("skills/instructions.md (still the starter's text)");
+    }
+    if (left.length > 0) {
+      return failed(
+        "Not ready to deploy: the starter's placeholders are still here: " +
+          left.join(", ") +
+          ". Put your code in the files the request names (use write_files with " +
+          "those paths), and remove the placeholders with 'remove'.",
+      );
+    }
+  }
   const check = engineAnswer("check_script", { script: script });
   if (!check.ok) return failed(`check_script: ${check.error}`);
   const tests = engineAnswer("run_tests", { script: script });
