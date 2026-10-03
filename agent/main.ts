@@ -148,10 +148,11 @@ const SECRET_NAME = "ANTHROPIC_API_KEY";
  * `fetch` is still synchronous and its timeout still clamped to what is left
  * of the budget, so generation remains the part that scales with this number.
  */
-const MAX_TOKENS = 1024;
+const MAX_TOKENS = 8000;
 
 /**
- * Assistant turns one run may take before the script stops it.
+ * Assistant turns one run may take before the script stops it (25: a run that
+ * writes, checks and fixes a script needs more than a chat answer does).
  *
  * This is now the only thing bounding the length of a run: compaction keeps
  * the conversation from growing without limit, so a run ends because it has
@@ -163,7 +164,7 @@ const MAX_TOKENS = 1024;
  * working when compaction started throwing the history away: a compacted run
  * has no assistant messages left to count.
  */
-const MAX_STEPS = 12;
+const MAX_STEPS = 25;
 
 /**
  * How long one model call may take.
