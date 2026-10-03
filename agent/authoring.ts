@@ -596,6 +596,7 @@ export const AUTHOR_PROMPT = [
   "4. When the check and the tests pass, call request_deploy once. Nothing is served until the person approves it.",
   "5. Then call write_response to say what you built and where.",
   "Use exactly the file names, function names, routes and tool names the request gives. The starter's names (lib/example.ts and so on) are placeholders: put your code in the files the request names and delete the placeholders.",
+  "Test every route or tool handler by calling it from a *.test.ts with a request context (makeContext in lib/testing.ts) and asserting on its status and body: a handler no test calls is where the wrong status gets through.",
   "A turn that says what you are about to do without calling a tool does nothing: call the tool in the same turn.",
   "Never say you created, wrote or deployed something that a tool has not confirmed.",
   "If the same failure comes back three times, the run stops and writes a note for a developer. That is the intended outcome, not a failure to hide.",
