@@ -1,0 +1,14 @@
+{
+  "id": "tool-03",
+  "shape": "tool",
+  "title": "A public API wrapper tool",
+  "script": "eval-tool-03",
+  "request": "Wrap the public API at https://api.open-notify.org/iss-now.json as an MCP tool\nnamed get_iss_position that takes no arguments and answers {\"latitude\": number,\n\"longitude\": number, \"timestamp\": number}. The API answers\n{\"message\":\"success\",\"timestamp\":1700000000,\"iss_position\":{\"latitude\":\"12.5\",\"longitude\":\"-45.1\"}}\nwith the coordinates as strings. Put the parsing in lib/iss.ts as an exported\nfunction parseIssResponse(body: unknown) that returns the tool's answer and\nthrows an Error when the body is not a \"success\" response, and write tests for it.",
+  "registrations": [
+    {
+      "kind": "mcpTool",
+      "name": "get_iss_position"
+    }
+  ],
+  "minTests": 1
+}

@@ -1,0 +1,14 @@
+{
+  "id": "tool-02",
+  "shape": "tool",
+  "title": "A text statistics tool",
+  "script": "eval-tool-02",
+  "request": "Add an MCP tool named text_stats that takes text (string) and answers\n{\"words\": n, \"characters\": n, \"sentences\": n, \"longestWord\": string}. Words are\nruns of letters, digits and apostrophes; sentences end at \".\", \"!\" or \"?\";\ncharacters counts every character of the input. Put the logic in lib/stats.ts as\nan exported function textStats(text: string) returning that object, and write\ntests for it.",
+  "registrations": [
+    {
+      "kind": "mcpTool",
+      "name": "text_stats"
+    }
+  ],
+  "minTests": 1
+}

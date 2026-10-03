@@ -1,0 +1,21 @@
+{
+  "id": "site-01",
+  "shape": "site",
+  "title": "A two-page club site",
+  "script": "eval-site-01",
+  "request": "Build a small web site for the Garden Club. The page at /eval-site-01 is HTML with\nthe heading \"Welcome to the Garden Club\" and a link to /eval-site-01/about. The\npage at /eval-site-01/about is HTML saying the club was \"Founded in 1987\" and\nlinks back to /eval-site-01.",
+  "probes": [
+    {
+      "method": "GET",
+      "path": "/eval-site-01",
+      "status": 200,
+      "bodyIncludes": ["Welcome to the Garden Club", "/eval-site-01/about"]
+    },
+    {
+      "method": "GET",
+      "path": "/eval-site-01/about",
+      "status": 200,
+      "bodyIncludes": ["Founded in 1987", "/eval-site-01"]
+    }
+  ]
+}

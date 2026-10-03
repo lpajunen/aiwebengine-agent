@@ -1,0 +1,14 @@
+{
+  "id": "tool-01",
+  "shape": "tool",
+  "title": "A length converter tool",
+  "script": "eval-tool-01",
+  "request": "Add an MCP tool named convert_length that converts a length between \"m\", \"km\",\n\"mi\" and \"ft\". Its arguments are value (number), from and to (units). It answers\n{\"value\": <number>}. An unknown unit is an error. Put the arithmetic in\nlib/length.ts as an exported function convertLength(value: number, from: string,\nto: string): number that throws an Error for an unknown unit, and write tests for it.",
+  "registrations": [
+    {
+      "kind": "mcpTool",
+      "name": "convert_length"
+    }
+  ],
+  "minTests": 1
+}

@@ -1,0 +1,56 @@
+{
+  "id": "site-02",
+  "shape": "site",
+  "title": "A sign-up page",
+  "script": "eval-site-02",
+  "request": "Build a sign-up page for a workshop. GET /eval-site-02 serves an HTML page with a\nform that posts to /eval-site-02/signup. POST /eval-site-02/signup takes a JSON\nbody {\"name\": string, \"email\": string}, stores the sign-up, and answers 201 with\n{\"count\": <total sign-ups so far>}. A body missing either field answers 400.\nGET /eval-site-02/signups answers JSON {\"names\": [...]} listing the names in the\norder they signed up, and never includes e-mail addresses.",
+  "probes": [
+    {
+      "method": "GET",
+      "path": "/eval-site-02",
+      "status": 200,
+      "bodyIncludes": ["<form", "/eval-site-02/signup"]
+    },
+    {
+      "method": "POST",
+      "path": "/eval-site-02/signup",
+      "json": {
+        "name": "Ada",
+        "email": "ada@example.com"
+      },
+      "status": 201,
+      "jsonEquals": {
+        "count": 1
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/eval-site-02/signup",
+      "json": {
+        "name": "Grace",
+        "email": "grace@example.com"
+      },
+      "status": 201,
+      "jsonEquals": {
+        "count": 2
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/eval-site-02/signup",
+      "json": {
+        "name": "NoEmail"
+      },
+      "status": 400
+    },
+    {
+      "method": "GET",
+      "path": "/eval-site-02/signups",
+      "status": 200,
+      "jsonEquals": {
+        "names": ["Ada", "Grace"]
+      },
+      "bodyExcludes": ["example.com"]
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "id": "site-03",
+  "shape": "site",
+  "title": "A status board",
+  "script": "eval-site-03",
+  "request": "Build a status board. GET /eval-site-03/api/status answers JSON\n{\"services\": {\"<name>\": \"<state>\", ...}} and starts empty. POST\n/eval-site-03/api/status takes {\"service\": string, \"state\": \"up\"|\"down\"|\"degraded\"},\nrecords it, and answers 200 with the same shape as the GET. Any other state, or\na missing service, answers 400. GET /eval-site-03 serves an HTML page titled\n\"Status board\" that lists the services.",
+  "probes": [
+    {
+      "method": "GET",
+      "path": "/eval-site-03/api/status",
+      "status": 200,
+      "jsonEquals": {
+        "services": {}
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/eval-site-03/api/status",
+      "json": {
+        "service": "web",
+        "state": "up"
+      },
+      "status": 200,
+      "jsonEquals": {
+        "services": {
+          "web": "up"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/eval-site-03/api/status",
+      "json": {
+        "service": "db",
+        "state": "degraded"
+      },
+      "status": 200,
+      "jsonEquals": {
+        "services": {
+          "web": "up",
+          "db": "degraded"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/eval-site-03/api/status",
+      "json": {
+        "service": "web",
+        "state": "sleeping"
+      },
+      "status": 400
+    },
+    {
+      "method": "GET",
+      "path": "/eval-site-03",
+      "status": 200,
+      "bodyIncludes": ["Status board"]
+    }
+  ]
+}

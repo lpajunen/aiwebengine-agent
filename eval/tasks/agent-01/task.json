@@ -1,0 +1,29 @@
+{
+  "id": "agent-01",
+  "shape": "agent",
+  "title": "A FAQ bot over one document",
+  "script": "eval-agent-01",
+  "request": "Build a small FAQ agent. Keep the FAQ in skills/faq.md with these three entries\n(use exactly these headings): \"Refunds\" - refunds are possible within 30 days of\npurchase; \"Shipping\" - orders ship within 2 business days; \"Support\" - support\nanswers e-mail within one working day. POST /eval-agent-01/ask takes\n{\"question\": string} and answers {\"answer\": string} by sending the question and\nthe contents of skills/faq.md to the Anthropic Messages API once, with the key\ntaken from a secret named ANTHROPIC_API_KEY. A body without a question answers\n400. Put the code that builds the model request in lib/prompt.ts as an exported\nfunction buildRequest(question: string, faq: string) and write tests for it.",
+  "probes": [
+    {
+      "method": "POST",
+      "path": "/eval-agent-01/ask",
+      "json": {},
+      "status": 400
+    }
+  ],
+  "registrations": [
+    {
+      "kind": "route",
+      "name": "/eval-agent-01/ask",
+      "method": "POST"
+    }
+  ],
+  "files": [
+    {
+      "path": "skills/faq.md",
+      "contains": ["Refunds", "Shipping", "Support", "30 days"]
+    }
+  ],
+  "minTests": 1
+}

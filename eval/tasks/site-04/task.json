@@ -1,0 +1,41 @@
+{
+  "id": "site-04",
+  "shape": "site",
+  "title": "A hit counter",
+  "script": "eval-site-04",
+  "request": "Build a hit counter. POST /eval-site-04/hit adds one to a shared counter and\nanswers {\"hits\": <new total>}. GET /eval-site-04/hits answers {\"hits\": <total>}\nwithout changing it. The counter starts at zero and survives a restart.",
+  "probes": [
+    {
+      "method": "GET",
+      "path": "/eval-site-04/hits",
+      "status": 200,
+      "jsonEquals": {
+        "hits": 0
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/eval-site-04/hit",
+      "status": 200,
+      "jsonEquals": {
+        "hits": 1
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/eval-site-04/hit",
+      "status": 200,
+      "jsonEquals": {
+        "hits": 2
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/eval-site-04/hits",
+      "status": 200,
+      "jsonEquals": {
+        "hits": 2
+      }
+    }
+  ]
+}

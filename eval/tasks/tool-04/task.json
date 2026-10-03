@@ -1,0 +1,14 @@
+{
+  "id": "tool-04",
+  "shape": "tool",
+  "title": "A date arithmetic tool",
+  "script": "eval-tool-04",
+  "request": "Add an MCP tool named days_between that takes from and to (ISO dates such as\n\"2024-02-28\") and answers {\"days\": n}, the number of days from the first to the\nsecond, negative when the second is earlier. A string that is not a valid ISO\ndate is an error. Put the logic in lib/dates.ts as an exported function\ndaysBetween(from: string, to: string): number that throws an Error for an invalid\ndate, and write tests for it.",
+  "registrations": [
+    {
+      "kind": "mcpTool",
+      "name": "days_between"
+    }
+  ],
+  "minTests": 1
+}

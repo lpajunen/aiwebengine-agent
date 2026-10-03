@@ -1,0 +1,39 @@
+{
+  "id": "agent-02",
+  "shape": "agent",
+  "title": "A single-purpose release-notes agent",
+  "script": "eval-agent-02",
+  "request": "Build a small agent that turns a list of commit messages into release notes.\nKeep its instructions in skills/release-notes.md (a short style guide of your\nchoosing that mentions \"user-facing\"). POST /eval-agent-02/notes takes\n{\"commits\": string[]} and answers {\"notes\": string} by sending the commits and\nthe instructions to the Anthropic Messages API once, with the key taken from a\nsecret named ANTHROPIC_API_KEY. A body whose commits is empty or not an array\nanswers 400. Put the code that builds the model request in lib/prompt.ts as an\nexported function buildRequest(commits: string[], instructions: string) and\nwrite tests for it.",
+  "probes": [
+    {
+      "method": "POST",
+      "path": "/eval-agent-02/notes",
+      "json": {
+        "commits": []
+      },
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/eval-agent-02/notes",
+      "json": {
+        "commits": "fix"
+      },
+      "status": 400
+    }
+  ],
+  "registrations": [
+    {
+      "kind": "route",
+      "name": "/eval-agent-02/notes",
+      "method": "POST"
+    }
+  ],
+  "files": [
+    {
+      "path": "skills/release-notes.md",
+      "contains": ["user-facing"]
+    }
+  ],
+  "minTests": 1
+}
