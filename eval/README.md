@@ -45,6 +45,7 @@ ENGINE_URL=https://your-engine ENGINE_COOKIE='<session cookie>' node eval/run.mj
 MANAGE_URL=https://manage.your-engine ...
 node eval/run.mjs --only site-02,tool-01   # some tasks
 node eval/run.mjs --keep --timeout 900     # keep the scripts; 15 minutes per task
+node eval/run.mjs --kind chat              # the general agent, for comparison
 ```
 
 `/engine/*` answers only on `server.management_hosts`; without `MANAGE_URL` the

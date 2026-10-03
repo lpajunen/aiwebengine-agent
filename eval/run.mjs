@@ -52,6 +52,9 @@ const only = option("only", "")
   .filter(Boolean);
 const timeoutMs = Number(option("timeout", "600")) * 1000;
 const keep = flag("keep");
+// "author" runs build a script with the authoring tools; "chat" is today's
+// general agent, for comparing against.
+const kind = option("kind", "author");
 
 async function call(path, init = {}) {
   const base = path.startsWith("/engine/") ? manage : engine;
@@ -100,7 +103,7 @@ async function runAgent(task) {
   const prompt = `${task.request}\n\nCall the script "${task.script}".`;
   const started = await call("/agent/prompt", {
     method: "POST",
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({ prompt, kind }),
   });
   if (started.status !== 202) {
     return {
