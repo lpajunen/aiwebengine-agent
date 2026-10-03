@@ -48,6 +48,8 @@ import {
   isAuthorTool,
   isShape,
   leftoverPlaceholders,
+  looseEdit,
+  nearestRegion,
   maxStepsFor,
   maxTokensFor,
   nextFailureCount,
@@ -3932,19 +3934,52 @@ function runAuthorTool(
 
     case "edit_file": {
       const path = String(input.path ?? "").trim();
-      const answer = engineAnswer("edit_file", {
+      const oldString = String(input.old_string ?? "");
+      const newString = String(input.new_string ?? "");
+      const editArgs = (from: string, to: string) => ({
         script: script,
         path: path,
         edits: [
           {
-            old_string: String(input.old_string ?? ""),
-            new_string: String(input.new_string ?? ""),
+            old_string: from,
+            new_string: to,
             replace_all: input.replace_all === true,
           },
         ],
       });
+      let answer = engineAnswer("edit_file", editArgs(oldString, newString));
+      let note = "";
+      if (!answer.ok && answer.error.indexOf("was not found") !== -1) {
+        // The model edits from memory of a file it wrote some turns ago. If
+        // the words are right and only the whitespace has drifted, apply the
+        // edit to the file's own text; otherwise show what is really there.
+        const file = engineAnswer("read_file", { script: script, path: path });
+        const text =
+          file.ok && typeof file.value.content === "string"
+            ? file.value.content
+            : null;
+        if (text !== null) {
+          const loose = looseEdit(text, oldString, newString);
+          if (loose) {
+            answer = engineAnswer(
+              "edit_file",
+              editArgs(loose.oldString, loose.newString),
+            );
+            note = "(old_string matched ignoring whitespace.)\n";
+          } else {
+            const near = nearestRegion(text, oldString);
+            return failed(
+              `edit_file: ${answer.error}.` +
+                (near ? `\nThe closest text in ${path} is:\n${near}` : "") +
+                "\nCopy old_string exactly from the file (read_file shows it), " +
+                "or replace the whole file with write_file.",
+            );
+          }
+        }
+      }
       if (!answer.ok) return failed(`edit_file: ${answer.error}`);
-      return reportWrite(userId, runId, script, answer.value, 1);
+      const written = reportWrite(userId, runId, script, answer.value, 1);
+      return { content: note + written.content, isError: written.isError };
     }
 
     case "read_file": {

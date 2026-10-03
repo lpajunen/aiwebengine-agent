@@ -353,6 +353,90 @@ export function readRemoveArgument(raw: unknown): string[] {
 }
 
 // ============================================================================
+// Editing from memory
+// ============================================================================
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * The text of `file` that `needle` means, when it differs from `needle` only
+ * in whitespace and there is exactly one such place.
+ *
+ * A model edits a file it wrote some turns ago from memory, and gets the
+ * indentation or a line break wrong; the words are right. Returns `null` when
+ * there is no such place or more than one, since guessing which is how an edit
+ * lands in the wrong place.
+ */
+export function findLoose(file: string, needle: string): string | null {
+  const words = needle.split(/\s+/).filter((word) => word.length > 0);
+  if (words.length === 0) return null;
+  const found = file.match(
+    new RegExp(words.map(escapeRegExp).join("\\s+"), "g"),
+  );
+  return found !== null && found.length === 1 ? found[0] : null;
+}
+
+/**
+ * An edit rewritten against the file's own text, or `null` when it cannot be.
+ *
+ * The old string becomes what the file really holds; the new one loses the
+ * whitespace at its ends that the old one lost, so it does not indent twice.
+ */
+export function looseEdit(
+  file: string,
+  oldString: string,
+  newString: string,
+): { oldString: string; newString: string } | null {
+  const exact = findLoose(file, oldString);
+  if (exact === null || exact === oldString) return null;
+  let replacement = newString;
+  if (/^\s/.test(oldString)) replacement = replacement.replace(/^\s+/, "");
+  if (/\s$/.test(oldString)) replacement = replacement.replace(/\s+$/, "");
+  return { oldString: exact, newString: replacement };
+}
+
+/**
+ * The lines of `file` nearest to what `needle` was meant to find, numbered, or
+ * an empty string when nothing is near.
+ *
+ * Nearest is by the words of the needle's first line: it is the part most
+ * likely to be right, and showing the real text beside it is usually all the
+ * model needs to copy it correctly.
+ */
+export function nearestRegion(
+  file: string,
+  needle: string,
+  around: number = 3,
+): string {
+  const first = needle.split("\n").find((line) => line.trim().length > 0) ?? "";
+  const words = first
+    .toLowerCase()
+    .split(/[^a-z0-9_$]+/)
+    .filter((word) => word.length >= 3);
+  if (words.length === 0) return "";
+  const lines = file.split("\n");
+  let best = -1;
+  let bestScore = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const lower = lines[i].toLowerCase();
+    let score = 0;
+    for (const word of words) if (lower.indexOf(word) !== -1) score++;
+    if (score > bestScore) {
+      bestScore = score;
+      best = i;
+    }
+  }
+  if (best < 0) return "";
+  const from = Math.max(0, best - around);
+  const to = Math.min(lines.length, best + around + 1);
+  const shown: string[] = [];
+  for (let i = from; i < to; i++) shown.push(`${i + 1}: ${lines[i]}`);
+  return shown.join("\n");
+}
+
+// ============================================================================
 // Not looping
 // ============================================================================
 
@@ -578,7 +662,7 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
   {
     name: "edit_file",
     description:
-      "Change part of one file by replacing text, without resending the file. Each old_string must appear exactly once. Answers with the engine's check.",
+      "Change part of one file by replacing text. old_string must be copied from the file exactly and appear once; read_file first if you are not sure what it says now, and use write_file to replace a whole file. Answers with the engine's check.",
     input_schema: {
       type: "object",
       properties: {

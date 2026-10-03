@@ -7,7 +7,10 @@ import {
   ESCALATE_AT,
   failureSignature,
   handoffNote,
+  findLoose,
   isAuthorTool,
+  looseEdit,
+  nearestRegion,
   leftoverPlaceholders,
   parseLooseJson,
   repairEscapedSource,
@@ -333,5 +336,39 @@ describe("repairEscapedSource", () => {
   test("files read from an argument are repaired", () => {
     const r = readFilesArgument([{ path: "a.ts", text: "a;\\nb;\\nc;\\nd;" }]);
     expect(r.files[0].text).toBe("a;\nb;\nc;\nd;");
+  });
+});
+
+describe("editing from memory", () => {
+  const file = "function f() {\n    const x = 1;\n    return x;\n}\n";
+  test("whitespace that drifted is found, and the file's own text returned", () => {
+    expect(findLoose(file, "const x = 1;\nreturn x;")).toBe(
+      "const x = 1;\n    return x;",
+    );
+  });
+  test("a needle that is not there, or is there twice, finds nothing", () => {
+    expect(findLoose(file, "const y = 2;")).toBe(null);
+    expect(findLoose("a b\na  b\n", "a b")).toBe(null);
+  });
+  test("special characters in the needle are literal", () => {
+    expect(findLoose("x = a.b(1) + [2]", "a.b(1) + [2]")).toBe("a.b(1) + [2]");
+    expect(findLoose("x = aXb(1)", "a.b(1)")).toBe(null);
+  });
+  test("an edit is rewritten against the file's text without doubling indentation", () => {
+    const edit = looseEdit(file, "  const x = 1;", "  const x = 2;");
+    expect(edit).toEqual({
+      oldString: "const x = 1;",
+      newString: "const x = 2;",
+    });
+  });
+  test("an exact match needs no rewrite", () => {
+    expect(looseEdit(file, "const x = 1;", "const x = 2;")).toBe(null);
+  });
+  test("the nearest lines are shown, numbered", () => {
+    const region = nearestRegion(file, "const total = x + 1;");
+    expect(region).toContain("2:     const x = 1;");
+  });
+  test("nothing near is an empty string", () => {
+    expect(nearestRegion(file, "zzz qqq")).toBe("");
   });
 });
