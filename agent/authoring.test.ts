@@ -9,6 +9,7 @@ import {
   handoffNote,
   isAuthorTool,
   leftoverPlaceholders,
+  parseLooseJson,
   readFilesArgument,
   readRemoveArgument,
   maxStepsFor,
@@ -285,5 +286,30 @@ describe("readRemoveArgument", () => {
     expect(readRemoveArgument("lib/example.ts")).toEqual(["lib/example.ts"]);
     expect(readRemoveArgument('["a","b"]')).toEqual(["a", "b"]);
     expect(readRemoveArgument(undefined)).toEqual([]);
+  });
+});
+
+describe("parseLooseJson", () => {
+  test("valid JSON is untouched", () => {
+    expect(parseLooseJson('[{"a":"b\\nc"}]')).toEqual([{ a: "b\nc" }]);
+  });
+  test("a raw newline inside a string is forgiven", () => {
+    const text = '[{"path":"a.ts","text":"line one\nline two"}]';
+    expect(parseLooseJson(text)).toEqual([
+      { path: "a.ts", text: "line one\nline two" },
+    ]);
+  });
+  test("a raw tab and an escaped quote survive", () => {
+    const text = '{"t":"a\tb \\"q\\""}';
+    expect(parseLooseJson(text)).toEqual({ t: 'a\tb "q"' });
+  });
+  test("anything else still fails", () => {
+    expect(() => parseLooseJson("[{path: a.ts}]")).toThrow();
+  });
+  test("a file list with newlines in its text is read", () => {
+    const sent = '[{"path":"a.ts","text":"x\ny"}]';
+    expect(readFilesArgument(sent).files).toEqual([
+      { name: "a.ts", text: "x\ny" },
+    ]);
   });
 });

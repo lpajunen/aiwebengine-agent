@@ -220,6 +220,48 @@ export function testsPassed(report: unknown): boolean {
 // What a small model sends
 // ============================================================================
 
+/**
+ * Parse JSON a model wrote, forgiving the usual slip: a raw newline or tab
+ * inside a string, which JSON forbids and a model writing code in a string
+ * does all the time. Anything else is left to fail.
+ */
+export function parseLooseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (first) {
+    let out = "";
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          out += c;
+        } else if (c === "\\") {
+          escaped = true;
+          out += c;
+        } else if (c === '"') {
+          inString = false;
+          out += c;
+        } else if (c === "\n") {
+          out += "\\n";
+        } else if (c === "\r") {
+          out += "\\r";
+        } else if (c === "\t") {
+          out += "\\t";
+        } else {
+          out += c;
+        }
+      } else {
+        if (c === '"') inString = true;
+        out += c;
+      }
+    }
+    return JSON.parse(out);
+  }
+}
+
 /** The files of a `write_files` call, read leniently, or why they cannot be. */
 export function readFilesArgument(raw: unknown): {
   files: { name: string; text: string }[];
@@ -229,14 +271,19 @@ export function readFilesArgument(raw: unknown): {
   // A model that has been asked for an array of objects will sometimes send
   // the JSON of one, as a string.
   if (typeof value === "string") {
+    const sent = value;
     try {
-      value = JSON.parse(value);
+      value = parseLooseJson(sent);
     } catch (e) {
       return {
         files: [],
         problem:
-          "'files' must be an array of {path, text} objects, not a string. " +
-          "Send it as an array.",
+          "'files' must be an array of {path, text} objects, not a string, and " +
+          "the string you sent is not valid JSON (" +
+          (e instanceof Error ? e.message : String(e)) +
+          "). It began: " +
+          clip(sent, 80) +
+          " — send an array, or write one file at a time with write_file.",
       };
     }
   }
@@ -495,6 +542,24 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
     },
   },
   {
+    name: "write_file",
+    description:
+      "Write one whole file of the script. Simpler than write_files and the better choice for a long file. " +
+      "It does not check: call check_script once every file is written.",
+    input_schema: {
+      type: "object",
+      properties: {
+        script: SCRIPT_PROPERTY,
+        path: {
+          type: "string",
+          description: "e.g. main.ts, lib/util.ts, skills/faq.md",
+        },
+        text: { type: "string", description: "The file's whole contents" },
+      },
+      required: ["script", "path", "text"],
+    },
+  },
+  {
     name: "edit_file",
     description:
       "Change part of one file by replacing text, without resending the file. Each old_string must appear exactly once. Answers with the engine's check.",
@@ -591,7 +656,7 @@ export function isAuthorTool(name: string): boolean {
 export const AUTHOR_PROMPT = [
   "You build a small script for the person who asked, using only your tools.",
   "1. Call create_script with a name and a shape (site, tool or agent). It copies a starter and shows you the primer and the guide for that shape. Read both before you write.",
-  "2. Change the starter with write_files (several files in one call) or edit_file. Write the code and a *.test.ts file for the logic.",
+  "2. Change the starter with write_file (one whole file), write_files (several) or edit_file. Write the code and a *.test.ts file for the logic.",
   "3. Every write answers with the engine's check. Fix every error it lists before anything else: it names the file and the fix. check_script and run_tests check again.",
   "4. When the check and the tests pass, call request_deploy once. Nothing is served until the person approves it.",
   "5. Then call write_response to say what you built and where.",
@@ -604,7 +669,7 @@ export const AUTHOR_PROMPT = [
 
 /** Said to a turn that spoke and called nothing, in an authoring run. */
 export const NUDGE =
-  "You have not finished and nothing happened that turn. Call the next tool now (create_script, write_files, check_script, run_tests or request_deploy); do not describe it first.";
+  "You have not finished and nothing happened that turn. Call the next tool now (create_script, write_file, check_script, run_tests or request_deploy); do not describe it first.";
 
 /** How many such turns a run may have before it stops. */
 export const MAX_NUDGES = 3;

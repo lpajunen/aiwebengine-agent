@@ -3905,6 +3905,30 @@ function runAuthorTool(
       return reportWrite(userId, runId, script, answer.value, writes.length);
     }
 
+    case "write_file": {
+      const path = String(input.path ?? "").trim();
+      if (!path) return failed("A 'path' is required.");
+      if (typeof input.text !== "string") {
+        return failed("'text' must be the file's whole contents, as a string.");
+      }
+      // Not checked here: the files of a script are written one at a time and
+      // an early one imports a later one, so a check after each would report
+      // faults that are only the work not being finished.
+      const answer = engineAnswer("write_files", {
+        script: script,
+        files: [{ name: path, text: input.text }],
+        check: false,
+      });
+      if (!answer.ok) return failed(`write_file: ${answer.error}`);
+      return done(
+        `Wrote ${path}` +
+          (answer.value.revision !== undefined && answer.value.revision !== null
+            ? ` (revision ${answer.value.revision})`
+            : "") +
+          ". Not checked yet: call check_script when every file is written.",
+      );
+    }
+
     case "edit_file": {
       const path = String(input.path ?? "").trim();
       const answer = engineAnswer("edit_file", {
