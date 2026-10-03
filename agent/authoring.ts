@@ -262,6 +262,22 @@ export function parseLooseJson(text: string): unknown {
   }
 }
 
+/**
+ * Undo a file that was written with its newlines escaped twice.
+ *
+ * A model putting code inside a JSON string sometimes escapes the escapes, so
+ * the file arrives as one line holding literal backslash-n sequences, which
+ * does not compile. Source of any length that has no real newline and several
+ * of those sequences is that, and nothing legitimate: a real one-liner holds
+ * at most a string with one or two. Anything else is returned untouched.
+ */
+export function repairEscapedSource(text: string): string {
+  if (text.indexOf("\n") !== -1) return text;
+  const escapes = text.split("\\n").length - 1;
+  if (escapes < 3) return text;
+  return text.replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\"/g, '"');
+}
+
 /** The files of a `write_files` call, read leniently, or why they cannot be. */
 export function readFilesArgument(raw: unknown): {
   files: { name: string; text: string }[];
@@ -313,7 +329,7 @@ export function readFilesArgument(raw: unknown): {
         problem: `files[${i}] ("${path}") has no 'text': send the file's whole contents as a string.`,
       };
     }
-    files.push({ name: path, text: text });
+    files.push({ name: path, text: repairEscapedSource(text) });
   }
   return { files: files, problem: null };
 }

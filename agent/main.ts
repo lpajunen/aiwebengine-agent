@@ -53,6 +53,7 @@ import {
   nextFailureCount,
   readFilesArgument,
   readRemoveArgument,
+  repairEscapedSource,
   runKindOf,
   scriptNameProblem,
   shouldEscalate,
@@ -3916,7 +3917,7 @@ function runAuthorTool(
       // faults that are only the work not being finished.
       const answer = engineAnswer("write_files", {
         script: script,
-        files: [{ name: path, text: input.text }],
+        files: [{ name: path, text: repairEscapedSource(input.text) }],
         check: false,
       });
       if (!answer.ok) return failed(`write_file: ${answer.error}`);

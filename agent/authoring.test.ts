@@ -10,6 +10,7 @@ import {
   isAuthorTool,
   leftoverPlaceholders,
   parseLooseJson,
+  repairEscapedSource,
   readFilesArgument,
   readRemoveArgument,
   maxStepsFor,
@@ -311,5 +312,26 @@ describe("parseLooseJson", () => {
     expect(readFilesArgument(sent).files).toEqual([
       { name: "a.ts", text: "x\ny" },
     ]);
+  });
+});
+
+describe("repairEscapedSource", () => {
+  test("a file with its newlines escaped twice gets real ones", () => {
+    const broken = 'function f() {\\n  return \\"a\\";\\n}\\n';
+    expect(repairEscapedSource(broken)).toBe(
+      'function f() {\n  return "a";\n}\n',
+    );
+  });
+  test("a file that already has newlines is left alone", () => {
+    const fine = "const a = 'x\\ny';\nconst b = 1;\n";
+    expect(repairEscapedSource(fine)).toBe(fine);
+  });
+  test("a one-liner with a couple of escapes is left alone", () => {
+    const line = 'console.log("a\\nb\\nc");';
+    expect(repairEscapedSource(line)).toBe(line);
+  });
+  test("files read from an argument are repaired", () => {
+    const r = readFilesArgument([{ path: "a.ts", text: "a;\\nb;\\nc;\\nd;" }]);
+    expect(r.files[0].text).toBe("a;\nb;\nc;\nd;");
   });
 });
