@@ -41,9 +41,20 @@ The runner deletes the script before and after a run so state-dependent probes
 
 ```bash
 ENGINE_URL=https://your-engine ENGINE_COOKIE='<session cookie>' node eval/run.mjs
+# when /engine/* is served from a management host of its own:
+MANAGE_URL=https://manage.your-engine ...
 node eval/run.mjs --only site-02,tool-01   # some tasks
 node eval/run.mjs --keep --timeout 900     # keep the scripts; 15 minutes per task
 ```
+
+`/engine/*` answers only on `server.management_hosts`; without `MANAGE_URL` the
+runner assumes it is on `ENGINE_URL` and every judging call fails as not found.
+The session cookie must be valid on both hosts.
+
+A run may write skills into the agent itself, which then shape later runs. After
+each task the runner removes the `skills/` files the task added and reports one
+it changed (a pull from the repository restores that). `AGENT_SCRIPT` names the
+agent script (default `agent`).
 
 `ENGINE_COOKIE` is the `Cookie` header of a signed-in browser session. That
 person needs the editor role, must have stored an Anthropic key and granted the

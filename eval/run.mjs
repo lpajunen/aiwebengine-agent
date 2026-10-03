@@ -35,6 +35,10 @@ const option = (name, fallback) => {
 };
 
 const engine = (process.env.ENGINE_URL ?? "").replace(/\/$/, "");
+// `/engine/*` answers only on the engine's management hosts, which is usually
+// not the host that serves the agent page.
+const manage = (process.env.MANAGE_URL ?? engine).replace(/\/$/, "");
+const agentScript = process.env.AGENT_SCRIPT ?? "agent";
 const cookie = process.env.ENGINE_COOKIE ?? "";
 if (!engine || !cookie) {
   console.error(
@@ -50,7 +54,8 @@ const timeoutMs = Number(option("timeout", "600")) * 1000;
 const keep = flag("keep");
 
 async function call(path, init = {}) {
-  const response = await fetch(`${engine}${path}`, {
+  const base = path.startsWith("/engine/") ? manage : engine;
+  const response = await fetch(`${base}${path}`, {
     ...init,
     headers: {
       cookie,
@@ -298,7 +303,33 @@ async function judge(task) {
   return failures;
 }
 
+/** path -> updatedAt for the agent script's own files. */
+async function agentFiles() {
+  const listed = await operation("list_files", { script: agentScript });
+  return new Map((listed.body?.files ?? []).map((f) => [f.uri, f.updatedAt]));
+}
+
+/**
+ * A run may write skills into the agent itself, which then shape every later
+ * run. Remove the ones this task added; say so when it changed one that
+ * existed, which only a pull from the repository restores.
+ */
+async function cleanAgent(before) {
+  const notes = [];
+  const after = await agentFiles();
+  for (const [path, updatedAt] of after) {
+    if (!before.has(path) && path.startsWith("skills/")) {
+      await operation("delete_file", { script: agentScript, path });
+      notes.push(`removed ${path}`);
+    } else if (before.has(path) && before.get(path) !== updatedAt) {
+      notes.push(`${path} was modified; pull_from_git force restores it`);
+    }
+  }
+  return notes;
+}
+
 const results = [];
+const agentBefore = await agentFiles();
 for (const task of loadTasks()) {
   console.log(`\n== ${task.id}: ${task.title}`);
   await operation("delete_script", { script: task.script });
@@ -306,12 +337,21 @@ for (const task of loadTasks()) {
   const run = await runAgent(task);
   const failures = run.runId ? await judge(task) : [run.reason];
   if (!run.ok) failures.unshift(`run: ${run.reason}`);
+  const finished = (run.history?.activities ?? []).filter(
+    (a) => a.runId === run.runId && a.kind === "done",
+  );
+  const endReason = finished.length
+    ? finished[finished.length - 1].message
+    : null;
+  const cleaned = await cleanAgent(agentBefore);
   const spend = costOf(run.history);
   const row = {
     id: task.id,
     shape: task.shape,
     passed: failures.length === 0,
     escalated: !run.ok,
+    endReason,
+    cleaned,
     seconds: Math.round((Date.now() - started) / 1000),
     ...spend,
     failures,
