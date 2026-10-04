@@ -87,6 +87,13 @@
         gap: var(--aw-space-1);
         margin-top: var(--aw-space-3);
       }
+      /* The page's own li is a two-column row for the activity log; a
+         conversation is one button across the width. */
+      .conversation-list li {
+        display: block;
+        border-top: 0;
+        padding: 0;
+      }
       .conversation-item {
         display: flex;
         gap: var(--aw-space-3);
