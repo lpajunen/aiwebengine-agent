@@ -33,6 +33,9 @@ const el = {
   meterFill: document.getElementById("meter-fill"),
   meterText: document.getElementById("meter-text"),
   activity: document.getElementById("activity"),
+  conversationsDetails: document.getElementById("conversations-details"),
+  conversationsCount: document.getElementById("conversations-count"),
+  conversationsList: document.getElementById("conversations-list"),
   planPanel: document.getElementById("plan-panel"),
   planBody: document.getElementById("plan-body"),
   planNote: document.getElementById("plan-note"),
@@ -216,6 +219,7 @@ function setWorking(working) {
   // A boundary under a working run would leave it speaking into a
   // conversation that is no longer on screen.
   el.newConversation.disabled = working;
+  renderConversationMarks();
   el.run.textContent = working ? "Send" : "Run";
   el.prompt.placeholder = working
     ? "Say something to the run in progress..."
@@ -565,6 +569,7 @@ el.newConversation.addEventListener("click", async () => {
     hidePlan();
     showConversation(false, "chat");
     render();
+    renderConversationMarks();
     el.prompt.value = "";
     setStatus(el.runStatus, "");
     el.prompt.focus();
@@ -575,6 +580,76 @@ el.newConversation.addEventListener("click", async () => {
     el.newConversation.disabled = runWorking;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Earlier conversations
+// ---------------------------------------------------------------------------
+
+let conversations = [];
+
+async function loadConversations() {
+  try {
+    const answer = await api("/agent/conversations");
+    conversations = answer.conversations ?? [];
+    renderConversations();
+  } catch {
+    // The list is a convenience; the page works without it.
+  }
+}
+
+function renderConversations() {
+  el.conversationsCount.textContent =
+    conversations.length === 0
+      ? "Conversations"
+      : "Conversations (" + conversations.length + ")";
+  const items = conversations.map((c) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "conversation-item";
+    button.dataset.runId = c.runId;
+    const title = document.createElement("span");
+    title.className = "conversation-title";
+    title.textContent = c.title || "(no prompt)";
+    const when = document.createElement("span");
+    when.className = "conversation-when";
+    when.textContent =
+      (c.state === "running" || c.state === "waiting"
+        ? "working \u00b7 "
+        : "") + new Date(c.at).toLocaleString();
+    button.append(title, when);
+    button.addEventListener("click", () => openConversation(c.runId));
+    return button;
+  });
+  const rows = items.map((button) => {
+    const li = document.createElement("li");
+    li.append(button);
+    return li;
+  });
+  el.conversationsList.replaceChildren(...rows);
+  renderConversationMarks();
+}
+
+// Which one is on screen, and whether switching is allowed: a working run is
+// the conversation on screen, and moving away from it would leave its stop
+// button and its plan pointing at something the page no longer shows.
+function renderConversationMarks() {
+  for (const button of el.conversationsList.querySelectorAll("button")) {
+    const current = button.dataset.runId === shownRun;
+    if (current) button.setAttribute("aria-current", "true");
+    else button.removeAttribute("aria-current");
+    button.disabled = runWorking && !current;
+  }
+}
+
+async function openConversation(runId) {
+  if (runId === shownRun || runWorking || running) return;
+  try {
+    showHistory(await api("/agent/history?runId=" + encodeURIComponent(runId)));
+    el.prompt.focus();
+  } catch (e) {
+    setStatus(el.runStatus, e.message, true);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // The loop
@@ -766,35 +841,45 @@ el.prompt.addEventListener("keydown", (event) => {
 // Start
 // ---------------------------------------------------------------------------
 
+/** Put one conversation on screen from what `/agent/history` answered. */
+function showHistory(history) {
+  entries = history.activities ?? [];
+  pending = "";
+  shownRun = history.runId ?? "";
+  showConversation(history.hasConversation, history.runKind);
+  spend = history.spend ?? EMPTY_SPEND;
+  renderSpend();
+  render();
+
+  // A run started before this page was opened is still a run: it can be
+  // stopped and spoken to from here, which is the point of it not belonging
+  // to the tab.
+  const state = history.runState ?? "done";
+  setWorking(state === "running" || state === "waiting");
+  hidePlan();
+  // A run suspended before this page was opened is still asking. Without
+  // this the panel only ever appeared for whoever happened to be watching
+  // when the plan landed.
+  if (state === "waiting" && history.pendingPlan) {
+    showPlan(history.pendingPlan.body);
+  }
+  setStatus(
+    el.runStatus,
+    runWorking ? "Working. You can close this page." : "",
+  );
+  renderConversationMarks();
+}
+
 async function start() {
   try {
     const history = await api("/agent/history");
-    entries = history.activities ?? [];
-    render();
     showKeyState(history.hasKey);
-
     pricing = history.pricing ?? null;
     contextWindow = history.contextWindow ?? 0;
-    shownRun = history.runId ?? "";
-    showConversation(history.hasConversation, history.runKind);
-    spend = history.spend ?? EMPTY_SPEND;
-    renderSpend();
-
-    // A run started before this page was opened is still a run: it can be
-    // stopped and spoken to from here, which is the point of it not belonging
-    // to the tab.
-    const state = history.runState ?? "done";
-    setWorking(state === "running" || state === "waiting");
-    // A run suspended before this page was opened is still asking. Without
-    // this the panel only ever appeared for whoever happened to be watching
-    // when the plan landed.
-    if (state === "waiting" && history.pendingPlan) {
-      showPlan(history.pendingPlan.body);
-    }
-    if (runWorking)
-      setStatus(el.runStatus, "Working. You can close this page.");
+    showHistory(history);
 
     loadMemories();
+    loadConversations();
 
     // Say up front that a run will need permission, rather than letting them
     // write a prompt and meet the refusal afterwards.
@@ -835,6 +920,17 @@ async function start() {
       const payload = JSON.parse(event.data);
       if (!payload || typeof payload.message !== "string") return;
 
+      // Another conversation's activity is not this one's log. A prompt is the
+      // exception: it makes its conversation the one on screen.
+      if (
+        payload.runId &&
+        shownRun &&
+        payload.runId !== shownRun &&
+        payload.kind !== "prompt"
+      ) {
+        return;
+      }
+
       // A piece of the answer, still being written. These are the only
       // messages the script sends without storing anything, so they are the
       // only ones that do not correspond to a row.
@@ -874,9 +970,11 @@ async function start() {
         // A continued conversation keeps adding to its tally.
         if (payload.runId !== shownRun) {
           shownRun = payload.runId;
+          entries = [];
           spend = EMPTY_SPEND;
           renderSpend();
         }
+        loadConversations();
         showConversation(
           true,
           el.author && el.author.checked ? "author" : "chat",

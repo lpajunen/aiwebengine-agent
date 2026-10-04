@@ -12,6 +12,9 @@ for anybody's tokens.
 - `POST /agent/prompt` — accepts a prompt and queues the run. With a `runId`
   it continues that conversation (the earlier messages are the context; the
   conversation's kind stays what it was); without one it starts a new one.
+- `GET /agent/conversations` — the person's earlier conversations, newest
+  first; `GET /agent/history?runId=` shows one of them, and a prompt sent with
+  its `runId` continues it.
 - `POST /agent/new` — starts a new conversation: the page shows only the
   newest run id, and the next prompt carries none of the earlier context.
   Refused while a run is working.

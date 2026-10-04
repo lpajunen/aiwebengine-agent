@@ -82,6 +82,39 @@
         letter-spacing: 0.06em;
         color: var(--aw-color-muted);
       }
+      .conversation-list {
+        display: grid;
+        gap: var(--aw-space-1);
+        margin-top: var(--aw-space-3);
+      }
+      .conversation-item {
+        display: flex;
+        gap: var(--aw-space-3);
+        align-items: baseline;
+        width: 100%;
+        text-align: left;
+        background: none;
+        border: 1px solid transparent;
+        color: inherit;
+        cursor: pointer;
+        padding: var(--aw-space-2);
+      }
+      .conversation-item[aria-current="true"] {
+        border-color: var(--aw-color-focus);
+      }
+      .conversation-item:disabled {
+        cursor: default;
+        opacity: 0.6;
+      }
+      .conversation-title {
+        flex: 1;
+        overflow-wrap: anywhere;
+      }
+      .conversation-when {
+        color: var(--aw-color-muted);
+        font-size: 0.8rem;
+        white-space: nowrap;
+      }
       .memory-help {
         color: var(--aw-color-muted);
         font-size: 0.85rem;
@@ -324,6 +357,15 @@
           </p>
           <ul id="memory-list" class="memory-list"></ul>
           <span id="memory-status" class="status"></span>
+        </details>
+      </section>
+
+      <section id="conversations-panel">
+        <details id="conversations-details">
+          <summary class="memory-summary">
+            <span id="conversations-count">Conversations</span>
+          </summary>
+          <ul id="conversations-list" class="conversation-list"></ul>
         </details>
       </section>
 

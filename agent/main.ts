@@ -1077,6 +1077,12 @@ function init(): void {
     tags: ["Agent"],
     summary: "Accept a prompt and open a run",
   });
+  routeRegistry.registerRoute("/agent/conversations", {
+    handler: "listConversations",
+    method: "GET",
+    tags: ["Agent"],
+    summary: "The person's earlier conversations, newest first",
+  });
   routeRegistry.registerRoute("/agent/new", {
     handler: "newConversation",
     method: "POST",
@@ -1332,6 +1338,53 @@ function newConversation(context: HandlerContext): HttpResponse {
     return json(500, { error: message });
   }
   return json(200, { runId });
+}
+
+/**
+ * The person's conversations, newest first: what each began with, when it was
+ * last prompted, and whether it is working. Built from the prompts they wrote,
+ * so a boundary with no prompt under it is not listed.
+ */
+function listConversations(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  const rows = database.query("activities", {
+    where: { user_id: userId, kind: "prompt" },
+    limit: MAX_CONVERSATION_PROMPTS,
+    orderBy: "id",
+    order: "desc",
+  }) as unknown as ActivityRow[];
+
+  // Newest prompt first, so the first row of a run fixes when it was last
+  // prompted and the last one seen is the earliest prompt there is to name it.
+  const byRun: Record<string, { title: string; at: number; prompts: number }> =
+    {};
+  const order: string[] = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const id = String(row.run_id ?? "");
+    if (!id) continue;
+    if (!byRun[id]) {
+      byRun[id] = { title: "", at: Number(row.created_ms), prompts: 0 };
+      order.push(id);
+    }
+    byRun[id].title = String(row.message ?? "");
+    byRun[id].prompts += 1;
+  }
+
+  const conversations = order.slice(0, MAX_CONVERSATIONS).map((id) => {
+    const found = byRun[id];
+    const title = found.title.replace(/\s+/g, " ").trim();
+    return {
+      runId: id,
+      title: title.length > 80 ? title.slice(0, 79) + "\u2026" : title,
+      at: found.at,
+      prompts: found.prompts,
+      kind: kindOf(userId, id),
+      state: runStateOf(userId, id) ?? "done",
+    };
+  });
+  return json(200, { conversations: conversations });
 }
 
 function latestRunId(userId: string): string {
@@ -2005,9 +2058,13 @@ function readHistory(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
   if (!userId) return json(401, { error: "Sign in first." });
 
-  // One conversation, the newest: a run id is a conversation, and the page
-  // shows the one it would continue.
-  const latestRun = latestRunId(userId);
+  // One conversation: the one asked for, else the newest. A run id is a
+  // conversation, and the page shows the one it would continue.
+  const asked = String(context.request?.query?.runId ?? "").trim();
+  if (asked && !RUN_ID_PATTERN.test(asked)) {
+    return json(400, { error: "That is not a conversation id." });
+  }
+  const latestRun = asked || latestRunId(userId);
   const rows = latestRun
     ? (database.query("activities", {
         where: { user_id: userId, run_id: latestRun },
@@ -5541,6 +5598,8 @@ function signedInUser(context: HandlerContext): string | null {
   return auth.userId;
 }
 
+const MAX_CONVERSATIONS = 30;
+const MAX_CONVERSATION_PROMPTS = 300;
 const RUN_ID_PATTERN = /^[a-z0-9-]{1,40}$/;
 
 function newRunId(): string {
