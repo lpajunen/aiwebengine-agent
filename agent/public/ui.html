@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Agent</title>
     <link rel="stylesheet" href="/engine/engine.css" />
+    <script src="/engine/engine.js" defer></script>
     <style>
       /* The engine's own stylesheet supplies tokens, form controls, buttons and
          the card; what follows is only what this page adds, written against
@@ -18,6 +19,7 @@
         margin: 0 auto;
       }
       h1 {
+        padding-right: 3rem;
         margin-bottom: var(--aw-space-1);
       }
       .sub {
@@ -224,6 +226,13 @@
     </style>
   </head>
   <body>
+    <!-- The key and the permissions are changed rarely, so they live in the
+         account menu rather than above the prompt. The engine's menu adds who
+         is signed in, the account page and sign-out. -->
+    <aw-account-menu>
+      <button type="button" id="open-key">API key</button>
+      <a id="grant-link" href="#" hidden>Permissions</a>
+    </aw-account-menu>
     <main>
       <h1>Agent</h1>
       <p class="sub">
@@ -252,23 +261,6 @@
             Remove key
           </button>
           <span id="key-status" class="status"></span>
-        </div>
-      </section>
-
-      <!-- What this agent is allowed to do as you, and the way to change it.
-           Beside the key rather than somewhere else, because the two are the
-           same kind of thing: what of yours this agent may spend while you are
-           away. Always here once you are signed in, not only the first time —
-           the consent page is also where you widen a grant to let the agent
-           manage scripts and users, and where you take it back, and neither is
-           something you should have to remember a URL for. -->
-      <section id="grant-panel" hidden>
-        <h2>What this agent may do</h2>
-        <p id="grant-summary" class="status"></p>
-        <div class="row">
-          <a id="grant-link" class="aw-button aw-button--secondary" href="#"
-            >Change permissions</a
-          >
         </div>
       </section>
 

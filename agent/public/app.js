@@ -38,8 +38,7 @@ const el = {
   planStatus: document.getElementById("plan-status"),
   approve: document.getElementById("approve"),
   reject: document.getElementById("reject"),
-  grantPanel: document.getElementById("grant-panel"),
-  grantSummary: document.getElementById("grant-summary"),
+  openKey: document.getElementById("open-key"),
   grantLink: document.getElementById("grant-link"),
   memoryPanel: document.getElementById("memory-panel"),
   memoryDetails: document.getElementById("memory-details"),
@@ -478,13 +477,25 @@ function describe(body, status) {
 // The key
 // ---------------------------------------------------------------------------
 
+// Whether the person asked for the key form from the menu. With no key stored
+// the form is shown regardless: the agent cannot run without one.
+let keyFormOpen = false;
+let keyStored = false;
+
 function showKeyState(hasKey) {
-  el.keyPanel.hidden = false;
+  keyStored = hasKey;
+  el.keyPanel.hidden = hasKey && !keyFormOpen;
   el.forgetKey.hidden = !hasKey;
   el.key.value = "";
   el.key.placeholder = hasKey ? "A key is stored" : "sk-ant-...";
   setStatus(el.keyStatus, hasKey ? "Key stored." : "No key stored yet.");
 }
+
+el.openKey.addEventListener("click", () => {
+  keyFormOpen = !(keyStored && !el.keyPanel.hidden);
+  showKeyState(keyStored);
+  if (!el.keyPanel.hidden) el.key.focus();
+});
 
 el.saveKey.addEventListener("click", async () => {
   const key = el.key.value.trim();
@@ -616,8 +627,9 @@ el.stop.addEventListener("click", async () => {
 /**
  * What this agent is allowed to do as this person, and the way to change it.
  *
- * Shown whether or not anything is granted, which is the point of it. The
- * first-run prompt below covers "you have not been asked yet"; this covers
+ * A "Permissions" item in the account menu, whose tooltip says what is on.
+ * Always there once signed in, whether or not anything is granted, which is the
+ * point of it. The first-run prompt below covers "you have not been asked yet"; this covers
  * every case after that — widening a grant so the agent can manage scripts
  * and users, narrowing one, or taking it back — none of which had anywhere to
  * be reached from.
@@ -628,16 +640,16 @@ el.stop.addEventListener("click", async () => {
  */
 function showGrant(auth) {
   if (!auth || !auth.authenticated || !auth.consentUrl) {
-    el.grantPanel.hidden = true;
+    el.grantLink.hidden = true;
     return;
   }
 
-  el.grantPanel.hidden = false;
+  el.grantLink.hidden = false;
   el.grantLink.href =
     auth.consentUrl + "&redirect=" + encodeURIComponent("/agent");
 
   if (!auth.granted) {
-    el.grantSummary.textContent = auth.expired
+    el.grantLink.title = auth.expired
       ? "Your permission has expired, so runs cannot start."
       : "This agent has no permission to work while you are away yet.";
     el.grantLink.textContent = "Give permission";
@@ -651,7 +663,7 @@ function showGrant(auth) {
   const manages =
     granted.indexOf("administer") !== -1 || granted.indexOf("author") !== -1;
 
-  el.grantSummary.textContent =
+  el.grantLink.title =
     "On: " +
     granted.map(scopeLabel).join(", ") +
     ". " +
