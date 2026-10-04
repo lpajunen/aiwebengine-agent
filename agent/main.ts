@@ -19,7 +19,7 @@ import {
   overHistoryLimit,
   shouldCompact,
   spendOf,
-  stepsFrom,
+  stepsSincePrompt,
 } from "./budget.ts";
 import {
   SKILLS_PREFIX,
@@ -348,6 +348,7 @@ interface RunRow {
   run_kind?: string;
   fail_sig?: string;
   nudges?: number;
+  step_base?: number;
 }
 
 /** A plan put to the person, before and after they answer it. */
@@ -996,6 +997,10 @@ function init(): void {
       { name: "fail_sig", type: "text" },
       // Turns that spoke and did nothing, in an authoring run.
       { name: "nudges", type: "bigint" },
+      // Assistant messages the conversation already held when the latest
+      // prompt began, so a continued conversation starts that prompt's turn
+      // budget at zero rather than at everything said before it.
+      { name: "step_base", type: "bigint" },
     ],
   });
 
@@ -1071,6 +1076,12 @@ function init(): void {
     method: "POST",
     tags: ["Agent"],
     summary: "Accept a prompt and open a run",
+  });
+  routeRegistry.registerRoute("/agent/new", {
+    handler: "newConversation",
+    method: "POST",
+    tags: ["Agent"],
+    summary: "Start a new conversation; the next prompt has no earlier context",
   });
   routeRegistry.registerRoute("/agent/cancel", {
     handler: "cancelRun",
@@ -1193,17 +1204,45 @@ function startRun(context: HandlerContext): HttpResponse {
 
   let prompt = "";
   let kind: RunKind = "chat";
+  let continuing = "";
   try {
     const body = (context.request?.json() ?? {}) as {
       prompt?: string;
       kind?: string;
+      runId?: string;
     };
     prompt = String(body.prompt ?? "").trim();
     kind = runKindOf(body.kind);
+    continuing = String(body.runId ?? "").trim();
   } catch (e) {
     return json(400, { error: "Expected a JSON body." });
   }
   if (!prompt) return json(400, { error: "A prompt is required." });
+  if (continuing && !RUN_ID_PATTERN.test(continuing)) {
+    return json(400, { error: "That is not a conversation id." });
+  }
+
+  // A conversation is one run id. Naming one that has messages continues it;
+  // naming one that has none (the id `POST /agent/new` handed out) starts it.
+  let existing: RunRow | null = null;
+  let spoken = 0;
+  if (continuing) {
+    existing = runRow(userId, continuing);
+    spoken = loadMessages(userId, continuing).filter(
+      (m) => m.speaker === "assistant",
+    ).length;
+    if (existing && runIsLive(userId, continuing)) {
+      // Spoken into with /agent/say, not restarted: a second turn queued
+      // beside the live one would be two model calls for one conversation.
+      return json(409, {
+        error: "That conversation is still working. Say it to the run instead.",
+        runLive: true,
+      });
+    }
+    // The tools a conversation was started with are the ones its history
+    // names, so what it is for does not change under it.
+    if (existing) kind = runKindOf(existing.run_kind);
+  }
   if (kind === "author" && !hasEngineAuthority()) {
     return json(400, {
       error:
@@ -1225,7 +1264,7 @@ function startRun(context: HandlerContext): HttpResponse {
     });
   }
 
-  const runId = newRunId();
+  const runId = continuing || newRunId();
   appendMessage(userId, runId, "user", [{ type: "text", text: prompt }]);
   recordActivity(userId, runId, "prompt", prompt);
 
@@ -1238,7 +1277,11 @@ function startRun(context: HandlerContext): HttpResponse {
       payload: { runId: runId },
       maxAttempts: 1,
     });
-    openRun(userId, runId, task.taskId, kind);
+    if (existing) {
+      reopenRun(existing, task.taskId, spoken);
+    } else {
+      openRun(userId, runId, task.taskId, kind);
+    }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     recordActivity(
@@ -1251,6 +1294,56 @@ function startRun(context: HandlerContext): HttpResponse {
   }
 
   return json(202, { runId });
+}
+
+/**
+ * Start a conversation: hand out an id and make it the one the page shows.
+ *
+ * Nothing is deleted. The earlier conversation's rows stay where they are; the
+ * history shows the newest run id's activity, and this writes the first
+ * activity of an id with no messages yet. Not pushed on the stream, so it is
+ * a boundary in the table and not a line in anyone's log. Refused while a run
+ * is working, because a boundary under a live run would leave it speaking into
+ * a conversation the page no longer shows.
+ */
+function newConversation(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  const latest = latestRunId(userId);
+  if (latest && runIsLive(userId, latest)) {
+    return json(409, {
+      error: "Stop the run in progress first.",
+      runLive: true,
+    });
+  }
+
+  const runId = newRunId();
+  try {
+    database.insert("activities", {
+      user_id: userId,
+      run_id: runId,
+      kind: "new",
+      message: "",
+      created_ms: Date.now(),
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return json(500, { error: message });
+  }
+  return json(200, { runId });
+}
+
+function latestRunId(userId: string): string {
+  const rows = database.query("activities", {
+    where: { user_id: userId },
+    limit: 1,
+    orderBy: "id",
+    order: "desc",
+  }) as unknown as ActivityRow[];
+  return Array.isArray(rows) && rows.length > 0
+    ? String(rows[0].run_id ?? "")
+    : "";
 }
 
 /**
@@ -1912,19 +2005,21 @@ function readHistory(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
   if (!userId) return json(401, { error: "Sign in first." });
 
-  const rows = database.query("activities", {
-    where: { user_id: userId },
-    limit: MAX_HISTORY_ROWS,
-    orderBy: "id",
-    order: "desc",
-  }) as unknown as ActivityRow[];
+  // One conversation, the newest: a run id is a conversation, and the page
+  // shows the one it would continue.
+  const latestRun = latestRunId(userId);
+  const rows = latestRun
+    ? (database.query("activities", {
+        where: { user_id: userId, run_id: latestRun },
+        limit: MAX_HISTORY_ROWS,
+        orderBy: "id",
+        order: "desc",
+      }) as unknown as ActivityRow[])
+    : [];
 
-  const ordered = Array.isArray(rows) ? rows.slice().reverse() : [];
-
-  // The run the page is about to show the tail of — its spend is the one
-  // worth loading, and it is the only one bounded by the step ceiling.
-  const latestRun =
-    ordered.length > 0 ? String(ordered[ordered.length - 1].run_id ?? "") : "";
+  const ordered = Array.isArray(rows)
+    ? rows.filter((row) => row.kind !== "new").reverse()
+    : [];
 
   const waitingOn = latestRun ? pendingPlan(userId, latestRun) : null;
 
@@ -1938,6 +2033,11 @@ function readHistory(context: HandlerContext): HttpResponse {
     hasKey: secretStorage.exists(SECRET_NAME),
     authorization: personalTasks.authorization(),
     runId: latestRun,
+    // Whether the conversation has anything to continue, and what it is for.
+    hasConversation: latestRun
+      ? loadMessages(userId, latestRun).length > 0
+      : false,
+    runKind: latestRun ? kindOf(userId, latestRun) : "chat",
     // So a page opened while a run is working shows a stop button, rather
     // than learning the run exists only if a turn happens to land.
     runState: latestRun ? (runStateOf(userId, latestRun) ?? "done") : "done",
@@ -2679,6 +2779,29 @@ function openRun(
 }
 
 /**
+ * Give a finished conversation its next prompt: running again, with the turn
+ * budget of a fresh prompt and no leftover failure counts. Back in plan mode,
+ * because an approval was for the plan it was given, not for what is asked
+ * next.
+ */
+function reopenRun(row: RunRow, taskId: string, spoken: number): void {
+  writeRow(
+    () =>
+      database.update("runs", Number(row.id), {
+        run_state: "running",
+        run_mode: "plan",
+        task_id: taskId,
+        steps: 0,
+        step_base: spoken,
+        nudges: 0,
+        fail_sig: "",
+        updated_ms: Date.now(),
+      }),
+    "continuing a run",
+  );
+}
+
+/**
  * Move a run along, and remember which task carries it next.
  *
  * `expected` is what the caller believes the run is, and the write is skipped
@@ -2766,8 +2889,8 @@ function stepsTaken(
   history: MessageRow[],
 ): number {
   const row = runRow(userId, runId);
-  const counted = history.filter((m) => m.speaker === "assistant").length;
-  return stepsFrom(row ? row.steps : null, counted);
+  const spoken = history.filter((m) => m.speaker === "assistant").length;
+  return stepsSincePrompt(row ? row.steps : null, spoken, row?.step_base);
 }
 
 function countStep(userId: string, runId: string, taken: number): void {
@@ -5417,6 +5540,8 @@ function signedInUser(context: HandlerContext): string | null {
   if (!auth || !auth.isAuthenticated || !auth.userId) return null;
   return auth.userId;
 }
+
+const RUN_ID_PATTERN = /^[a-z0-9-]{1,40}$/;
 
 function newRunId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;

@@ -25,6 +25,7 @@ const el = {
   prompt: document.getElementById("prompt"),
   author: document.getElementById("author"),
   run: document.getElementById("run"),
+  newConversation: document.getElementById("new-conversation"),
   stop: document.getElementById("stop"),
   runStatus: document.getElementById("run-status"),
   spend: document.getElementById("spend"),
@@ -71,6 +72,9 @@ let spend = null;
 let pricing = null;
 let contextWindow = 0;
 let shownRun = "";
+// Whether the conversation on screen has messages, which is what makes the
+// next Run a continuation and fixes what the conversation is for.
+let hasConversation = false;
 
 // Whether the run on screen is still working. It decides what the button
 // does and what the prompt box means, so it is one flag rather than a guess
@@ -209,6 +213,9 @@ function renderSpend() {
 function setWorking(working) {
   runWorking = working;
   el.stop.hidden = !working;
+  // A boundary under a working run would leave it speaking into a
+  // conversation that is no longer on screen.
+  el.newConversation.disabled = working;
   el.run.textContent = working ? "Send" : "Run";
   el.prompt.placeholder = working
     ? "Say something to the run in progress..."
@@ -530,6 +537,46 @@ el.forgetKey.addEventListener("click", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// The conversation
+// ---------------------------------------------------------------------------
+
+/**
+ * A conversation that has begun is for one thing: the tools its history names
+ * do not change under it, so the build-a-script box shows what it was started
+ * with and cannot be flipped until there is a new conversation.
+ */
+function showConversation(has, kind) {
+  hasConversation = Boolean(has);
+  if (!el.author) return;
+  if (hasConversation) el.author.checked = kind === "author";
+  el.author.disabled = hasConversation;
+}
+
+el.newConversation.addEventListener("click", async () => {
+  if (runWorking || running) return;
+  el.newConversation.disabled = true;
+  try {
+    const started = await api("/agent/new", { method: "POST", body: "{}" });
+    shownRun = started.runId;
+    entries = [];
+    pending = "";
+    spend = EMPTY_SPEND;
+    renderSpend();
+    hidePlan();
+    showConversation(false, "chat");
+    render();
+    el.prompt.value = "";
+    setStatus(el.runStatus, "");
+    el.prompt.focus();
+  } catch (e) {
+    if (e.body?.runLive) setWorking(true);
+    setStatus(el.runStatus, e.message, true);
+  } finally {
+    el.newConversation.disabled = runWorking;
+  }
+});
+
+// ---------------------------------------------------------------------------
 // The loop
 // ---------------------------------------------------------------------------
 
@@ -567,6 +614,9 @@ el.run.addEventListener("click", async () => {
       body: JSON.stringify({
         prompt,
         kind: el.author && el.author.checked ? "author" : "chat",
+        // The conversation on screen: its earlier messages are the context.
+        // Empty after "New conversation" until this prompt starts it.
+        runId: shownRun || undefined,
       }),
     });
     el.prompt.value = "";
@@ -583,6 +633,10 @@ el.run.addEventListener("click", async () => {
         signInUrl(),
         true,
       );
+    } else if (e.body?.runLive) {
+      // Another tab started a turn. Say it into the run, not beside it.
+      setWorking(true);
+      setStatus(el.runStatus, e.message, true);
     } else if (e.body?.needsAuthorization) {
       showAuthorizationNeeded(e.body);
     } else if (e.body?.needsAuthority) {
@@ -722,6 +776,7 @@ async function start() {
     pricing = history.pricing ?? null;
     contextWindow = history.contextWindow ?? 0;
     shownRun = history.runId ?? "";
+    showConversation(history.hasConversation, history.runKind);
     spend = history.spend ?? EMPTY_SPEND;
     renderSpend();
 
@@ -816,9 +871,16 @@ async function start() {
       // the run id changing, so a stray message from an older run cannot
       // reset what is on screen.
       if (payload.kind === "prompt") {
-        shownRun = payload.runId;
-        spend = EMPTY_SPEND;
-        renderSpend();
+        // A continued conversation keeps adding to its tally.
+        if (payload.runId !== shownRun) {
+          shownRun = payload.runId;
+          spend = EMPTY_SPEND;
+          renderSpend();
+        }
+        showConversation(
+          true,
+          el.author && el.author.checked ? "author" : "chat",
+        );
         // Another tab may have started it. Either way there is now a run to
         // stop and a run to speak into.
         setWorking(true);

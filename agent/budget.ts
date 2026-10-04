@@ -109,6 +109,24 @@ export function stepsFrom(
   return Math.max(counted, assistantMessages);
 }
 
+/**
+ * Turns taken since the latest prompt of a conversation.
+ *
+ * `base` is how many assistant messages the conversation held when that prompt
+ * began. Subtracting it starts a continued conversation's budget at zero; a
+ * compaction that leaves fewer assistant messages than the base clamps to
+ * zero, and the counter on the row is what holds.
+ */
+export function stepsSincePrompt(
+  recorded: unknown,
+  assistantMessages: number,
+  base: unknown,
+): number {
+  const earlier = Number(base ?? 0);
+  const before = isFinite(earlier) ? earlier : 0;
+  return stepsFrom(recorded, Math.max(0, assistantMessages - before));
+}
+
 /** What a run has cost so far. */
 export interface Spend {
   turns: number;

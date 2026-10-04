@@ -17,6 +17,7 @@ import {
   shouldCompact,
   spendOf,
   stepsFrom,
+  stepsSincePrompt,
 } from "./budget.ts";
 
 describe("the history ceiling", () => {
@@ -81,6 +82,23 @@ describe("stepsFrom", () => {
   test("a zero counter is a counter, not a missing one", () => {
     expect(stepsFrom(0, 0)).toBe(0);
     expect(stepsFrom(0, 2)).toBe(2);
+  });
+});
+
+describe("stepsSincePrompt", () => {
+  test("a continued conversation starts its prompt at zero", () => {
+    // Twelve turns were spoken before this prompt; none of them are its.
+    expect(stepsSincePrompt(0, 12, 12)).toBe(0);
+    expect(stepsSincePrompt(2, 14, 12)).toBe(2);
+  });
+
+  test("a compaction below the base falls back to the counter", () => {
+    expect(stepsSincePrompt(3, 1, 12)).toBe(3);
+  });
+
+  test("no base is the whole conversation", () => {
+    expect(stepsSincePrompt(null, 7, null)).toBe(7);
+    expect(stepsSincePrompt(null, 7, undefined)).toBe(7);
   });
 });
 

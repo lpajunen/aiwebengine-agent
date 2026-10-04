@@ -9,7 +9,12 @@ for anybody's tokens.
 
 - `GET /agent` — the page: a prompt box, a key form, the memory panel and the
   activity log.
-- `POST /agent/prompt` — accepts a prompt and queues the run.
+- `POST /agent/prompt` — accepts a prompt and queues the run. With a `runId`
+  it continues that conversation (the earlier messages are the context; the
+  conversation's kind stays what it was); without one it starts a new one.
+- `POST /agent/new` — starts a new conversation: the page shows only the
+  newest run id, and the next prompt carries none of the earlier context.
+  Refused while a run is working.
 - `GET /agent/events` — SSE; activity as it happens, for this person only.
 - `GET /agent/history` — the log, so a refresh loses nothing.
 - `POST /agent/cancel` — stops a run; `POST /agent/say` speaks into one.
@@ -34,7 +39,7 @@ subject by importing it — so anything under test had to move out:
 | `engine.ts`       | which management tools only read, and their arguments     |
 | `authoring.ts`    | what a script-building run is given, and how it is judged |
 
-Their tests are `agent/*.test.ts` — 110 cases — run with the `run_tests` tool
+Their tests are `agent/*.test.ts` — 113 cases — run with the `run_tests` tool
 or `POST /engine/run_tests` with `{"script": "<this script>"}`.
 
 The model gets five tools: `write_response` (the only way the person sees
