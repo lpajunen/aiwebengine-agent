@@ -348,7 +348,7 @@ function memoryNode(memory) {
   );
 
   const forget = document.createElement("button");
-  forget.className = "secondary";
+  forget.className = "aw-button--secondary";
   forget.textContent = "Delete";
   forget.addEventListener("click", () => forgetMemory(memory.key, forget));
 
@@ -416,7 +416,7 @@ function setStatusWithAction(node, text, label, href, isError) {
   node.textContent = text;
   node.classList.toggle("error", Boolean(isError));
   const link = document.createElement("a");
-  link.className = "action";
+  link.className = "aw-button aw-button--small";
   link.href = href;
   link.textContent = label;
   node.appendChild(link);

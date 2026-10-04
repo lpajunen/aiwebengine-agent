@@ -4,79 +4,40 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Agent</title>
+    <link rel="stylesheet" href="/engine/engine.css" />
     <style>
-      :root {
-        color-scheme: light dark;
-        --bg: #fbfbfa;
-        --panel: #ffffff;
-        --ink: #1b1b19;
-        --muted: #6b6a66;
-        --line: #e3e2de;
-        --accent: #3b5bdb;
-        --warn: #b4341f;
-      }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #17181a;
-          --panel: #1f2023;
-          --ink: #ececea;
-          --muted: #9a9995;
-          --line: #32333700;
-          --line: #323337;
-          --accent: #8ba2ff;
-          --warn: #ff9b86;
-        }
-      }
-      * {
-        box-sizing: border-box;
-      }
+      /* The engine's own stylesheet supplies tokens, form controls, buttons and
+         the card; what follows is only what this page adds, written against
+         the same --aw-* properties so it follows the engine's look and its
+         dark mode. */
       body {
-        margin: 0;
-        padding: 24px 16px 64px;
-        background: var(--bg);
-        color: var(--ink);
-        font:
-          15px/1.55 -apple-system,
-          BlinkMacSystemFont,
-          "Segoe UI",
-          system-ui,
-          sans-serif;
+        padding: var(--aw-space-5) var(--aw-space-4) 4rem;
       }
       main {
         max-width: 760px;
         margin: 0 auto;
       }
       h1 {
-        font-size: 20px;
-        margin: 0 0 4px;
+        margin-bottom: var(--aw-space-1);
       }
       .sub {
-        color: var(--muted);
-        margin: 0 0 24px;
+        color: var(--aw-color-muted);
+        margin: 0 0 var(--aw-space-5);
       }
       section {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 16px;
-        margin-bottom: 16px;
+        background: var(--aw-color-surface);
+        border: 1px solid var(--aw-color-border);
+        border-radius: var(--aw-radius-lg);
+        box-shadow: var(--aw-shadow);
+        padding: var(--aw-space-4);
+        margin-bottom: var(--aw-space-4);
       }
       h2 {
-        font-size: 13px;
+        margin-top: 0;
+        font-size: 0.8rem;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: var(--muted);
-        margin: 0 0 12px;
-      }
-      textarea,
-      input {
-        width: 100%;
-        padding: 10px;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--bg);
-        color: var(--ink);
-        font: inherit;
+        color: var(--aw-color-muted);
       }
       textarea {
         min-height: 88px;
@@ -84,44 +45,21 @@
       }
       .row {
         display: flex;
-        gap: 8px;
+        gap: var(--aw-space-2);
         align-items: center;
         flex-wrap: wrap;
-        margin-top: 10px;
+        margin-top: var(--aw-space-3);
       }
-      /* `.button` beside the element, so a link that goes somewhere can look
-         like the controls beside it. The permissions control is a link rather
-         than a button because it navigates to the engine's own consent page
-         rather than doing something here, and a link is what a browser expects
-         to be able to open in a new tab. */
-      button,
-      .button {
-        padding: 9px 16px;
-        border: 0;
-        border-radius: 8px;
-        background: var(--accent);
-        color: #fff;
-        font: inherit;
-        font-weight: 600;
-        cursor: pointer;
-        display: inline-block;
-        text-decoration: none;
-        line-height: normal;
-      }
-      button.secondary,
-      .button.secondary {
-        background: transparent;
-        color: var(--muted);
-        border: 1px solid var(--line);
-        font-weight: 400;
-      }
-      button:disabled {
-        opacity: 0.5;
-        cursor: default;
+      .row input {
+        margin: 0;
       }
       .status {
-        color: var(--muted);
-        font-size: 13px;
+        color: var(--aw-color-muted);
+        font-size: 0.85rem;
+        margin: 0;
+      }
+      .status.error {
+        color: var(--aw-color-danger);
       }
       /* The plan itself. Newlines preserved because the model writes these as
          a short list more often than as a paragraph, and a list run together
@@ -129,40 +67,37 @@
       .plan-body {
         white-space: pre-wrap;
         overflow-wrap: anywhere;
-        margin: 0 0 12px;
       }
       /* A suspended run is waiting on a person, so the panel says so rather
          than looking like every other section. */
       #plan-panel {
-        border-color: var(--accent);
+        border-color: var(--aw-color-focus);
       }
       .memory-summary {
         cursor: pointer;
-        font-size: 13px;
+        font-size: 0.8rem;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: var(--muted);
+        color: var(--aw-color-muted);
       }
       .memory-help {
-        color: var(--muted);
-        font-size: 13px;
-        margin: 12px 0;
+        color: var(--aw-color-muted);
+        font-size: 0.85rem;
+        margin: var(--aw-space-3) 0;
       }
       .memory-list {
         display: grid;
-        gap: 14px;
+        gap: var(--aw-space-3);
       }
-      /* Each note is a row of its own rather than sharing the activity list's
-         grid: the key is a label for something editable, not a column. */
       .memory-item {
-        border-top: 1px solid var(--line);
-        padding-top: 12px;
+        border-top: 1px solid var(--aw-color-border);
+        padding-top: var(--aw-space-3);
         display: block;
       }
       .memory-key {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 13px;
-        margin-bottom: 6px;
+        font-family: var(--aw-font-mono);
+        font-size: 0.85rem;
+        margin-bottom: var(--aw-space-1);
         display: block;
       }
       .memory-value {
@@ -171,32 +106,12 @@
       }
       .memory-actions {
         display: flex;
-        gap: 8px;
+        gap: var(--aw-space-2);
         align-items: center;
-        margin-top: 8px;
       }
       .memory-note {
-        color: var(--warn);
-        font-size: 13px;
-      }
-      /* A link the person is meant to act on, rather than one to read. Styled
-         as the buttons are because it does what they do — the difference is
-         that this one navigates, which is a link's job and not a button's. */
-      .status a.action {
-        display: inline-block;
-        margin-left: 8px;
-        padding: 5px 12px;
-        border-radius: 8px;
-        background: var(--accent);
-        color: #fff;
-        font-weight: 600;
-        text-decoration: none;
-      }
-      .status a.action:hover {
-        filter: brightness(1.1);
-      }
-      .status.error {
-        color: var(--warn);
+        color: var(--aw-color-danger);
+        font-size: 0.85rem;
       }
       ul {
         list-style: none;
@@ -204,49 +119,40 @@
         padding: 0;
       }
       li {
-        border-top: 1px solid var(--line);
-        padding: 12px 0;
+        border-top: 1px solid var(--aw-color-border);
+        padding: var(--aw-space-3) 0;
         display: grid;
         grid-template-columns: 96px 1fr;
-        gap: 12px;
+        gap: var(--aw-space-3);
       }
       li:first-child {
         border-top: 0;
       }
       .kind {
-        font-size: 12px;
+        font-size: 0.75rem;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        color: var(--muted);
+        color: var(--aw-color-muted);
         padding-top: 2px;
       }
-      .kind[data-kind="response"] {
-        color: var(--accent);
-      }
-      .kind[data-kind="error"] {
-        color: var(--warn);
-      }
+      .kind[data-kind="response"],
       .kind[data-kind="writing"] {
-        color: var(--accent);
+        color: var(--aw-color-link);
       }
-      /* The code the model wrote, shown before it runs rather than with its
-         result. Monospaced because it is read as code, and on the page at all
-         because an agent that runs something nobody was shown is the thing
-         people object to. Selected through the sibling rather than the row:
-         the kind is the only element carrying what this entry is. */
-      /* A management call, shown for the same reason the code is: this one
-         changes the engine rather than a sandbox, so it is the entry a person
-         scanning the log is most likely to be looking for. Same treatment as
-         code, since what it shows is a tool name and its arguments. */
+      .kind[data-kind="error"],
       .kind[data-kind="engine"] {
-        color: var(--warn);
+        color: var(--aw-color-danger);
       }
+      /* The code the model wrote, and a management call, shown before they run
+         rather than with their result: an agent that runs something nobody was
+         shown is the thing people object to. Selected through the sibling
+         because the kind is the only element carrying what the entry is. */
       .kind[data-kind="code"] + .message,
       .kind[data-kind="engine"] + .message {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 12.5px;
+        font-family: var(--aw-font-mono);
+        font-size: 0.8rem;
         line-height: 1.5;
-        border-left: 2px solid var(--line);
+        border-left: 2px solid var(--aw-color-border-strong);
         padding: 2px 0 2px 10px;
         overflow-x: auto;
       }
@@ -256,8 +162,7 @@
         margin: 0;
       }
       /* The answer still being written, with somewhere for the next character
-         to go. It is replaced by an ordinary row the moment the turn records
-         what it said. */
+         to go. */
       .live .message::after {
         content: "";
         display: inline-block;
@@ -265,7 +170,7 @@
         height: 1em;
         margin-left: 2px;
         vertical-align: text-bottom;
-        background: var(--accent);
+        background: var(--aw-color-focus);
         animation: caret 1s step-end infinite;
       }
       @keyframes caret {
@@ -279,18 +184,15 @@
         }
       }
       .empty {
-        color: var(--muted);
+        color: var(--aw-color-muted);
       }
-      /* What the run cost. Quiet by default: it is for the person who wants
-         to look, not a thing to answer every time they read a reply. */
       .spend {
         display: flex;
         align-items: center;
         flex-wrap: wrap;
-        gap: 8px;
-        margin-top: 8px;
-        font-size: 12px;
-        color: var(--muted);
+        gap: var(--aw-space-2);
+        font-size: 0.75rem;
+        color: var(--aw-color-muted);
         font-variant-numeric: tabular-nums;
       }
       .meter {
@@ -298,14 +200,14 @@
         width: 72px;
         height: 4px;
         border-radius: 2px;
-        background: var(--line);
+        background: var(--aw-color-border);
         overflow: hidden;
       }
       .meter-fill {
         display: block;
         height: 100%;
         width: 0;
-        background: var(--accent);
+        background: var(--aw-color-primary);
         transition: width 0.3s ease;
       }
       @media (prefers-reduced-motion: reduce) {
@@ -316,7 +218,7 @@
       @media (max-width: 520px) {
         li {
           grid-template-columns: 1fr;
-          gap: 4px;
+          gap: var(--aw-space-1);
         }
       }
     </style>
@@ -346,7 +248,9 @@
         </div>
         <div class="row">
           <button id="save-key">Save key</button>
-          <button id="forget-key" class="secondary" hidden>Remove key</button>
+          <button id="forget-key" class="aw-button--secondary" hidden>
+            Remove key
+          </button>
           <span id="key-status" class="status"></span>
         </div>
       </section>
@@ -362,7 +266,7 @@
         <h2>What this agent may do</h2>
         <p id="grant-summary" class="status"></p>
         <div class="row">
-          <a id="grant-link" class="button secondary" href="#"
+          <a id="grant-link" class="aw-button aw-button--secondary" href="#"
             >Change permissions</a
           >
         </div>
@@ -381,7 +285,7 @@
         />
         <div class="row">
           <button id="approve">Approve</button>
-          <button id="reject" class="secondary">Reject</button>
+          <button id="reject" class="aw-button--secondary">Reject</button>
           <span id="plan-status" class="status"></span>
         </div>
       </section>
@@ -392,14 +296,14 @@
           id="prompt"
           placeholder="Ask for something, or describe a task."
         ></textarea>
-        <label class="status">
+        <label class="aw-choice aw-muted">
           <input type="checkbox" id="author" />
           Build a script: the agent writes it, checks it and asks before
           deploying.
         </label>
         <div class="row">
           <button id="run">Run</button>
-          <button id="stop" class="secondary" hidden>Stop</button>
+          <button id="stop" class="aw-button--secondary" hidden>Stop</button>
           <span id="run-status" class="status"></span>
           <div id="spend" class="spend" hidden>
             <span id="spend-text" class="spend-text"></span>
