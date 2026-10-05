@@ -469,9 +469,13 @@ describe("secrets", () => {
     expect(gone.ok && "value" in gone.change).toBe(false);
   });
   test("a key that is not a plain word is refused", () => {
-    for (const key of ["", " ", "a b", "x/y", "k\n", "a".repeat(81)]) {
+    for (const key of ["", " ", "a b", "x/y", "k\nx", "a".repeat(81)]) {
       expect(secretChange("delete", "garden", { key }).ok).toBe(false);
     }
+  });
+  test("whitespace around a key is trimmed, so the key shown is the key stored", () => {
+    const asked = secretChange("delete", "garden", { key: " API_KEY\n" });
+    expect(asked.ok && asked.change.key).toBe("API_KEY");
   });
   test("an empty, missing, non-string or oversized value is refused", () => {
     expect(secretChange("write", "g", { key: "K" }).ok).toBe(false);
