@@ -45,7 +45,9 @@ import {
   clip,
   failureSignature,
   handoffNote,
+  evalScriptArgs,
   isAuthorTool,
+  revertScriptArgs,
   notOpenable,
   isShape,
   leftoverPlaceholders,
@@ -4240,12 +4242,10 @@ function runAuthorTool(
     case "revert_script": {
       const revision = String(input.revision ?? "").trim();
       if (!revision) return failed("'revision' is required.");
-      // Never `force`: a revision that does not bundle is not one to go back to.
-      const answer = engineAnswer("revert_script", {
-        script: script,
-        revision: revision,
-        dryRun: input.dryRun === true,
-      });
+      const answer = engineAnswer(
+        "revert_script",
+        revertScriptArgs(script, input),
+      );
       if (!answer.ok) return failed(`revert_script: ${answer.error}`);
       return done(clip(JSON.stringify(answer.value), 3000));
     }
@@ -4253,13 +4253,7 @@ function runAuthorTool(
     case "eval_script": {
       const source = String(input.source ?? "");
       if (!source.trim()) return failed("'source' is required.");
-      // `rollback` is not the model's to turn off: this tool runs outside the
-      // approval a deploy goes through.
-      const answer = engineAnswer("eval_script", {
-        script: script,
-        source: source,
-        rollback: true,
-      });
+      const answer = engineAnswer("eval_script", evalScriptArgs(script, input));
       if (!answer.ok) return failed(`eval_script: ${answer.error}`);
       return done(clip(JSON.stringify(answer.value), 3000));
     }

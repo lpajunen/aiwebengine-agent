@@ -5,6 +5,7 @@ import {
   CHAT_MAX_STEPS,
   CHAT_MAX_TOKENS,
   ESCALATE_AT,
+  evalScriptArgs,
   failureSignature,
   handoffNote,
   findLoose,
@@ -16,6 +17,7 @@ import {
   repairEscapedSource,
   readFilesArgument,
   readRemoveArgument,
+  revertScriptArgs,
   maxStepsFor,
   maxTokensFor,
   nextFailureCount,
@@ -391,5 +393,46 @@ describe("opening an existing script", () => {
   });
   test("an empty user id never matches", () => {
     expect(notOpenable("garden", [""], "")).not.toBeNull();
+  });
+});
+
+describe("the arguments of tools that run outside the approval", () => {
+  test("eval_script always rolls back, whatever the model asked for", () => {
+    expect(evalScriptArgs("garden", { source: "1" }).rollback).toBe(true);
+    expect(
+      evalScriptArgs("garden", { source: "1", rollback: false }).rollback,
+    ).toBe(true);
+    expect(
+      evalScriptArgs("garden", { source: "1", rollback: "false" }).rollback,
+    ).toBe(true);
+  });
+  test("eval_script passes the script and snippet and nothing else", () => {
+    const args = evalScriptArgs("garden", {
+      source: "1 + 1",
+      timeoutMs: 600000,
+      script: "somebody-elses",
+    });
+    expect(Object.keys(args).sort()).toEqual(["rollback", "script", "source"]);
+    expect(args.script).toBe("garden");
+    expect(args.source).toBe("1 + 1");
+  });
+  test("revert_script is never forced", () => {
+    const args = revertScriptArgs("garden", {
+      revision: "3",
+      force: true,
+      dryRun: true,
+    });
+    expect("force" in args).toBe(false);
+    expect(Object.keys(args).sort()).toEqual(["dryRun", "revision", "script"]);
+  });
+  test("revert_script previews only when asked to, and trims the revision", () => {
+    expect(revertScriptArgs("garden", { revision: " last-good " })).toEqual({
+      script: "garden",
+      revision: "last-good",
+      dryRun: false,
+    });
+    expect(
+      revertScriptArgs("garden", { revision: "2", dryRun: "yes" }).dryRun,
+    ).toBe(false);
   });
 });

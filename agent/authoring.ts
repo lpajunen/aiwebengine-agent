@@ -55,6 +55,42 @@ export const STUB_SOURCE =
   "function init() {}\n";
 
 /**
+ * The arguments `eval_script` is called with, from what the model sent.
+ *
+ * Only the script and the snippet are the model's. `rollback` is always true
+ * and nothing else is passed: this tool runs outside the approval a deploy
+ * goes through, so a snippet that could keep its database writes would be a
+ * write nobody was asked about.
+ */
+export function evalScriptArgs(
+  script: string,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    script: script,
+    source: String(input.source ?? ""),
+    rollback: true,
+  };
+}
+
+/**
+ * The arguments `revert_script` is called with, from what the model sent.
+ *
+ * Never `force`: the engine refuses a revision that does not bundle, and a
+ * model that wants past that refusal should stop and say so.
+ */
+export function revertScriptArgs(
+  script: string,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    script: script,
+    revision: String(input.revision ?? "").trim(),
+    dryRun: input.dryRun === true,
+  };
+}
+
+/**
  * Why a script cannot be opened for editing, or `null` when it can.
  *
  * Ownership is the whole question. The engine would refuse a write by an
