@@ -87,6 +87,7 @@ own tools, budgets and prompt; chat runs are unchanged.
 | `read_file`, `check_script`, `run_tests`, `read_logs`                         | Look and verify                                                                                                                                                                                                                  |
 | `list_revisions`, `revert_script`, `list_tasks`, `cancel_task`, `eval_script` | Revision history; restore an earlier revision as a new one (never forced); queued work, and cancelling one pending task (never the finished ones); run a snippet against what is served now (writes rolled back, not switchable) |
 | `request_deploy`                                                              | Runs the check and the tests, refuses if either fails, and asks the person; approving moves the pin to head                                                                                                                      |
+| `list_secrets`, `write_secret`, `delete_secret`                               | Keys only. A write or delete asks the person first, the plan never shows the value, and the stored copy is cleared once they decide. Live at once, not at deploy                                                                 |
 
 What keeps a small model on the rails:
 

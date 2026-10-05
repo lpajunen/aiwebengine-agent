@@ -104,6 +104,80 @@ export function cancelTaskArgs(
   return { script: script, task: String(input.task ?? "").trim() };
 }
 
+/** The longest secret value an author run will carry through an approval. */
+export const MAX_SECRET_CHARS = 10000;
+
+/** What a plan that defers a secret change carries. */
+export interface SecretChange {
+  script: string;
+  key: string;
+  /** Present for a write, absent for a delete. */
+  value?: string;
+}
+
+/**
+ * A secret change as the model asked for it, or the reason it cannot be.
+ *
+ * `write` takes a value and `delete` does not. The key is trimmed and must
+ * be a plain word: it is shown to the person in the plan, and what they are
+ * shown has to be what is stored.
+ */
+export function secretChange(
+  kind: "write" | "delete",
+  script: string,
+  input: Record<string, unknown>,
+): { ok: true; change: SecretChange } | { ok: false; why: string } {
+  const key = String(input.key ?? "").trim();
+  if (!/^[A-Za-z0-9_.-]{1,80}$/.test(key)) {
+    return {
+      ok: false,
+      why: "'key' must be 1 to 80 letters, digits, '_', '.' or '-'.",
+    };
+  }
+  if (kind === "delete") return { ok: true, change: { script, key } };
+  if (typeof input.value !== "string" || input.value === "") {
+    return { ok: false, why: "'value' is required, as a non-empty string." };
+  }
+  if (input.value.length > MAX_SECRET_CHARS) {
+    return {
+      ok: false,
+      why: `'value' is longer than ${MAX_SECRET_CHARS} characters; it is not an API key.`,
+    };
+  }
+  return { ok: true, change: { script, key, value: input.value } };
+}
+
+/**
+ * What the person is asked to approve for a secret change.
+ *
+ * Never contains the value. The plan is shown on the page and sent to a chat
+ * channel, and a value that reached either would be a secret in a place
+ * nobody stores secrets.
+ */
+export function secretPlanText(change: SecretChange): string {
+  return change.value === undefined
+    ? `Remove the secret "${change.key}" from "${change.script}". The script stops being able to read it at once.`
+    : `Store a value for the secret "${change.key}" of "${change.script}" (the value is not shown). It replaces any value already there, and is live at once, before any deploy.`;
+}
+
+/** A secret change read back from a stored plan, or `null` if it is not one. */
+export function secretChangeFrom(raw: unknown): SecretChange | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(raw ?? ""));
+  } catch (e) {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object") return null;
+  const p = parsed as Record<string, unknown>;
+  if (typeof p.script !== "string" || typeof p.key !== "string") return null;
+  if (!p.script || !p.key) return null;
+  if (p.value !== undefined && typeof p.value !== "string") return null;
+  return p.value === undefined
+    ? { script: p.script, key: p.key }
+    : { script: p.script, key: p.key, value: p.value };
+}
+
 /**
  * Why a script cannot be opened for editing, or `null` when it can.
  *
@@ -857,6 +931,39 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
         task: { type: "string", description: "The id list_tasks gave" },
       },
       required: ["script", "task"],
+    },
+  },
+  {
+    name: "list_secrets",
+    description: "The keys of the script's secrets. Values are never shown.",
+    input_schema: {
+      type: "object",
+      properties: { script: SCRIPT_PROPERTY },
+      required: ["script"],
+    },
+  },
+  {
+    name: "write_secret",
+    description:
+      "Ask the person to approve storing a secret, such as an API key they gave you. Takes effect at once, even before request_deploy. Never repeat the value in your reply.",
+    input_schema: {
+      type: "object",
+      properties: {
+        script: SCRIPT_PROPERTY,
+        key: { type: "string" },
+        value: { type: "string" },
+      },
+      required: ["script", "key", "value"],
+    },
+  },
+  {
+    name: "delete_secret",
+    description:
+      "Ask the person to approve removing one secret. Takes effect at once.",
+    input_schema: {
+      type: "object",
+      properties: { script: SCRIPT_PROPERTY, key: { type: "string" } },
+      required: ["script", "key"],
     },
   },
   {

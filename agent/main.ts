@@ -47,6 +47,9 @@ import {
   handoffNote,
   cancelTaskArgs,
   evalScriptArgs,
+  secretChange,
+  secretChangeFrom,
+  secretPlanText,
   isAuthorTool,
   revertScriptArgs,
   notOpenable,
@@ -1953,6 +1956,14 @@ function decide(
   // `personalStorage` resolves to them.
   const carriedOut =
     approved && plan ? performApproved(userId, runId, plan) : null;
+  // A secret's value waited in the plan only to be carried out. Whatever the
+  // answer, it is not kept: a rejected one was never going to be used.
+  if (plan && String(plan.action ?? "") === "write_secret") {
+    writeRow(
+      () => database.update("plans", Number(plan.id), { payload: "" }),
+      "clearing a secret from a plan",
+    );
+  }
 
   // Delivered as an ordinary message rather than an interjection: the run is
   // suspended, so there is no turn in flight to race, and this has to be the
@@ -4266,6 +4277,29 @@ function runAuthorTool(
       return done(clip(JSON.stringify(answer.value), 1000));
     }
 
+    case "list_secrets": {
+      const answer = engineAnswer("list_secrets", { script: script });
+      if (!answer.ok) return failed(`list_secrets: ${answer.error}`);
+      return done(clip(JSON.stringify(answer.value.keys ?? []), 1000));
+    }
+
+    case "write_secret":
+    case "delete_secret": {
+      const asked = secretChange(
+        name === "write_secret" ? "write" : "delete",
+        script,
+        input,
+      );
+      if (!asked.ok) return failed(asked.why);
+      return requestApprovalTool(
+        userId,
+        runId,
+        secretPlanText(asked.change),
+        name,
+        asked.change,
+      );
+    }
+
     case "eval_script": {
       const source = String(input.source ?? "");
       if (!source.trim()) return failed("'source' is required.");
@@ -4649,6 +4683,41 @@ function requestDeployTool(
  * only when they said so. The script is looked up again against what this run
  * created: an approval row carries a name, and a name is not authority.
  */
+function performSecretChange(
+  userId: string,
+  runId: string,
+  plan: PlanRow,
+): string | null {
+  const change = secretChangeFrom(plan.payload);
+  if (!change) return null;
+  const refusal = notYours(userId, runId, change.script);
+  if (refusal) return refusal;
+  const writing = change.value !== undefined;
+  const answer = engineAnswer(
+    writing ? "write_secret" : "delete_secret",
+    writing
+      ? { script: change.script, key: change.key, value: change.value }
+      : { script: change.script, key: change.key },
+  );
+  // The key is the whole of what the log says: the value stays out of it.
+  if (!answer.ok) {
+    recordActivity(
+      userId,
+      runId,
+      "error",
+      `Could not ${writing ? "store" : "remove"} the secret "${change.key}": ${answer.error}`,
+    );
+    return `it could not be ${writing ? "stored" : "removed"}: ${answer.error}`;
+  }
+  recordActivity(
+    userId,
+    runId,
+    "tool",
+    `${writing ? "Stored" : "Removed"} the secret "${change.key}" of "${change.script}".`,
+  );
+  return `the secret "${change.key}" is ${writing ? "stored" : "removed"}`;
+}
+
 function performDeploy(
   userId: string,
   runId: string,
@@ -4897,6 +4966,10 @@ function performApproved(
 
   if (action === "deploy_script") {
     return performDeploy(userId, runId, plan);
+  }
+
+  if (action === "write_secret" || action === "delete_secret") {
+    return performSecretChange(userId, runId, plan);
   }
 
   if (action !== "remember") {

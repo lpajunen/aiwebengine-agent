@@ -18,6 +18,10 @@ import {
   repairEscapedSource,
   readFilesArgument,
   readRemoveArgument,
+  secretChange,
+  secretChangeFrom,
+  secretPlanText,
+  MAX_SECRET_CHARS,
   revertScriptArgs,
   maxStepsFor,
   maxTokensFor,
@@ -248,7 +252,7 @@ describe("the tools", () => {
     expect(isAuthorTool("engine_call")).toBe(false);
   });
   test("the listing stays small", () => {
-    expect(JSON.stringify(AUTHOR_TOOLS).length < 7000).toBe(true);
+    expect(JSON.stringify(AUTHOR_TOOLS).length < 8000).toBe(true);
   });
 });
 
@@ -444,5 +448,66 @@ describe("the arguments of tools that run outside the approval", () => {
     });
     expect(args).toEqual({ script: "garden", task: "42" });
     expect("finished" in args).toBe(false);
+  });
+});
+
+describe("secrets", () => {
+  test("a write carries the value and a delete does not", () => {
+    const write = secretChange("write", "garden", {
+      key: "API_KEY",
+      value: "s3",
+    });
+    expect(write.ok && write.change).toEqual({
+      script: "garden",
+      key: "API_KEY",
+      value: "s3",
+    });
+    const gone = secretChange("delete", "garden", {
+      key: "API_KEY",
+      value: "s3",
+    });
+    expect(gone.ok && "value" in gone.change).toBe(false);
+  });
+  test("a key that is not a plain word is refused", () => {
+    for (const key of ["", " ", "a b", "x/y", "k\n", "a".repeat(81)]) {
+      expect(secretChange("delete", "garden", { key }).ok).toBe(false);
+    }
+  });
+  test("an empty, missing, non-string or oversized value is refused", () => {
+    expect(secretChange("write", "g", { key: "K" }).ok).toBe(false);
+    expect(secretChange("write", "g", { key: "K", value: "" }).ok).toBe(false);
+    expect(secretChange("write", "g", { key: "K", value: 5 }).ok).toBe(false);
+    expect(
+      secretChange("write", "g", {
+        key: "K",
+        value: "x".repeat(MAX_SECRET_CHARS + 1),
+      }).ok,
+    ).toBe(false);
+  });
+  test("the plan the person reads never contains the value", () => {
+    const text = secretPlanText({
+      script: "garden",
+      key: "API_KEY",
+      value: "hunter2-very-secret",
+    });
+    expect(text).toContain("API_KEY");
+    expect(text).toContain("garden");
+    expect(text.indexOf("hunter2-very-secret")).toBe(-1);
+  });
+  test("a change survives the plan row, and a damaged one is not read", () => {
+    const change = { script: "garden", key: "K", value: "v" };
+    expect(secretChangeFrom(JSON.stringify(change))).toEqual(change);
+    expect(secretChangeFrom(JSON.stringify({ script: "g", key: "K" }))).toEqual(
+      {
+        script: "g",
+        key: "K",
+      },
+    );
+    expect(secretChangeFrom("")).toBeNull();
+    expect(secretChangeFrom("not json")).toBeNull();
+    expect(secretChangeFrom(JSON.stringify({ script: "g" }))).toBeNull();
+    expect(
+      secretChangeFrom(JSON.stringify({ script: "g", key: "K", value: 5 })),
+    ).toBeNull();
   });
 });
