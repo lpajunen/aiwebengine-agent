@@ -772,6 +772,23 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
     },
   },
   {
+    name: "revert_script",
+    description:
+      "Put the script's files back as they were at a revision, recorded as a new revision. Nothing served changes until request_deploy is approved. Use dryRun first to see what it would undo.",
+    input_schema: {
+      type: "object",
+      properties: {
+        script: SCRIPT_PROPERTY,
+        revision: {
+          type: "string",
+          description: "A revision number, 'last-good' or a label",
+        },
+        dryRun: { type: "boolean", description: "Preview only" },
+      },
+      required: ["script", "revision"],
+    },
+  },
+  {
     name: "eval_script",
     description:
       "Run a synchronous JavaScript snippet in the script's sandbox as it is served now, not as you have written it since: use it to see what the live script does. Database writes are rolled back.",

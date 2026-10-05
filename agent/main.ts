@@ -4237,6 +4237,19 @@ function runAuthorTool(
       return done(clip(JSON.stringify(answer.value), 3000));
     }
 
+    case "revert_script": {
+      const revision = String(input.revision ?? "").trim();
+      if (!revision) return failed("'revision' is required.");
+      // Never `force`: a revision that does not bundle is not one to go back to.
+      const answer = engineAnswer("revert_script", {
+        script: script,
+        revision: revision,
+        dryRun: input.dryRun === true,
+      });
+      if (!answer.ok) return failed(`revert_script: ${answer.error}`);
+      return done(clip(JSON.stringify(answer.value), 3000));
+    }
+
     case "eval_script": {
       const source = String(input.source ?? "");
       if (!source.trim()) return failed("'source' is required.");

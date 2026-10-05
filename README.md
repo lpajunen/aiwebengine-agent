@@ -85,7 +85,7 @@ own tools, budgets and prompt; chat runs are unchanged.
 | `open_script`                                         | Takes a script the person already owns instead of creating one; pins it at what is served, so nothing written is served until approved                                               |
 | `write_files`, `edit_file`                            | Change the script; each answers with the engine's `check`                                                                                                                            |
 | `read_file`, `check_script`, `run_tests`, `read_logs` | Look and verify                                                                                                                                                                      |
-| `list_revisions`, `eval_script`                       | Revision history; run a snippet against what is served now (writes rolled back, not switchable)                                                                                      |
+| `list_revisions`, `eval_script`                       | Revision history; restore an earlier revision as a new one (never forced); run a snippet against what is served now (writes rolled back, not switchable)                             |
 | `request_deploy`                                      | Runs the check and the tests, refuses if either fails, and asks the person; approving moves the pin to head                                                                          |
 
 What keeps a small model on the rails:
