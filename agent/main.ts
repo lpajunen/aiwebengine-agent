@@ -4225,6 +4225,32 @@ function runAuthorTool(
       );
     }
 
+    case "list_revisions": {
+      const args: Record<string, unknown> = {
+        script: script,
+        limit: Number(input.limit) > 0 ? Math.floor(Number(input.limit)) : 10,
+      };
+      const asset = String(input.asset ?? "").trim();
+      if (asset) args.asset = asset;
+      const answer = engineAnswer("list_revisions", args);
+      if (!answer.ok) return failed(`list_revisions: ${answer.error}`);
+      return done(clip(JSON.stringify(answer.value), 3000));
+    }
+
+    case "eval_script": {
+      const source = String(input.source ?? "");
+      if (!source.trim()) return failed("'source' is required.");
+      // `rollback` is not the model's to turn off: this tool runs outside the
+      // approval a deploy goes through.
+      const answer = engineAnswer("eval_script", {
+        script: script,
+        source: source,
+        rollback: true,
+      });
+      if (!answer.ok) return failed(`eval_script: ${answer.error}`);
+      return done(clip(JSON.stringify(answer.value), 3000));
+    }
+
     case "request_deploy":
       return requestDeployTool(
         userId,

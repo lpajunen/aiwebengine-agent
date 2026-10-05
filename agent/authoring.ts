@@ -758,6 +758,36 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
     },
   },
   {
+    name: "list_revisions",
+    description:
+      "The script's recent revisions: what changed and whether init() succeeded. 'lastGood' is the newest that did.",
+    input_schema: {
+      type: "object",
+      properties: {
+        script: SCRIPT_PROPERTY,
+        asset: { type: "string", description: "Only revisions of this file" },
+        limit: { type: "integer", description: "How many (default 10)" },
+      },
+      required: ["script"],
+    },
+  },
+  {
+    name: "eval_script",
+    description:
+      "Run a synchronous JavaScript snippet in the script's sandbox as it is served now, not as you have written it since: use it to see what the live script does. Database writes are rolled back.",
+    input_schema: {
+      type: "object",
+      properties: {
+        script: SCRIPT_PROPERTY,
+        source: {
+          type: "string",
+          description: "The snippet; its last expression is the value",
+        },
+      },
+      required: ["script", "source"],
+    },
+  },
+  {
     name: "request_deploy",
     description:
       "Ask the person to approve serving the script. Runs the check and the tests first and refuses if either fails. " +
