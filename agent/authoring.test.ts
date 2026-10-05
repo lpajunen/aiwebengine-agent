@@ -18,6 +18,10 @@ import {
   repairEscapedSource,
   readFilesArgument,
   readRemoveArgument,
+  gitPush,
+  gitPushFrom,
+  gitPushText,
+  pushToGitArgs,
   secretChange,
   secretChangeFrom,
   secretPlanText,
@@ -512,6 +516,80 @@ describe("secrets", () => {
     expect(secretChangeFrom(JSON.stringify({ script: "g" }))).toBeNull();
     expect(
       secretChangeFrom(JSON.stringify({ script: "g", key: "K", value: 5 })),
+    ).toBeNull();
+  });
+});
+
+describe("git", () => {
+  const ahead = { state: "ahead", repo: "me/garden", branch: "main" };
+  test("an ahead script is pushed to where it already tracks", () => {
+    const asked = gitPush("garden", ahead, { message: "  add\nthe form " });
+    expect(asked.ok && asked.change).toEqual({
+      script: "garden",
+      repo: "me/garden",
+      branch: "main",
+      message: "add the form",
+    });
+  });
+  test("the model cannot name a destination", () => {
+    const asked = gitPush("garden", ahead, {
+      repo: "evil/exfil",
+      branch: "loot",
+      force: true,
+    });
+    expect(asked.ok && asked.change.repo).toBe("me/garden");
+    expect(asked.ok && asked.change.branch).toBe("main");
+  });
+  test("every state but ahead is refused, with what to do instead", () => {
+    for (const state of [
+      "unbound",
+      "in_sync",
+      "behind",
+      "diverged",
+      "unreachable",
+      "",
+      "new",
+    ]) {
+      const asked = gitPush("garden", { ...ahead, state }, {});
+      expect(asked.ok).toBe(false);
+    }
+    const behind = gitPush("garden", { ...ahead, state: "behind" }, {});
+    expect(!behind.ok && behind.why).toContain("pull");
+  });
+  test("an ahead script that says nowhere is refused", () => {
+    expect(gitPush("garden", { state: "ahead" }, {}).ok).toBe(false);
+  });
+  test("the plan names the place, and says when head is not what is served", () => {
+    const change = {
+      script: "garden",
+      repo: "me/garden",
+      branch: "main",
+      message: "m",
+    };
+    expect(gitPushText(change, null)).toContain("me/garden");
+    expect(gitPushText(change, null)).not.toContain("not the one being served");
+    expect(gitPushText(change, 4)).toContain("revision 4");
+  });
+  test("the push is called with the script and message and never a destination", () => {
+    const args = pushToGitArgs({
+      script: "g",
+      repo: "r/r",
+      branch: "b",
+      message: "m",
+    });
+    expect(args).toEqual({ script: "g", message: "m" });
+    expect(
+      pushToGitArgs({ script: "g", repo: "r/r", branch: "b", message: "" }),
+    ).toEqual({
+      script: "g",
+    });
+  });
+  test("a push survives the plan row, and a damaged one is not read", () => {
+    const change = { script: "g", repo: "r/r", branch: "b", message: "m" };
+    expect(gitPushFrom(JSON.stringify(change))).toEqual(change);
+    expect(gitPushFrom("")).toBeNull();
+    expect(
+      gitPushFrom(JSON.stringify({ script: "g", repo: "r/r" })),
     ).toBeNull();
   });
 });

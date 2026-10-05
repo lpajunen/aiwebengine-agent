@@ -47,6 +47,10 @@ import {
   handoffNote,
   cancelTaskArgs,
   evalScriptArgs,
+  gitPush,
+  gitPushFrom,
+  gitPushText,
+  pushToGitArgs,
   secretChange,
   secretChangeFrom,
   secretPlanText,
@@ -4300,6 +4304,26 @@ function runAuthorTool(
       );
     }
 
+    case "get_git_status": {
+      const answer = engineAnswer("get_git_status", { script: script });
+      if (!answer.ok) return failed(`get_git_status: ${answer.error}`);
+      return done(clip(JSON.stringify(answer.value), 1000));
+    }
+
+    case "push_to_git": {
+      const status = engineAnswer("get_git_status", { script: script });
+      if (!status.ok) return failed(`get_git_status: ${status.error}`);
+      const asked = gitPush(script, status.value, input);
+      if (!asked.ok) return failed(asked.why);
+      return requestApprovalTool(
+        userId,
+        runId,
+        gitPushText(asked.change, status.value.pinnedRevision),
+        "push_to_git",
+        asked.change,
+      );
+    }
+
     case "eval_script": {
       const source = String(input.source ?? "");
       if (!source.trim()) return failed("'source' is required.");
@@ -4683,6 +4707,47 @@ function requestDeployTool(
  * only when they said so. The script is looked up again against what this run
  * created: an approval row carries a name, and a name is not authority.
  */
+/**
+ * Publish, at the approval, to the place the person was shown.
+ *
+ * The status is read again here: an approval can sit for hours, and what the
+ * person agreed to was a push to that repository and branch from a script
+ * that was ahead of it. If either has changed, nothing is pushed.
+ */
+function performGitPush(
+  userId: string,
+  runId: string,
+  plan: PlanRow,
+): string | null {
+  const change = gitPushFrom(plan.payload);
+  if (!change) return null;
+  const refusal = notYours(userId, runId, change.script);
+  if (refusal) return refusal;
+  const status = engineAnswer("get_git_status", { script: change.script });
+  if (!status.ok) return `it was not pushed: ${status.error}`;
+  if (
+    status.value.state !== "ahead" ||
+    status.value.repo !== change.repo ||
+    status.value.branch !== change.branch
+  ) {
+    const why = `the script is now ${String(status.value.state)} against ${String(status.value.repo)} on ${String(status.value.branch)}, not what you approved`;
+    recordActivity(userId, runId, "error", `Not pushed: ${why}.`);
+    return `it was not pushed: ${why}`;
+  }
+  const answer = engineAnswer("push_to_git", pushToGitArgs(change));
+  if (!answer.ok) {
+    recordActivity(userId, runId, "error", `Could not push: ${answer.error}`);
+    return `it could not be pushed: ${answer.error}`;
+  }
+  recordActivity(
+    userId,
+    runId,
+    "tool",
+    `Pushed "${change.script}" to ${change.repo} on ${change.branch}.`,
+  );
+  return `"${change.script}" is pushed to ${change.repo} on ${change.branch}`;
+}
+
 function performSecretChange(
   userId: string,
   runId: string,
@@ -4966,6 +5031,10 @@ function performApproved(
 
   if (action === "deploy_script") {
     return performDeploy(userId, runId, plan);
+  }
+
+  if (action === "push_to_git") {
+    return performGitPush(userId, runId, plan);
   }
 
   if (action === "write_secret" || action === "delete_secret") {

@@ -88,6 +88,7 @@ own tools, budgets and prompt; chat runs are unchanged.
 | `list_revisions`, `revert_script`, `list_tasks`, `cancel_task`, `eval_script` | Revision history; restore an earlier revision as a new one (never forced); queued work, and cancelling one pending task (never the finished ones); run a snippet against what is served now (writes rolled back, not switchable) |
 | `request_deploy`                                                              | Runs the check and the tests, refuses if either fails, and asks the person; approving moves the pin to head                                                                                                                      |
 | `list_secrets`, `write_secret`, `delete_secret`                               | Keys only. A write or delete asks the person first, the plan never shows the value, and the stored copy is cleared once they decide. Live at once, not at deploy                                                                 |
+| `get_git_status`, `push_to_git`                                               | Status is free. A push asks the person first, goes only to where the script already tracks, and only when it is ahead; never a chosen repository or `force`. `pull_from_git` is not offered                                      |
 
 What keeps a small model on the rails:
 

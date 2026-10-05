@@ -104,6 +104,115 @@ export function cancelTaskArgs(
   return { script: script, task: String(input.task ?? "").trim() };
 }
 
+/** What a plan that defers a push to git carries. */
+export interface GitPush {
+  script: string;
+  repo: string;
+  branch: string;
+  message: string;
+}
+
+/**
+ * A push as the model asked for it, from what the engine says the script's
+ * status is, or the reason it cannot be asked for.
+ *
+ * The destination is never the model's. It is where the script already
+ * tracks, read from the engine: a model that could name a repository could be
+ * talked into publishing somebody's code to one of its choosing. Only a script
+ * that is `ahead` is pushed. Every other state has a different next step, and
+ * none of them is one an author run takes: `behind` and `diverged` need the
+ * person to decide which side wins.
+ */
+export function gitPush(
+  script: string,
+  status: Record<string, unknown>,
+  input: Record<string, unknown>,
+): { ok: true; change: GitPush } | { ok: false; why: string } {
+  const state = String(status.state ?? "");
+  if (state !== "ahead") {
+    const next: Record<string, string> = {
+      unbound:
+        "The script does not track a repository, so there is nowhere to publish it. The person has to bind it first.",
+      in_sync: "Nothing to publish: the repository already has these files.",
+      behind:
+        "The repository has changes this script lacks. The person has to pull before anything is published.",
+      diverged:
+        "Both sides changed. The engine does not merge; the person has to decide which wins.",
+      unreachable: "The repository cannot be reached right now.",
+    };
+    return {
+      ok: false,
+      why:
+        "Not pushed (" +
+        (state || "unknown") +
+        "). " +
+        (next[state] ?? "Check get_git_status."),
+    };
+  }
+  const repo = String(status.repo ?? "");
+  const branch = String(status.branch ?? "");
+  if (!repo || !branch) {
+    return { ok: false, why: "The engine did not say where it tracks." };
+  }
+  const message = String(input.message ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+  return { ok: true, change: { script, repo, branch, message } };
+}
+
+/** What the person is asked to approve for a push. */
+export function gitPushText(change: GitPush, pinned: unknown): string {
+  return (
+    `Publish "${change.script}" to ${change.repo} on ${change.branch} as one commit` +
+    (change.message ? ` ("${change.message}")` : "") +
+    ". It publishes the newest revision" +
+    (pinned !== null && pinned !== undefined && pinned !== ""
+      ? `, which is not the one being served (revision ${String(pinned)})`
+      : "") +
+    ". Anyone who can read that repository can then read these files."
+  );
+}
+
+/** A push read back from a stored plan, or `null` if it is not one. */
+export function gitPushFrom(raw: unknown): GitPush | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(raw ?? ""));
+  } catch (e) {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object") return null;
+  const p = parsed as Record<string, unknown>;
+  if (
+    typeof p.script !== "string" ||
+    typeof p.repo !== "string" ||
+    typeof p.branch !== "string" ||
+    !p.script ||
+    !p.repo ||
+    !p.branch
+  ) {
+    return null;
+  }
+  return {
+    script: p.script,
+    repo: p.repo,
+    branch: p.branch,
+    message: typeof p.message === "string" ? p.message : "",
+  };
+}
+
+/**
+ * The arguments `push_to_git` is called with: the script and a message.
+ * Never `repo`, `branch` or `force`: where it goes is what the person was
+ * shown, and a push the engine refuses as non-fast-forward stays refused.
+ */
+export function pushToGitArgs(change: GitPush): Record<string, unknown> {
+  const args: Record<string, unknown> = { script: change.script };
+  if (change.message) args.message = change.message;
+  return args;
+}
+
 /** The longest secret value an author run will carry through an approval. */
 export const MAX_SECRET_CHARS = 10000;
 
@@ -713,7 +822,7 @@ interface AuthorTool {
 
 const SCRIPT_PROPERTY = {
   type: "string",
-  description: "The script's name, as create_script or open_script gave it",
+  description: "The script this run works on",
 };
 
 /**
@@ -964,6 +1073,29 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
       type: "object",
       properties: { script: SCRIPT_PROPERTY, key: { type: "string" } },
       required: ["script", "key"],
+    },
+  },
+  {
+    name: "get_git_status",
+    description:
+      "Where the script stands against its repository: unbound, in_sync, behind, ahead, diverged or unreachable.",
+    input_schema: {
+      type: "object",
+      properties: { script: SCRIPT_PROPERTY },
+      required: ["script"],
+    },
+  },
+  {
+    name: "push_to_git",
+    description:
+      "Ask the person to approve publishing the script's newest revision to the repository it tracks. Only when get_git_status says ahead.",
+    input_schema: {
+      type: "object",
+      properties: {
+        script: SCRIPT_PROPERTY,
+        message: { type: "string", description: "Commit message" },
+      },
+      required: ["script"],
     },
   },
   {
