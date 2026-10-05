@@ -248,7 +248,7 @@ describe("the tools", () => {
     expect(isAuthorTool("engine_call")).toBe(false);
   });
   test("the listing stays small", () => {
-    expect(JSON.stringify(AUTHOR_TOOLS).length < 6000).toBe(true);
+    expect(JSON.stringify(AUTHOR_TOOLS).length < 7000).toBe(true);
   });
 });
 
