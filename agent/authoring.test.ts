@@ -19,6 +19,7 @@ import {
   maxStepsFor,
   maxTokensFor,
   nextFailureCount,
+  notOpenable,
   runKindOf,
   scriptNameProblem,
   shouldEscalate,
@@ -233,7 +234,8 @@ describe("the tools", () => {
       const props = (
         tool.input_schema as { properties: Record<string, unknown> }
       ).properties;
-      if (tool.name === "create_script") continue;
+      if (tool.name === "create_script" || tool.name === "open_script")
+        continue;
       expect("script" in props).toBe(true);
     }
   });
@@ -370,5 +372,24 @@ describe("editing from memory", () => {
   });
   test("nothing near is an empty string", () => {
     expect(nearestRegion(file, "zzz qqq")).toBe("");
+  });
+});
+
+describe("opening an existing script", () => {
+  test("an owner may", () => {
+    expect(notOpenable("garden", ["u1", "u2"], "u1")).toBeNull();
+  });
+  test("someone who is not an owner may not, and the refusal names the script", () => {
+    const why = notOpenable("garden", ["u2"], "u1");
+    expect(why).toContain('"garden"');
+    expect(why).toContain("owns");
+  });
+  test("a script with no owners, or an unreadable list, is refused", () => {
+    expect(notOpenable("garden", [], "u1")).not.toBeNull();
+    expect(notOpenable("garden", undefined, "u1")).not.toBeNull();
+    expect(notOpenable("garden", "u1", "u1")).not.toBeNull();
+  });
+  test("an empty user id never matches", () => {
+    expect(notOpenable("garden", [""], "")).not.toBeNull();
   });
 });

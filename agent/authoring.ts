@@ -55,6 +55,23 @@ export const STUB_SOURCE =
   "function init() {}\n";
 
 /**
+ * Why a script cannot be opened for editing, or `null` when it can.
+ *
+ * Ownership is the whole question. The engine would refuse a write by an
+ * account that does not own the script, but a run holding `administer` would
+ * not be refused, and "the scripts the person owns" is what was promised.
+ */
+export function notOpenable(
+  script: string,
+  owners: unknown,
+  userId: string,
+): string | null {
+  const list = Array.isArray(owners) ? owners : [];
+  if (userId && list.indexOf(userId) !== -1) return null;
+  return `"${script}" is not a script this person owns, so it cannot be changed here.`;
+}
+
+/**
  * Why a name cannot be used for a new script, or `null` when it can.
  *
  * A slug, as the engine requires, and kept clear of the names that are
@@ -572,7 +589,7 @@ interface AuthorTool {
 
 const SCRIPT_PROPERTY = {
   type: "string",
-  description: "The script's name, as create_script returned it",
+  description: "The script's name, as create_script or open_script gave it",
 };
 
 /**
@@ -607,6 +624,23 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
         },
       },
       required: ["name", "shape"],
+    },
+  },
+  {
+    name: "open_script",
+    description:
+      "Work on a script the person already owns, instead of creating one. Answers with its files. " +
+      "What is served does not change until request_deploy is approved. " +
+      "Call this first, once, in place of create_script.",
+    input_schema: {
+      type: "object",
+      properties: {
+        script: {
+          type: "string",
+          description: "The name of an existing script the person owns",
+        },
+      },
+      required: ["script"],
     },
   },
   {
@@ -755,7 +789,7 @@ export function isAuthorTool(name: string): boolean {
  */
 export const AUTHOR_PROMPT = [
   "You build a small script for the person who asked, using only your tools.",
-  "1. Call create_script with a name and a shape (site, tool or agent). It copies a starter and shows you the primer and the guide for that shape. Read both before you write.",
+  "1. To build something new, call create_script with a name and a shape (site, tool or agent). It copies a starter and shows you the primer and the guide for that shape. Read both before you write. To change a script the person already has, call open_script with its name instead, then read the files you will change.",
   "2. Change the starter with write_file (one whole file), write_files (several) or edit_file. Write the code and a *.test.ts file for the logic.",
   "3. Every write answers with the engine's check. Fix every error it lists before anything else: it names the file and the fix. check_script and run_tests check again.",
   "4. When the check and the tests pass, call request_deploy once. Nothing is served until the person approves it.",
@@ -769,7 +803,7 @@ export const AUTHOR_PROMPT = [
 
 /** Said to a turn that spoke and called nothing, in an authoring run. */
 export const NUDGE =
-  "You have not finished and nothing happened that turn. Call the next tool now (create_script, write_file, check_script, run_tests or request_deploy); do not describe it first.";
+  "You have not finished and nothing happened that turn. Call the next tool now (create_script, open_script, write_file, check_script, run_tests or request_deploy); do not describe it first.";
 
 /** How many such turns a run may have before it stops. */
 export const MAX_NUDGES = 3;

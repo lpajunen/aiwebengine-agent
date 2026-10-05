@@ -46,6 +46,7 @@ import {
   failureSignature,
   handoffNote,
   isAuthorTool,
+  notOpenable,
   isShape,
   leftoverPlaceholders,
   looseEdit,
@@ -3996,8 +3997,8 @@ function notYours(
   const own = createdScripts(userId, runId);
   if (own.indexOf(script) !== -1) return null;
   return own.length === 0
-    ? "No script has been created in this run yet. Call create_script first."
-    : `"${script}" is not a script this run created. You may only work on ${own
+    ? "No script has been chosen in this run yet. Call create_script or open_script first."
+    : `"${script}" is not the script this run works on. You may only work on ${own
         .map((name) => `"${name}"`)
         .join(", ")}.`;
 }
@@ -4062,6 +4063,7 @@ function runAuthorTool(
   input: Record<string, unknown>,
 ): { content: string; isError: boolean } {
   if (name === "create_script") return createScriptTool(userId, runId, input);
+  if (name === "open_script") return openScriptTool(userId, runId, input);
 
   const script = String(input.script ?? "").trim();
   const refusal = notYours(userId, runId, script);
@@ -4244,6 +4246,68 @@ function runAuthorTool(
  * a half-written script is never what visitors reach; the person's approval of
  * a deploy is what moves the pin.
  */
+/**
+ * Take an existing script as this run's one script.
+ *
+ * Two things are checked here rather than left to the engine. Ownership,
+ * because a run holding `administer` could otherwise be pointed at a script
+ * nobody here owns; and the pin, because an unpinned script serves head, so
+ * the first write would go live without anyone being asked. Pinning at the
+ * revision being served changes nothing visible and gives `request_deploy`
+ * the same meaning it has for a new script.
+ */
+function openScriptTool(
+  userId: string,
+  runId: string,
+  input: Record<string, unknown>,
+): { content: string; isError: boolean } {
+  const script = String(input.script ?? "").trim();
+  if (!script) return failed("A script name is required.");
+  if (createdScripts(userId, runId).length > 0) {
+    return failed(
+      "This run already has its script. Keep working on it with write_files.",
+    );
+  }
+  const owners = engineAnswer("list_script_owners", { script: script });
+  if (!owners.ok) return failed(`Could not check ownership: ${owners.error}`);
+  const notOwned = notOpenable(script, owners.value.owners, userId);
+  if (notOwned) return failed(notOwned);
+  const listed = engineAnswer("list_files", { script: script });
+  if (!listed.ok) return failed(`list_files: ${listed.error}`);
+  const deployment = engineAnswer("get_deployment", { script: script });
+  if (!deployment.ok) return failed(`get_deployment: ${deployment.error}`);
+  if (deployment.value.pinned !== true) {
+    const pin = engineAnswer("deploy_script", {
+      script: script,
+      revision: "head",
+    });
+    if (!pin.ok) {
+      return failed(`Could not hold what is served: ${pin.error}`);
+    }
+  }
+  writeRow(
+    () =>
+      database.insert("run_scripts", {
+        user_id: userId,
+        run_id: runId,
+        script: script,
+        created_ms: Date.now(),
+      }),
+    "recording an opened script",
+  );
+  recordActivity(userId, runId, "tool", `Opened the script "${script}".`);
+  const paths = ((listed.value.files ?? []) as { uri?: string }[])
+    .map((f) => String(f.uri ?? ""))
+    .filter(Boolean);
+  return done(
+    [
+      `Opened "${script}". What it serves now stays as it is; nothing you write is served until you call request_deploy and the person approves.`,
+      `Files: ${paths.join(", ")}.`,
+      "Read the files you will change before writing, and keep what the request does not ask you to change.",
+    ].join("\n"),
+  );
+}
+
 function createScriptTool(
   userId: string,
   runId: string,
@@ -4260,7 +4324,7 @@ function createScriptTool(
   }
   if (createdScripts(userId, runId).length > 0) {
     return failed(
-      "This run already created its script. Keep working on it with write_files.",
+      "This run already has its script. Keep working on it with write_files.",
     );
   }
   // `list_files` answers a script that does not exist with no files rather
