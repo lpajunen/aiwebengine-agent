@@ -45,6 +45,7 @@ import {
   clip,
   failureSignature,
   handoffNote,
+  cancelTaskArgs,
   evalScriptArgs,
   isAuthorTool,
   revertScriptArgs,
@@ -4248,6 +4249,21 @@ function runAuthorTool(
       );
       if (!answer.ok) return failed(`revert_script: ${answer.error}`);
       return done(clip(JSON.stringify(answer.value), 3000));
+    }
+
+    case "list_tasks": {
+      const answer = engineAnswer("list_tasks", { script: script, limit: 20 });
+      if (!answer.ok) return failed(`list_tasks: ${answer.error}`);
+      return done(clip(JSON.stringify(answer.value), 3000));
+    }
+
+    case "cancel_task": {
+      const args = cancelTaskArgs(script, input);
+      if (!args.task)
+        return failed("'task' is required: an id from list_tasks.");
+      const answer = engineAnswer("cancel_task", args);
+      if (!answer.ok) return failed(`cancel_task: ${answer.error}`);
+      return done(clip(JSON.stringify(answer.value), 1000));
     }
 
     case "eval_script": {

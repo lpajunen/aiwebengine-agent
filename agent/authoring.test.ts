@@ -4,6 +4,7 @@ import {
   AUTHOR_TOOLS,
   CHAT_MAX_STEPS,
   CHAT_MAX_TOKENS,
+  cancelTaskArgs,
   ESCALATE_AT,
   evalScriptArgs,
   failureSignature,
@@ -434,5 +435,14 @@ describe("the arguments of tools that run outside the approval", () => {
     expect(
       revertScriptArgs("garden", { revision: "2", dryRun: "yes" }).dryRun,
     ).toBe(false);
+  });
+  test("cancel_task names one task and never discards the finished ones", () => {
+    const args = cancelTaskArgs("garden", {
+      task: " 42 ",
+      finished: true,
+      script: "somebody-elses",
+    });
+    expect(args).toEqual({ script: "garden", task: "42" });
+    expect("finished" in args).toBe(false);
   });
 });

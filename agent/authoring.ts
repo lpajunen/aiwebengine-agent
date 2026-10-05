@@ -91,6 +91,20 @@ export function revertScriptArgs(
 }
 
 /**
+ * The arguments `cancel_task` is called with, from what the model sent.
+ *
+ * One task by id, never `finished`: that discards every failed and cancelled
+ * task of the script, and those are what a person reads to see what went
+ * wrong.
+ */
+export function cancelTaskArgs(
+  script: string,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  return { script: script, task: String(input.task ?? "").trim() };
+}
+
+/**
  * Why a script cannot be opened for editing, or `null` when it can.
  *
  * Ownership is the whole question. The engine would refuse a write by an
@@ -820,6 +834,29 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
         dryRun: { type: "boolean", description: "Preview only" },
       },
       required: ["script", "revision"],
+    },
+  },
+  {
+    name: "list_tasks",
+    description:
+      "The script's queued work: pending, running and failed, with errors.",
+    input_schema: {
+      type: "object",
+      properties: { script: SCRIPT_PROPERTY },
+      required: ["script"],
+    },
+  },
+  {
+    name: "cancel_task",
+    description:
+      "Cancel one pending task by id. A running task is not stopped.",
+    input_schema: {
+      type: "object",
+      properties: {
+        script: SCRIPT_PROPERTY,
+        task: { type: "string", description: "The id list_tasks gave" },
+      },
+      required: ["script", "task"],
     },
   },
   {
