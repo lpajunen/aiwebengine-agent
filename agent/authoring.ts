@@ -630,8 +630,7 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
     name: "open_script",
     description:
       "Work on a script the person already owns, instead of creating one. Answers with its files. " +
-      "What is served does not change until request_deploy is approved. " +
-      "Call this first, once, in place of create_script.",
+      "Call this first, once.",
     input_schema: {
       type: "object",
       properties: {
@@ -759,8 +758,7 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
   },
   {
     name: "list_revisions",
-    description:
-      "The script's recent revisions: what changed and whether init() succeeded. 'lastGood' is the newest that did.",
+    description: "Recent revisions, and whether init() succeeded in each.",
     input_schema: {
       type: "object",
       properties: {
@@ -774,7 +772,7 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
   {
     name: "revert_script",
     description:
-      "Put the script's files back as they were at a revision, recorded as a new revision. Nothing served changes until request_deploy is approved. Use dryRun first to see what it would undo.",
+      "Restore the files to an earlier revision, as a new revision. Nothing served changes until request_deploy is approved.",
     input_schema: {
       type: "object",
       properties: {
@@ -791,7 +789,7 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
   {
     name: "eval_script",
     description:
-      "Run a synchronous JavaScript snippet in the script's sandbox as it is served now, not as you have written it since: use it to see what the live script does. Database writes are rolled back.",
+      "Run a synchronous snippet against the script as it is served now, not as you have written it since. Database writes are rolled back.",
     input_schema: {
       type: "object",
       properties: {
