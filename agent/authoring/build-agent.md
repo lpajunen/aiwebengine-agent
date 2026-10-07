@@ -13,7 +13,7 @@ the result. The starter has `main.ts` (the route and the call),
    answer in another. Test both: they are the part that can be tested.
 3. The route handler is `ask` in `lib/handlers.ts`. It validates its input
    first and answers 400 for a bad body, then makes one model call through
-   `callModel`, a parameter that defaults to the real `fetch`. A test passes a
+   `callModel`, a parameter that defaults to `callAnthropic` (the real model call). A test passes a
    fake `callModel`, so it never reaches the network; test the 200, the 400 and
    a model failure (502) with `makeContext` from `lib/testing.ts`.
 4. Send the key as `"x-api-key": "{{secret:ANTHROPIC_API_KEY}}"`. The engine

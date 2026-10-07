@@ -28,7 +28,7 @@ for anybody's tokens.
 
 There is no endpoint that advances a run. Each turn queues the next.
 
-`agent/main.ts` is the root script and holds the loop. Five modules sit beside
+`agent/main.ts` is the root script and holds the loop. Seven modules sit beside
 it, because a root script cannot `export` and a test module reaches its
 subject by importing it — so anything under test had to move out:
 
@@ -42,7 +42,7 @@ subject by importing it — so anything under test had to move out:
 | `engine.ts`       | which management tools only read, and their arguments     |
 | `authoring.ts`    | what a script-building run is given, and how it is judged |
 
-Their tests are `agent/*.test.ts` — 113 cases — run with the `run_tests` tool
+Their tests are `agent/*.test.ts`, run with the `run_tests` tool
 or `POST /engine/run_tests` with `{"script": "<this script>"}`.
 
 The model gets five tools: `write_response` (the only way the person sees
@@ -540,13 +540,14 @@ Three things, none of which the script can do for itself.
 than a `scriptStorage` value, so that it is never handed to JavaScript at all:
 
 ```text
-write_secret uri=<this script> name=TELEGRAM_BOT_TOKEN value=<token> scope=script
+write_secret script=<this script> key=TELEGRAM_BOT_TOKEN value=<token>
 ```
 
 **2. A webhook secret**, which Telegram echoes back on every call so the
 script can tell a real delivery from a forged one. It lives in `scriptStorage`
-because checking it means _comparing_ it, and the engine never returns a
-secret's value to JavaScript. `run_js` holds no `read_storage`, so
+for now; `crypto.secretEquals` could compare a stored secret host-side, and
+moving it there is open work (`TODO-improvements.md`). `run_js` holds no
+`read_storage`, so
 model-written code cannot read it back; what it is worth is bounded anyway,
 since a forged delivery still has to name a sender somebody has linked.
 Generate something long and random, then:
@@ -577,16 +578,12 @@ closed, rather than accepting anyone who omits the header.
 ### What it needs from the engine
 
 A token in a URL. Telegram takes its bot token as a path segment and offers no
-header form, and this engine substitutes `{{secret:...}}` into header values
-only — deliberately, since a URL reaches the audit line, the engine's logs and
-the far end's access log. That is why `http_client.rs` grew `resolve_url`: a
-secret may now fill in a **path**, the template keeps carrying the scheme and
-host so every check runs against a string with no credential in it, and every
-line that writes the URL down keeps writing the template.
-
-**An engine older than that change cannot run this.** The bot token would be
-sent to Telegram as the literal text `{{secret:TELEGRAM_BOT_TOKEN}}` and every
-call would fail.
+header form. The engine substitutes `{{secret:...}}` into a URL as well as into
+header values (`resolve_url` in `http_client.rs`): the template keeps carrying
+the scheme and host, so every check runs against a string with no credential in
+it, and every line that writes the URL down — the audit line, the engine's
+logs — writes the template. An engine without that would send the literal text
+`{{secret:TELEGRAM_BOT_TOKEN}}` and every call would fail.
 
 To let a Telegram message use the person's apps, they also tick **Use your
 other apps' tools** on the consent page (and **Change things** for an app that
@@ -623,10 +620,10 @@ outside any script and are never pulled in.
 With the repository pushed to GitHub, from an engine you administer:
 
 ```
-pull_from_git  repository=<owner>/aiwebengine-agent
+pull_from_git  repo=<owner>/aiwebengine-agent
 ```
 
-Or push the two files directly with `write_files` / `write_file`.
+Or write the files of `agent/` directly with one `write_files` call.
 
 Each person signs in, stores their own key at `/agent`, and grants the agent
 permission to work while they are away — all three from that page.

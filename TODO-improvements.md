@@ -2,9 +2,10 @@
 
 What this agent has: a prompt box, an SSE activity log that fills in as the
 model writes, a Telegram bot answering out of the same run, five tools —
-`write_response`, `remember`, `list_memories`, `recall` and `run_js` — plus up
-to three more when a run is planning or the deployment has skills, per-person
-keys, a durable turn chain that folds itself into a summary rather than filling
+`write_response`, `remember`, `list_memories`, `recall` and `run_js` — plus
+the ones a run is given conditionally (planning, skills, the engine's tools,
+the person's other apps), a script-building mode with its own tools, earlier
+conversations listed and continued, per-person keys, a durable turn chain that folds itself into a summary rather than filling
 up, plan and act modes enforced under the JavaScript, a cached prompt, a
 per-run cost display, and a stop button. The README describes how each works.
 
@@ -33,16 +34,18 @@ assumed.
 
 ### Tools
 
-| Item                              | State         | Where, or what it waits on                                      |
-| --------------------------------- | ------------- | --------------------------------------------------------------- |
-| `run_js` — code as the action     | Built         | `runJsTool` over `sandbox.run`, narrowed by mode                |
-| Mounting a third-party MCP server | Ahead         | `McpClient` is in the API; it also imports untrusted content    |
-| Mounting the engine's own tools   | Open question | a token mounted this way would launder the delegation ceiling   |
-| Subagents                         | Ahead         | the fourth use of the suspended run, with a lane of their own   |
-| Background work                   | Ahead         | start it, keep talking, be told when it lands                   |
-| Tool search, deferred schemas     | Superseded    | by `run_js` — the tool list is the thing that now does not grow |
-| Hooks                             | Superseded    | `runTool` plus the deferred action already is this              |
-| Structured questions              | Superseded    | `plans`, rendered as buttons                                    |
+| Item                              | State      | Where, or what it waits on                                                                                        |
+| --------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------- |
+| `run_js` — code as the action     | Built      | `runJsTool` over `sandbox.run`, narrowed by mode                                                                  |
+| Mounting a third-party MCP server | Ahead      | `McpClient` is in the API; it also imports untrusted content                                                      |
+| The engine's own tools            | Built      | `engine_tools` / `engine_call` over the `engine` global, under an `author` or `administer` grant; no stored token |
+| The person's other apps' tools    | Built      | `app_tools` / `app_call` over the `tools` global, under the `tools` grant                                         |
+| Building scripts                  | Built      | `kind: "author"` runs with their own tools; see the README                                                        |
+| Subagents                         | Ahead      | the fourth use of the suspended run, with a lane of their own                                                     |
+| Background work                   | Ahead      | start it, keep talking, be told when it lands                                                                     |
+| Tool search, deferred schemas     | Superseded | by `run_js` — the tool list is the thing that now does not grow                                                   |
+| Hooks                             | Superseded | `runTool` plus the deferred action already is this                                                                |
+| Structured questions              | Superseded | `plans`, rendered as buttons                                                                                      |
 
 ### Run control
 
@@ -55,7 +58,7 @@ assumed.
 | Per-tool approval               | Built            | a plan carries `action` and `payload`, so approving performs it |
 | Cost and token accounting       | Built, page only | `turn_usage`; a run answered on a channel reports nothing       |
 | Checkpoints and rewind          | Ahead            | `revisions.rs`, over what the agent writes                      |
-| Session management              | Ahead            | the rows are per run; the page knows about one                  |
+| Session management              | Built, partly    | earlier conversations are listed and continued; forking is not  |
 | Model and effort per run        | Ahead            | four things move with the tier, not one                         |
 
 ### Channels and presentation
@@ -73,9 +76,10 @@ assumed.
 
 Three things that belong on this list and have no section of their own.
 
-- **A regression suite.** 77 cases over five pure modules (`protocol`,
-  `capabilities`, `budget`, `skills`, `plans`). An agent saying it saved a note
-  it had not is covered at its decode layer, not at its effects.
+- **A regression suite.** The `*.test.ts` cases cover the seven modules beside
+  `main.ts` (`protocol`, `capabilities`, `budget`, `skills`, `plans`, `engine`,
+  `authoring`). An agent saying it saved a note it had not is covered at its
+  decode layer, not at its effects.
 - **Spend on a channel.** "Each person pays with their own key, so the bill is
   theirs to see" is true on the page and false everywhere else.
 - **Approval provenance.** An approval can only carry out what the _approver's_
@@ -111,10 +115,10 @@ constant time, without returning it, so the secret can move to
 
 ### Tests that run where the code runs
 
-The 77 cases run under a stand-in for `test`, `describe` and `expect`; none has
-run under the engine's `run_tests`. After that, the parts that are not pure: the
-state machine in `setRunState`, the ordering in `decide`, the swap in
-`compactRun`. Each needs a fake of something.
+The cases run under the engine's `run_tests` and cover the modules beside
+`main.ts`. What is not covered is the part that is not pure: the state machine
+in `setRunState`, the ordering in `decide`, the swap in `compactRun`. Each needs
+a fake of something.
 
 ### Context
 
@@ -130,15 +134,12 @@ state machine in `setRunState`, the ordering in `decide`, the swap in
 - **Mounting a third-party MCP server.** `McpClient` is in the API. It imports
   untrusted content into a run that can reach the network, so it comes after
   the host list above.
-- **Mounting the engine's own tools.** The engine is an MCP server with
-  `read_file`, `write_file`, `edit_file`, `search_files`, `run_tests`,
-  `check_script`, `eval_script`, `read_logs`, revisions and git sync — the whole
-  loop a coding agent needs. The question is the credential: `new
-McpClient(url, secret)` resolves a stored token host-side, so a delegated turn
-  holding an owner's token would hold, through a credential, authority the
-  delegation grant did not give it. A delegation can carry `author` or
-  `administer` scopes when the person ticks them, which may make a stored token
-  unnecessary; the engine side is the first Security item in its `ROADMAP.md`.
+- **No stored token for this engine's `/mcp`.** The engine's tools are reached
+  through the `engine` global under the delegation grant. Mounting this
+  engine's `/mcp` with `new McpClient(url, secret)` instead would let a
+  delegated turn hold, through a stored credential, authority the grant did not
+  give it; the engine side of that is the first Security item in its
+  `ROADMAP.md`.
 - **Subagents** — an isolated context whose tool output never enters the
   parent's transcript — and **background work** — start something long, keep
   talking, be told when it lands. Both need the run to suspend and be resumed,
@@ -153,10 +154,11 @@ McpClient(url, secret)` resolves a stored token host-side, so a delegated turn
 
 - **Checkpoints and rewind.** A page over `list_revisions`, `diff_revisions` and
   `revert_script` for what the agent writes (skills, first). A revision is per
-  script, not per file, so a skill's history is `file_history`, and reverting
+  script, not per file, so a skill's history is `list_revisions` with `asset`, and reverting
   lands the whole script.
-- **Session management.** Resuming, listing past runs, forking from a turn. The
-  rows are per run; the page shows one.
+- **Session management.** Earlier conversations are listed and continued
+  (`/agent/conversations`, a prompt with a `runId`). Forking from a turn is
+  not built.
 - **Spend on a channel.** A Telegram run spends the person's key with no
   display. `turn_usage` is written either way, so this is delivery — a line
   under the answer.
@@ -221,8 +223,8 @@ pass to the next tool, rather than bytes in the transcript. The engine already
 does this where a read can save to a file and answer with its location.
 
 **An edit beats a write.** A diff-shaped tool cuts output tokens by an order of
-magnitude on anything large, which is why the engine grew `edit_asset` and
-`edit_file` beside `write_file` rather than instead of it.
+magnitude on anything large, which is why the engine grew `edit_file` beside
+`write_file` rather than instead of it.
 
 **Writes should be safe to retry.** `maxAttempts: 1` is right for a turn — a
 retry is a second model call on somebody's own key — but it also means a tool
@@ -323,7 +325,7 @@ It is six tables — `messages`, `activities`, `runs`, `interjections`,
 `plans`, `turn_usage` — and `app.js` reconstructs a run's state from the stream
 as a seventh account of it. That makes this item, [state sync to the
 client](#cloudflare-agents-sdk-on-durable-objects) and [session
-management](#session-management) one piece of work rather than three: one log,
+management](#run-control-1) one piece of work rather than three: one log,
 projections over it, and a page that mirrors rather than re-derives. Worth
 doing before the list of surfaces grows again, since every new channel is
 another place a divergence can show.
