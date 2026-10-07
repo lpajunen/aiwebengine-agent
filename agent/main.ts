@@ -84,14 +84,8 @@ import { rememberArgs, skillWriteArgs } from "./plans.ts";
  * answers; each turn queues the next; the page watches the SSE stream. Closing
  * the tab does not stop anything.
  *
- * This used to be the other way round — the browser posted one request per
- * turn — because three engine facts left nowhere else for a turn to run:
- * `registerOnce` took effect only during `init()`, a scheduled job ran as
- * `UserContext::admin("scheduler")` and so could not reach the person's own
- * API key, and `dispatcher.sendMessage` ran its listeners inline. All three
- * are gone. `personalTasks` is the replacement for all of them: a durable
- * queue whose work runs *as the person who asked for it*, so their key
- * resolves and `personalStorage` answers.
+ * Turns run on `personalTasks`: a durable queue whose work runs *as the person
+ * who asked for it*, so their key resolves and `personalStorage` answers.
  *
  * Two things that follow from running while the person is away.
  *
@@ -126,9 +120,8 @@ import { rememberArgs, skillWriteArgs } from "./plans.ts";
  * The model every run uses.
  *
  * Haiku for now, on cost: an agent turn resends the whole conversation, so the
- * bill grows with the length of a run rather than with the prompt. It was also
- * the only tier that fitted when a turn had ten seconds; a turn is now a job
- * with `javascript.job_timeout_ms`, so speed is no longer what decides this.
+ * bill grows with the length of a run rather than with the prompt. A turn is a
+ * job with `javascript.job_timeout_ms`, so speed does not decide this.
  *
  * Changing this is not only the string. Haiku 4.5 rejects
  * `output_config.effort`, and takes thinking as
@@ -648,7 +641,7 @@ const ENGINE_CALL_TOOL: ToolSpec = {
       args: {
         type: "string",
         description:
-          'The tool\'s arguments as a JSON object, e.g. {"uri": "..."}. Pass {} for a tool that takes none.',
+          'The tool\'s arguments as a JSON object, e.g. {"script": "..."}. Pass {} for a tool that takes none.',
       },
     },
     required: ["name", "args"],
@@ -1696,15 +1689,14 @@ function advanceRun(context: HandlerContext): void {
     }
 
     // The next turn, queued rather than run here — same reasoning as the
-    // first: one model call per execution budget. Enqueueing is what replaced
-    // the browser posting the next step.
+    // first: one model call per execution budget.
     // Re-read rather than trusting the check at the top: a cancel can land
     // during the model call, which is the one part of a turn that cannot be
     // interrupted. Catching it here stops the run a whole turn earlier than
     // the next gate would.
-    // Not only a cancel any more: a turn that called `request_approval` set
-    // this to `waiting`, and declining to queue a successor is exactly how a
-    // run suspends. The gate is the same one either way, which is the point.
+    // Not only a cancel: a turn that called `request_approval` set this to
+    // `waiting`, and declining to queue a successor is exactly how a run
+    // suspends. The gate is the same one either way, which is the point.
     const now = runStateOf(userId, runId);
     if (now !== null && now !== "running") {
       console.log(`agent: run ${runId} is ${now}; not queuing another turn`);
@@ -1734,8 +1726,7 @@ function advanceRun(context: HandlerContext): void {
 /**
  * Tell the person's open tabs that the run is over.
  *
- * The page used to learn this from the step response it was waiting on. It no
- * longer waits on anything, so the end of a run has to arrive the same way
+ * The page waits on no response, so the end of a run arrives the way
  * everything else does.
  */
 function finishRun(userId: string, runId: string, reason: string): void {
@@ -2321,18 +2312,15 @@ function forgetKey(context: HandlerContext): HttpResponse {
  * which for a queued turn is the person who started the run, by their grant.
  *
  * The template is substituted anywhere inside a header value, so
- * `Authorization: Bearer {{secret:...}}` works too. It did not once, and this
- * comment used to say so.
+ * `Authorization: Bearer {{secret:...}}` works too.
  *
- * This was `fetch` until the engine grew `fetchStream`. `fetch` returns only
- * once the whole body has arrived, so a person learned what the model said one
- * turn at a time and a turn is as long as the model takes to finish thinking —
- * the agent's longest silence was the part where it was working hardest.
- * `fetchStream` hands back the status and headers immediately and the body in
+ * `fetchStream` rather than `fetch`, which returns only once the whole body
+ * has arrived — the agent's longest silence would be the part where it was
+ * working hardest. `fetchStream` hands back the status and headers immediately and the body in
  * pieces, which is what lets an answer appear while it is still being written.
  *
- * What comes back from here is the same `ApiResponse` it always was. The
- * streaming is contained in this section on purpose: `advanceRun` stores
+ * What comes back from here is a whole `ApiResponse`. The streaming is
+ * contained in this section on purpose: `advanceRun` stores
  * blocks and dispatches tools exactly as it did, and cannot tell that the
  * answer was assembled rather than parsed.
  */
@@ -3895,7 +3883,7 @@ function engineCallTool(
   const parsed = parseArgs(argsJson);
   if (!parsed.ok) {
     return {
-      content: `\`args\` has to be a JSON object, e.g. {"uri": "..."} — ${parsed.why}. Got: ${cut(argsJson, 200)}`,
+      content: `\`args\` has to be a JSON object, e.g. {"script": "..."} — ${parsed.why}. Got: ${cut(argsJson, 200)}`,
       isError: true,
     };
   }
@@ -5248,32 +5236,22 @@ const TELEGRAM_CHANNEL = "telegram";
  * and script secrets second, so a name nobody has stored personally resolves
  * to this one.
  *
- * It is a secret rather than a `scriptStorage` value, and that distinction is
- * the reason the engine grew URL substitution for this. A token in
+ * It is a secret rather than a `scriptStorage` value: a token in
  * `scriptStorage` is a string this script can read, and therefore a string
- * that leaves with whatever reads it; kept here it is never handed to
+ * that leaves with whatever reads it. Kept here it is never handed to
  * JavaScript at all, and is substituted host-side into a URL that reaches the
- * audit line as a template. `run_js` no longer holds `read_storage`, so the
- * model-authored path to it is closed as well — but that is the second lock
- * and this is the first, and the second was not there when this was written.
+ * audit line as a template.
  */
 const TELEGRAM_TOKEN_SECRET = "TELEGRAM_BOT_TOKEN";
 
 /**
  * The token Telegram echoes back in `X-Telegram-Bot-Api-Secret-Token`.
  *
- * In `scriptStorage`, and not in `secretStorage`, for a reason that is a
- * limitation rather than a preference: the engine never returns a secret's
- * value to JavaScript, and checking this one means *comparing* it. There is
- * no primitive for "is the header equal to the stored secret", so a value
- * that must be compared has to be one the script can read.
- *
- * *This* script, which is now a narrower claim than it was. `run_js` held
- * `read_storage` until the egress question was answered, so for as long as
- * both were true this constant was three lines of model-authored code away
- * from anywhere — worth knowing as the shape of the bug rather than as
- * history, because it is what a secret in a readable store costs the moment
- * something untrusted can write code.
+ * In `scriptStorage`, which this script can read — and so anything running
+ * as this script with `read_storage` can. `run_js` holds no `read_storage`.
+ * `crypto.secretEquals` compares a stored secret without returning it, so
+ * this can move to `secretStorage`; that is open work in
+ * `TODO-improvements.md`, since it changes the setup instructions.
  *
  * What it is worth is bounded, which is what made that survivable. It
  * authenticates inbound calls and unlocks nothing outbound: somebody holding

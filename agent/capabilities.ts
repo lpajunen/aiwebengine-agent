@@ -53,15 +53,11 @@
  *   the person. This script's tables hold every run every person has ever had,
  *   so granting it would let one person's turn read another's conversation and
  *   hand it back as a tool result.
- * - **`read_storage`.** Granted here until it was read against `use_network`
- *   rather than on its own. It covers both stores: `personalStorage`, which is
- *   this person's notes, and `scriptStorage`, which is where the Telegram
- *   webhook's shared secret has to live, because checking that one means
- *   *comparing* it and the engine never hands a real secret back. Either of
- *   those beside `use_network` is private data and a way out inside one
- *   execution, and the way out has no destination: `Capability` names the verb
- *   and `FetchOptions` has no allowlist, so "may call the network" means "may
- *   call anything". Notes reach the loop through `recall` and `list_memories`
+ * - **`read_storage`.** It covers both stores: `personalStorage`, which is
+ *   this person's notes, and `scriptStorage`, which holds the Telegram
+ *   webhook's shared secret. Either beside `use_network` is private data and a
+ *   way out inside one execution, and without a host list the way out has no
+ *   destination: "may call the network" means "may call anything". Notes reach the loop through `recall` and `list_memories`
  *   instead. That costs a turn and buys the property worth having — code
  *   cannot walk the store by itself, so a note only reaches a URL if the
  *   *model* carries it there through the transcript, in text a person can read
@@ -74,21 +70,14 @@
  *   names. `remember` is the one write the model has without asking, and it
  *   asks on its own behalf rather than being refused.
  *
- * What is left of the risk, now that this is three names and not four.
- * Untrusted content still arrives — through anything the code fetches, and
- * through a chat since Telegram — and it is still read by a turn holding
- * `use_network`. What no longer sits beside it is a way to *read* private
- * data, so the trifecta is two legs here rather than three. Closing the last
- * one needs a `use_network` that can name a host; that is engine work, and it
- * is the top row of the backlog in `TODO-improvements.md`.
- *
- * The paragraph this replaced said the exposure would arrive with the first
- * channel adapter, and that the fix would be a narrower list for a run
- * somebody else had started. Both were wrong, in the direction that costs
- * most. `run_js` opened it on its own with no chat in the picture, because a
- * fetched page is untrusted content and this tool exists to fetch; and an
- * unknown sender never gets a run to narrow, since `enqueueFrom` resolves a
- * stranger to nobody and throws. Who sent the message was never the question.
+ * What is left of the risk. Untrusted content arrives — through anything the
+ * code fetches, and through a chat — and is read by a turn holding
+ * `use_network`. Nothing beside it can *read* private data, so the trifecta is
+ * two legs here rather than three. Closing the last one is naming the hosts
+ * the code may reach: `sandbox.run` takes `hosts`, and choosing the list is the
+ * first item of open work in `TODO-improvements.md`. Who sent a message is not
+ * the question: a fetched page is untrusted content too, and an unknown sender
+ * never gets a run, since `enqueueFrom` resolves a stranger to nobody.
  *
  * Intersected with `sandbox.held()` rather than passed as written: `run` throws
  * when asked to keep something the caller does not hold, and a delegation grant

@@ -118,15 +118,9 @@ changes. `eval/` holds the tasks that measure all of this.
 answers; each turn queues the next; the page watches the SSE stream. Closing
 the tab does not stop anything.
 
-This used to be the other way round — the browser posted one request per turn —
-because three engine facts left nowhere else for a turn to run: `registerOnce`
-took effect only during `init()`, a scheduled job ran as
-`UserContext::admin("scheduler")` and so could not reach the person's own API
-key, and `dispatcher.sendMessage` ran its listeners inline.
-
-All three are gone. `personalTasks` replaces all of them: a durable queue whose
-work runs **as the person who asked for it**, so their key resolves and
-`personalStorage` answers, exactly as they did inside their own request.
+Turns run on `personalTasks`: a durable queue whose work runs **as the person
+who asked for it**, so their key resolves and `personalStorage` answers,
+exactly as they would inside their own request.
 
 Two things follow from running while the person is away.
 
@@ -225,7 +219,7 @@ the cost of it. And turns are counted on the run's row rather than by counting
 assistant messages, because a compacted run has none left — counting them
 would hand every compacted run a fresh budget and a run could never end.
 
-`MAX_STEPS` is now the only thing bounding a run's length, which makes raising
+`MAX_STEPS` is the only thing bounding a run's length, which makes raising
 it a decision about money rather than about correctness.
 
 ## Stopping and steering a run

@@ -7,8 +7,13 @@
  * Add this reference to your scripts for IDE autocomplete and type checking:
  * /// <reference path="https://your-engine.com/engine/types/v0.1.0/aiwebengine.d.ts" />
  *
- * IMPORTANT: Every script MUST export an init() function that registers routes,
- * MCP tools, or other initialization logic.
+ * A script with routes, MCP tools or jobs to register defines a top-level
+ * `function init()` that registers them. `init()` is optional: a script with
+ * none registers nothing and is still valid. Handlers are named by string and
+ * must be top-level functions; `export` is not needed.
+ *
+ * A short guide to the globals a simple script uses is served beside this file
+ * as `script-primer.md`.
  *
  * @example
  * // Minimal script structure
@@ -26,9 +31,9 @@
 // ============================================================================
 
 /**
- * Initialization function that must be exported by every script.
- * This function is called when the script is loaded and should register
- * routes, MCP tools, or perform other setup tasks.
+ * Optional initialization function. When the script defines one, the engine
+ * calls it at startup and on every deploy; it is where routes, MCP tools and
+ * jobs are registered. A script that defines none registers nothing.
  *
  * @param context - Handler context (optional, may not be provided during init)
  * @example
@@ -359,7 +364,7 @@ interface HandlerContext {
 
   /**
    * Identifies this invocation. Every log line the handler writes is filed
-   * under it, so `GET /engine/script_logs?request_id=<id>` returns exactly the
+   * under it, so `GET /engine/read_logs?request_id=<id>` returns exactly the
    * lines this run produced. For an HTTP route it is the request's
    * `x-request-id`, which the response carries back to the caller.
    */
@@ -523,8 +528,11 @@ interface RouteRegistry {
    * a spec naming no target or two, an unknown key, a reserved path, a
    * capability you do not hold — throws. A **refusal** is returned:
    * `{ ok: false, reason }` for a file outside `public/` or not in the tree,
-   * and for any call made outside startup and `init()`, where there is
-   * nothing to register into.
+   * for a path (same method, on a host this script is published on) that
+   * another script already holds — the older script keeps it, and the reason
+   * names it — and for any call made outside startup and `init()`, where
+   * there is nothing to register into. The same path on a host the other
+   * script is not published on is not a collision.
    */
   registerRoute(path: string, spec: RouteSpec): RegisterRouteResult;
 
@@ -1847,7 +1855,7 @@ interface Database {
 /**
  * Console logging interface
  * Note: reading and pruning stored log entries is engine administration, not a
- * script API — use `GET|DELETE /engine/script_logs` or the equivalent MCP tools.
+ * script API — use `/engine/read_logs` and `/engine/clear_logs` or the equivalent MCP tools.
  *
  * A log is a diagnostic rather than a store: a line survives only while it is
  * within both the newest 10,000 of this script and 168 hours of now, and either
@@ -1991,7 +1999,7 @@ interface Console {
   /**
    * Does nothing. Present so the call is not a `ReferenceError`, but stored log
    * lines are pruned through the engine's administration surface
-   * (`DELETE /engine/script_logs`), which is not reachable from a script.
+   * (`/engine/clear_logs`), which is not reachable from a script.
    */
   clear(): void;
 }
@@ -2150,7 +2158,7 @@ interface SandboxRunOptions {
   timeoutMs?: number;
   /**
    * Roll the sub-execution's database writes back. Off by default, unlike
-   * `/engine/eval`: a turn that may not write holds no write capability,
+   * `/engine/eval_script`: a turn that may not write holds no write capability,
    * which is stronger than a transaction that undoes what it did.
    */
   rollback?: boolean;
@@ -2405,6 +2413,83 @@ declare var personalTasks: PersonalTasks;
 declare var mcpRegistry: McpRegistry;
 declare var mcp: Mcp;
 /**
+ * Events the script records and cannot take back.
+ *
+ * Use it for what someone will later ask about — a refund issued, a role
+ * changed, an export downloaded — rather than `console`, which is pruned and
+ * can be cleared. The script names the action and its details; the engine adds
+ * who the execution acted for, the client address and the request id, so an
+ * event cannot be attributed to anybody else.
+ *
+ * An event is stored at once and kept even if the handler then fails or its
+ * transaction rolls back. Events leave only by age (`logs.audit_retention_days`)
+ * or with the script. The script's owner or an administrator reads them with
+ * the `read_audit` operation.
+ *
+ * @example
+ * ```ts
+ * audit.record("refund.issued", { orderId, amount });
+ * ```
+ */
+interface Audit {
+  /**
+   * Record `action` (at most 128 bytes) with optional `details` (an object, at
+   * most 16 KB as JSON), returning the event's id. Throws when either is out
+   * of bounds or the event cannot be stored.
+   */
+  record(action: string, details?: Record<string, unknown>): number;
+}
+
+/** What one `rateLimit.consume` answered. */
+interface RateLimitResult {
+  /** Whether the cost was spent. When false, nothing was taken. */
+  allowed: boolean;
+  /** What is left in the bucket after this call. */
+  remaining: number;
+  /** When `allowed` is false, roughly how long until the cost would fit. */
+  retryAfterSeconds: number | null;
+}
+
+/**
+ * Budgets the script sizes and the engine keys, held in Postgres so they apply
+ * across every instance of the engine.
+ *
+ * The script names the bucket and says how big it is. The engine decides whose
+ * it is, from the request it judged rather than from anything the script reads:
+ *
+ * - `"caller"` (the default): the signed-in person, else the client address.
+ * - `"ip"`: the client address, signed in or not.
+ * - `"script"`: one bucket for everyone.
+ *
+ * A bucket refills evenly: `limit` per `windowSeconds`. Spending is not undone
+ * when the handler fails or its transaction rolls back.
+ *
+ * @example Five sign-ups per caller per ten minutes
+ * ```ts
+ * const budget = rateLimit.consume("signup", { limit: 5, windowSeconds: 600 });
+ * if (!budget.allowed) {
+ *   return ResponseBuilder.error(429, `Try again in ${budget.retryAfterSeconds}s`);
+ * }
+ * ```
+ */
+interface RateLimit {
+  /**
+   * Spend `cost` (default 1) from `bucket`. Throws when the bucket name or a
+   * number is out of range: names are 1-64 of letters, digits, `_`, `-`, `.`;
+   * `limit` 1 to 1,000,000; `windowSeconds` 1 to 604,800; `cost` 1 to `limit`.
+   */
+  consume(
+    bucket: string,
+    options: {
+      limit: number;
+      windowSeconds: number;
+      per?: "caller" | "ip" | "script";
+      cost?: number;
+    },
+  ): RateLimitResult;
+}
+
+/**
  * The cryptography a solution should not be writing for itself.
  *
  * The engine asks scripts to verify their own webhook signatures — it cannot
@@ -2539,7 +2624,7 @@ interface HmacVerifyOptions {
  * **It is not always there.** `engine` is `undefined` outside the two
  * executions whose authority came from a credential — a script serving a
  * request, and a delegated task where somebody consented to `author` or
- * `administer`. A scheduled job, `init()`, a test run, `/engine/eval` and
+ * `administer`. A scheduled job, `init()`, a test run, `/engine/eval_script` and
  * `sandbox.run` do not get it, because those run as the
  * engine's own synthetic administrator or with a capability subset that cannot
  * express the difference between reading your own `console` and reading every
@@ -2557,6 +2642,16 @@ interface HmacVerifyOptions {
  * // → list_revisions, diff_revisions, label_revision, revert_script
  * ```
  */
+/**
+ * What each operation takes, rendered from the engine's own operation table
+ * when these declarations are served — so it describes the engine that served
+ * them, and an operation this deployment does not have is not here. Empty in
+ * the file as stored.
+ */
+interface EngineOperations {
+  // {{engine.operations}}
+}
+
 interface EngineApi {
   /**
    * The tools this engine serves, optionally narrowed to those whose name or
@@ -2577,8 +2672,17 @@ interface EngineApi {
    * Throws an `Error` named `EngineError` when the tool refuses — which is
    * what a missing capability, a script you do not own, or a bad argument all
    * look like. Throws a plain `Error` when no tool has that name.
+   *
+   * A name this engine serves has its arguments checked by the compiler; any
+   * other string is accepted untyped, because what a deployment serves is a
+   * property of the deployment.
    */
-  call(name: string, args?: Record<string, unknown>): any;
+  call<N extends string>(
+    name: N,
+    ...args: N extends keyof EngineOperations
+      ? [args: EngineOperations[N]]
+      : [args?: Record<string, unknown>]
+  ): any;
 
   /**
    * The same call, returning the tool's envelope instead of throwing.
@@ -2594,6 +2698,8 @@ declare var console: Console;
 declare var sandbox: Sandbox;
 declare var convert: Convert;
 declare var crypto: Crypto;
+declare var rateLimit: RateLimit;
+declare var audit: Audit;
 declare var engine: EngineApi | undefined;
 
 // ============================================================================
@@ -2643,7 +2749,7 @@ declare function expect(actual: unknown): Matchers;
 /**
  * Register a test case. Available only while the engine is running a script's
  * test modules — assets named `*.test.ts` (or `.js`, `.jsx`, `.tsx`) — which it
- * does on request via `POST /engine/run_tests?uri=<script>`.
+ * does on request via `POST /engine/run_tests` with `{ "script": <script> }`.
  *
  * The body may be `async`: each case is settled before the next one starts, so
  * the verdict reflects the assertions it reached. `await` does not make

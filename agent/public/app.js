@@ -5,11 +5,8 @@
 // this page's only job is to render what arrives on the SSE stream, and a run
 // goes on whether or not anybody is looking at it.
 //
-// It used to be the other half of the loop, posting one step per turn, because
-// the engine had nowhere to run a turn except inside a request from the person
-// it belonged to. That is no longer true, and the loop that was here is gone
-// rather than kept as a fallback: two ways to advance the same run is how they
-// drift apart.
+// There is deliberately no second way to advance a run from here: two ways to
+// advance the same run is how they drift apart.
 //
 // Two kinds of message arrive on that stream. An activity is a row that was
 // stored, and it is the record. A delta is a piece of an answer still being
@@ -63,7 +60,7 @@ let running = false;
 //
 // One string rather than a map keyed by run, because at most one block streams
 // at a time: the API finishes a content block before starting the next, and a
-// person's runs no longer overlap — the engine's queue gives every personal
+// person's runs do not overlap — the engine's queue gives every personal
 // task a lane and defaults it to the person, so two prompts wait for each
 // other instead of interleaving.
 let pending = "";
@@ -416,8 +413,7 @@ function setStatus(node, text, isError) {
  * A message with something to click on the end of it.
  *
  * For the cases where saying what is wrong is not enough, because fixing it
- * means going somewhere: signing in, or granting the agent permission. The
- * page used to name the path in prose and leave the person to type it.
+ * means going somewhere: signing in, or granting the agent permission.
  *
  * Built rather than assigned as HTML: `label` and `href` end up as text and an
  * attribute, so nothing here can turn a message into markup.
@@ -999,9 +995,7 @@ async function start() {
         hidePlan();
       }
 
-      // The end of a run is an activity like any other now. It used to be the
-      // reply to the step the page was waiting on, and there is nothing to
-      // wait on any more.
+      // The end of a run is an activity like any other.
       if (payload.kind === "done") {
         hidePlan();
         // A run that just finished may have written, corrected or removed a

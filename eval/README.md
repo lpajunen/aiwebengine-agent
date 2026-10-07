@@ -64,16 +64,4 @@ and pays for the run. Results go to `eval/results/<time>.json` with the pass
 rate, turns and cost per passed task, and escalations. A run that ends in an
 `error` activity or times out counts as escalated.
 
-## The baseline (phase 1)
-
-The baseline is today's agent with only its budgets raised, so a failure is a
-finding about the platform and not about a turn that ran out of room:
-
-1. In `agent/main.ts`, set `MAX_TOKENS` to 8000 and `MAX_STEPS` to 25.
-2. `set_script_limits script=<the agent> jobTimeoutMs=120000`.
-3. Deploy, run the suite, keep the result file.
-4. Read the failures. The count of each cause is the work list for phases 2
-   and 3. Record whether 8,000 output tokens fit in 120 s: any `timed out` row
-   with high output tokens answers that open question.
-
-Do not tune the tasks to make the baseline pass.
+Do not tune the tasks to make a run pass.
