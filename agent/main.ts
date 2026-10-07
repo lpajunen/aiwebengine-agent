@@ -265,6 +265,15 @@ const ENGINE_PROMPT = [
   "request_approval first.",
 ].join(" ");
 
+const APP_PROMPT = [
+  "The person's own apps on this engine publish tools you can use as them:",
+  "call app_tools to see what there is and app_call to use one. When they ask",
+  "about something one of their apps keeps — a backlog, a list, a record —",
+  "look there before saying you do not know.",
+  "Until a plan is approved an app tool runs read-only, so one that changes",
+  "something is refused: propose the change with request_approval instead.",
+].join(" ");
+
 // ============================================================================
 // Memory
 // ============================================================================
@@ -642,6 +651,58 @@ const ENGINE_CALL_TOOL: ToolSpec = {
         type: "string",
         description:
           'The tool\'s arguments as a JSON object, e.g. {"script": "..."}. Pass {} for a tool that takes none.',
+      },
+    },
+    required: ["name", "args"],
+    additionalProperties: false,
+  },
+  strict: true,
+};
+
+/**
+ * The tools the person's own apps publish, as two tools for the reason the
+ * engine's are: what is there is a property of the deployment, and the list
+ * is looked at rather than carried.
+ *
+ * Offered only when this execution holds `call_tools` — see
+ * [`hasAppAuthority`].
+ */
+const APP_TOOLS_TOOL: ToolSpec = {
+  name: "app_tools",
+  description:
+    "List the tools the person's apps on this engine publish, with what each takes. Call this before app_call. " +
+    "Pass `area` to narrow by a word in the tool's name, description or app, such as 'backlog'; an empty string lists all of them.",
+  input_schema: {
+    type: "object",
+    properties: {
+      area: {
+        type: "string",
+        description:
+          "A word to narrow the list by, or an empty string for every tool.",
+      },
+    },
+    required: ["area"],
+    additionalProperties: false,
+  },
+  strict: true,
+};
+
+const APP_CALL_TOOL: ToolSpec = {
+  name: "app_call",
+  description:
+    "Call one of the person's app tools by name, as them. Use app_tools first for the name and arguments. " +
+    "Until a plan is approved the tool runs read-only and anything it tries to change is refused; to change something, say what with request_approval first.",
+  input_schema: {
+    type: "object",
+    properties: {
+      name: {
+        type: "string",
+        description: "The tool's name, exactly as app_tools gave it.",
+      },
+      args: {
+        type: "string",
+        description:
+          "The tool's arguments as a JSON object, matching its input schema. Pass {} for a tool that takes none.",
       },
     },
     required: ["name", "args"],
@@ -3386,6 +3447,9 @@ function toolsFor(skills: Skill[], mode: RunMode, kind: RunKind): ToolSpec[] {
   if (hasEngineAuthority()) {
     tools = tools.concat([ENGINE_TOOLS_TOOL, ENGINE_CALL_TOOL]);
   }
+  if (hasAppAuthority()) {
+    tools = tools.concat([APP_TOOLS_TOOL, APP_CALL_TOOL]);
+  }
   if (mode === "plan") tools = tools.concat([REQUEST_APPROVAL_TOOL]);
   if (skills.length > 0) tools = tools.concat([READ_SKILL_TOOL]);
   // Not conditional on the library existing, unlike reading: the first skill
@@ -3424,6 +3488,23 @@ function hasEngineAuthority(): boolean {
   }
 }
 
+/**
+ * Whether this execution may call the tools other scripts publish.
+ *
+ * `call_tools` is held by a person's own request, and by a delegated run only
+ * when they ticked "Use your other apps' tools" on the consent page — the
+ * engine decides, and `sandbox.held()` reports it.
+ */
+function hasAppAuthority(): boolean {
+  if (typeof tools === "undefined") return false;
+  try {
+    return sandbox.held().indexOf("call_tools") !== -1;
+  } catch (e) {
+    console.log("agent: could not read held capabilities: " + String(e));
+    return false;
+  }
+}
+
 function systemPromptFor(
   skills: Skill[],
   mode: RunMode,
@@ -3435,7 +3516,9 @@ function systemPromptFor(
       "\nAnswer by calling write_response; that is how the person sees what you say."
     );
   }
-  const engine = hasEngineAuthority() ? " " + ENGINE_PROMPT : "";
+  const engine =
+    (hasEngineAuthority() ? " " + ENGINE_PROMPT : "") +
+    (hasAppAuthority() ? " " + APP_PROMPT : "");
   const preamble =
     mode === "act"
       ? SYSTEM_PROMPT +
@@ -3604,6 +3687,19 @@ function runTool(
 
     case "engine_call": {
       return engineCallTool(
+        userId,
+        runId,
+        String(input.name ?? "").trim(),
+        String(input.args ?? "{}"),
+      );
+    }
+
+    case "app_tools": {
+      return appToolsTool(String(input.area ?? ""));
+    }
+
+    case "app_call": {
+      return appCallTool(
         userId,
         runId,
         String(input.name ?? "").trim(),
@@ -3923,6 +4019,115 @@ function engineCallTool(
     // either way the model gets the engine's own words, which name the
     // capability or the argument rather than saying "failed".
     return { content: `${name}: ${message}`, isError: true };
+  }
+}
+
+/**
+ * What the person's apps publish, asked of the engine.
+ *
+ * Each line carries the argument schema, because a model calling a tool it
+ * has only a name for guesses the arguments.
+ */
+function appToolsTool(area: string): { content: string; isError: boolean } {
+  if (!hasAppAuthority()) {
+    return {
+      content:
+        "This run cannot use the person's apps. Ask them to tick \"Use your other apps' tools\" under Change permissions, then start a new run.",
+      isError: true,
+    };
+  }
+  try {
+    const listed = tools.list(area.trim());
+    if (listed.length === 0) {
+      return {
+        content: area.trim()
+          ? `No app tool mentions "${area.trim()}". Call app_tools with an empty area to see all of them.`
+          : "None of the person's apps publish a tool.",
+        isError: false,
+      };
+    }
+    const lines = listed.map(
+      (tool) =>
+        `${tool.name} (${tool.script}) — ${tool.description}\n  args: ${JSON.stringify(tool.inputSchema ?? {})}`,
+    );
+    return {
+      content: cut(
+        `${listed.length} tool${listed.length === 1 ? "" : "s"}:\n` +
+          lines.join("\n"),
+        MAX_ENGINE_RESULT_CHARS,
+      ),
+      isError: false,
+    };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { content: `Could not list the tools: ${message}`, isError: true };
+  }
+}
+
+/**
+ * Call one app tool as the person whose run this is.
+ *
+ * Plan mode is enforced by the engine rather than asked of the model: an
+ * unapproved run calls read-only, so the tool runs holding no write
+ * capability and a change it attempts is refused underneath it. That is the
+ * line `run_js` draws, and it needs no list of which app tools only read —
+ * which nothing here could know.
+ */
+function appCallTool(
+  userId: string,
+  runId: string,
+  name: string,
+  argsJson: string,
+): { content: string; isError: boolean } {
+  if (!hasAppAuthority()) {
+    return {
+      content:
+        "This run cannot use the person's apps. Ask them to tick \"Use your other apps' tools\" under Change permissions, then start a new run.",
+      isError: true,
+    };
+  }
+  if (!name) {
+    return {
+      content: "No tool was named. Put its name in `name`.",
+      isError: true,
+    };
+  }
+  const parsed = parseArgs(argsJson);
+  if (!parsed.ok) {
+    return {
+      content: `\`args\` has to be a JSON object matching the tool's schema — ${parsed.why}. Got: ${cut(argsJson, 200)}`,
+      isError: true,
+    };
+  }
+  const args = parsed.args;
+  const readOnly = runModeOf(userId, runId) !== "act";
+
+  recordActivity(
+    userId,
+    runId,
+    "app",
+    `${name}${readOnly ? " (read-only)" : ""} ${cut(JSON.stringify(args), 300)}`,
+  );
+
+  try {
+    const answer = tools.call(name, args, { readOnly });
+    return {
+      content: cut(
+        typeof answer === "string" ? answer : JSON.stringify(answer, null, 1),
+        MAX_ENGINE_RESULT_CHARS,
+      ),
+      isError: false,
+    };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return {
+      content:
+        `${name}: ${message}` +
+        (readOnly
+          ? " (This run is not approved yet, so the tool ran read-only. If it needed to change something, propose the change with request_approval.)"
+          : ""),
+      isError: true,
+    };
   }
 }
 

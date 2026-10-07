@@ -48,10 +48,11 @@ or `POST /engine/run_tests` with `{"script": "<this script>"}`.
 The model gets five tools: `write_response` (the only way the person sees
 anything), `remember`, `list_memories` and `recall` over notes in that person's
 `personalStorage`, and `run_js`, which runs model-written JavaScript in a
-sandbox holding less than the turn around it. Five more appear conditionally:
+sandbox holding less than the turn around it. Seven more appear conditionally:
 `request_approval` while a run is planning, `read_skill` when the deployment
-has skills, `write_skill` with it, and `engine_tools` / `engine_call` when the
-person has granted this app management authority.
+has skills, `write_skill` with it, `engine_tools` / `engine_call` when the
+person has granted this app management authority, and `app_tools` /
+`app_call` when they have let it use their other apps.
 
 `list_memories` is what makes the notes readable rather than only writable:
 `recall` needs a key, so anything written in an earlier run was unreachable
@@ -299,6 +300,31 @@ Then, as the person who wants the agent to manage things: open
 `/auth/delegate?script=<this script>`, tick **Administer this engine as you**,
 and start a run. The checkbox is disabled with a reason if the account is not
 an administrator.
+
+## Using the person's apps
+
+Scripts on the engine publish MCP tools, such as a backlog app's
+`list_backlog`. `app_tools(area)` lists them and `app_call(name, args)` calls
+one, through the engine's `tools` global. The tool runs **as the person**,
+with what this run holds, exactly as `tools/call` on `/mcp` would for them.
+
+**Plan mode is enforced underneath.** Until a plan is approved every call is
+made `readOnly`, so the tool runs holding no write capability, and a change it
+attempts is refused by the engine rather than by this script. Unlike
+`engine_call`, there is no list here of which tools only read. App tools are
+whatever the person built, and nothing here could know. A refused write sends
+the model to `request_approval`, which on Telegram is the Approve button.
+
+**Off unless granted.** The tools are offered only when this execution holds
+`call_tools`. The person's own request does. A delegated run, which is every
+turn and every Telegram message, holds it only when they ticked **Use your
+other apps' tools** on the consent page. An app that writes also needs
+**Change things**, because the tool runs under this same grant.
+
+What an app tool answers goes back to the model as an observation, like
+anything `run_js` fetches. It is the person's own data, but an app can hold
+text that came from anywhere, so treat it as untrusted input, the way a
+fetched page is.
 
 ## Skills
 
@@ -561,6 +587,10 @@ line that writes the URL down keeps writing the template.
 **An engine older than that change cannot run this.** The bot token would be
 sent to Telegram as the literal text `{{secret:TELEGRAM_BOT_TOKEN}}` and every
 call would fail.
+
+To let a Telegram message use the person's apps, they also tick **Use your
+other apps' tools** on the consent page (and **Change things** for an app that
+writes). The page's **Change permissions** link opens it.
 
 ### What the engine still cannot do
 

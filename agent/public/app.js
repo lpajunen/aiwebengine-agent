@@ -795,6 +795,9 @@ function showGrant(auth) {
     (manages
       ? "It can manage this engine as you, so it can answer questions about scripts and users."
       : "To let it manage scripts and users \u2014 listing users, reading and writing scripts \u2014 add \u201cadminister\u201d or \u201cauthor\u201d.") +
+    (granted.indexOf("tools") !== -1
+      ? " It can use your other apps' tools."
+      : " To let it use your other apps, add \u201cUse your other apps' tools\u201d.") +
     " Changes apply to the next run you start.";
   el.grantLink.textContent = "Change permissions";
 }
@@ -808,6 +811,8 @@ function scopeLabel(scope) {
       return "your API key";
     case "write":
       return "changing things";
+    case "tools":
+      return "using your other apps";
     case "author":
       return "authoring your scripts";
     case "administer":
