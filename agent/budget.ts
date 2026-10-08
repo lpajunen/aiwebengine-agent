@@ -61,7 +61,7 @@ export const HISTORY_QUERY_LIMIT = MAX_HISTORY_ROWS + 1;
  *
  * The token figure is the dial worth turning. Too low and a run pays for a
  * summary it did not need; too high and every turn carries a conversation
- * nobody is reading. It is well under the model's 200k window on purpose —
+ * nobody is reading. It is well under the model's 1M window on purpose —
  * what makes a long run expensive here is resending it every turn, not
  * running out of room.
  */

@@ -13,13 +13,17 @@ export type RunKind = "chat" | "author";
  * Budgets, per kind of run.
  *
  * A chat answer is short and a turn that writes several files is not, so the
- * two cannot share a ceiling: 8,000 output tokens on every chat turn would
- * only buy slower answers, and 1,024 on an authoring turn cuts a file off in
+ * two cannot share a ceiling: 16,000 output tokens on every chat turn would
+ * only buy slower answers, and 4,096 on an authoring turn cuts a file off in
  * the middle.
+ *
+ * Both leave room for thinking, which counts toward the ceiling. A ceiling
+ * that is only the answer's length ends a turn on a thinking block with
+ * nothing said.
  */
-export const CHAT_MAX_TOKENS = 1024;
+export const CHAT_MAX_TOKENS = 4096;
 export const CHAT_MAX_STEPS = 12;
-export const AUTHOR_MAX_TOKENS = 8000;
+export const AUTHOR_MAX_TOKENS = 16000;
 export const AUTHOR_MAX_STEPS = 25;
 
 export function maxTokensFor(kind: RunKind): number {

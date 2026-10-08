@@ -67,10 +67,10 @@ supplies the rest of. So code gets a note as a literal that a `recall`
 fetched, which costs a turn and means a note only leaves if the model itself
 carries it.
 
-The model is `claude-haiku-4-5`, chosen on cost and on fitting the turn budget.
-Moving up a tier is more than the `MODEL` string — `output_config.effort`, the
-`thinking` form and the server-side refusal fallback all differ by tier, and
-the comment above the constant says which go back. So do `PRICES`, and so does
+The model is `claude-haiku-5-5`, chosen on cost and on fitting the turn budget.
+Moving to another tier is more than the `MODEL` string — the thinking form,
+`output_config.effort` and the server-side refusal fallback differ by tier, and
+the comment above the constant says which. So do `PRICES`, and so does
 the minimum cacheable prefix, which is the one that changes nothing visible
 until a bill arrives.
 
@@ -187,10 +187,9 @@ solution on the instance:
 set_script_limits script=<this script> jobTimeoutMs=120000 note="agent turns call a model API"
 ```
 
-`MAX_TOKENS` is 1024 and the model is `claude-haiku-4-5` because both were
-chosen when a turn had ten seconds. With a job's budget there is room to raise
-the first and to move up a tier on the second — see the comment above `MODEL`
-for what changes with it.
+The token ceilings (`CHAT_MAX_TOKENS`, `AUTHOR_MAX_TOKENS` in `authoring.ts`)
+include thinking, so they are set above the length of an answer. The model is
+`claude-haiku-5-5`; see the comment above `MODEL` for what changes with it.
 
 Raise the budget **before** raising either. A turn that runs past its budget
 fails, and with `maxAttempts: 1` it is not retried — the run stops rather than
@@ -460,14 +459,11 @@ rather than with the prompt. The request asks for the prompt to be cached,
 which turns most of that resending into cache reads at about a tenth of the
 price — each turn reading back what the turn before it wrote.
 
-It does nothing until a run's whole prompt passes **4096 tokens**, and that is
-the model's number rather than a choice: `claude-haiku-4-5` has the highest
-minimum cacheable prefix of any current model, and a shorter prefix is refused
-silently — no error, just a `usage` reporting nothing cached. The tools and the
-system prompt come to roughly 400 tokens between them, so caching only those
-would never fire once. What crosses 4096 is a long conversation, which is
-exactly the run worth making cheaper. Moving up a tier lowers the threshold
-(512 on `claude-opus-5`), so caching starts paying sooner there, not later.
+It does nothing until a run's whole prompt passes **512 tokens**, and that is
+the model's number rather than a choice: a shorter prefix is refused silently —
+no error, just a `usage` reporting nothing cached. The tools and the system
+prompt come to roughly 400 tokens between them, so they are not enough alone;
+a conversation is, within a turn or two.
 
 The page shows what the run on screen has cost — turns, tokens in and out,
 how much of the input came from cache, an estimate in dollars, and a meter for

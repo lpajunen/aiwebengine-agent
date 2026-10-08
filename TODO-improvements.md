@@ -164,7 +164,7 @@ a fake of something.
   under the answer.
 - **Model and effort per run.** A tier is four things that move together —
   model string, `PRICES`, the thinking/effort shape, and the minimum cacheable
-  prefix (4096 tokens on `claude-haiku-4-5`), which prompt caching turns on —
+  prefix (512 tokens on `claude-haiku-5-5`), which prompt caching turns on —
   so it wants to be one record before it can be a choice.
 
 ### Channels and presentation

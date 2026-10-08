@@ -107,9 +107,9 @@ import { rememberArgs, skillWriteArgs } from "./plans.ts";
  * that produced the text, so nothing about reopening the page later changes.
  *
  * And the prompt is cached, which is what makes resending the run every turn
- * affordable — though not until a run passes 4096 tokens, since that is this
- * model's minimum and it is the highest of any current tier. See the request
- * body in `callModel`, and `logUsage` for the evidence that it is working.
+ * affordable — though not until a run passes 512 tokens, this model's minimum
+ * cacheable prefix. See the request body in `callModel`, and `logUsage` for
+ * the evidence that it is working.
  */
 
 // ============================================================================
@@ -119,17 +119,34 @@ import { rememberArgs, skillWriteArgs } from "./plans.ts";
 /**
  * The model every run uses.
  *
- * Haiku for now, on cost: an agent turn resends the whole conversation, so the
- * bill grows with the length of a run rather than with the prompt. A turn is a
- * job with `javascript.job_timeout_ms`, so speed does not decide this.
+ * Haiku on cost: an agent turn resends the whole conversation, so the bill
+ * grows with the length of a run rather than with the prompt. A turn is a job
+ * with `javascript.job_timeout_ms`, so speed does not decide this.
  *
- * Changing this is not only the string. Haiku 4.5 rejects
- * `output_config.effort`, and takes thinking as
- * `{type: "enabled", budget_tokens: N}` rather than adaptive; the server-side
- * refusal fallback below belongs to the Opus 5 / Fable tier. Moving up to
- * `claude-opus-5` means putting all three back.
+ * Changing this is not only the string. Haiku 5.5 takes thinking as
+ * `{type: "adaptive"}` with `output_config.effort`, rejects sampling
+ * parameters and assistant prefill, and has no server-side refusal fallback —
+ * that belongs to the Opus / Fable tier.
  */
-const MODEL = "claude-haiku-4-5";
+const MODEL = "claude-haiku-5-5";
+
+/**
+ * How much the model thinks. Thinking counts toward `max_tokens`, so this and
+ * the ceilings in `authoring.ts` are chosen together. `medium` is the model's
+ * own default, set explicitly so a change of default does not change the bill.
+ */
+const EFFORT = "medium";
+
+/**
+ * Thinking blocks are bound to everything sent before them: a request that
+ * replays one after `system` or `tools` has changed is a 400 on accounts made
+ * since 2026-08-31. This run changes both on purpose — approving a plan swaps
+ * the tools and the system prompt, and the summariser has its own system
+ * prompt — so mismatched blocks are dropped by the API instead of failing the
+ * turn. A dropped block is not billed; the model only loses its earlier
+ * reasoning.
+ */
+const BETA_HEADER = "thinking-binding-controls-2026-08-01";
 
 /**
  * What the model costs, in dollars per million tokens.
@@ -142,18 +159,22 @@ const MODEL = "claude-haiku-4-5";
  * this run costs or saves, and an average would hide exactly the thing the
  * display exists to show.
  *
- * The multipliers are the API's, not this script's: a cache read is a tenth
- * of the input rate and a cache write is a quarter more than it.
+ * These are the rates for a prompt up to 100,000 tokens; the model charges
+ * more above that. A run never gets there — `COMPACT_AT_TOKENS` folds the
+ * conversation up at 30,000 — so the dearer tier is not modelled.
+ *
+ * The cache rates are the model's own, not multiples of the input rate: a
+ * cache read is a tenth of it and a 5-minute cache write a quarter more.
  */
 const PRICES = {
-  freshPerM: 1.0,
-  cacheWritePerM: 1.25,
-  cacheReadPerM: 0.1,
-  outputPerM: 5.0,
+  freshPerM: 0.1,
+  cacheWritePerM: 0.125,
+  cacheReadPerM: 0.01,
+  outputPerM: 0.5,
 };
 
 /** What the model can hold, for the meter on the page. */
-const CONTEXT_WINDOW = 200000;
+const CONTEXT_WINDOW = 1000000;
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 
@@ -1599,8 +1620,9 @@ function advanceRun(context: HandlerContext): void {
   }
 
   // A refusal is an HTTP 200 with no usable content, so this has to be read
-  // before `content` is touched. This model tier does not produce one, but the
-  // branch is what makes moving up a tier a one-line change.
+  // before `content` is touched. The model's safety classifiers can decline a
+  // request, and there is no fallback model: sending it again usually draws
+  // the same answer, so the run ends here.
   if (answer.stop_reason === "refusal") {
     const why = answer.stop_details?.explanation ?? "The model declined.";
     recordActivity(userId, runId, "error", why);
@@ -2413,6 +2435,7 @@ function callModel(
     headers: {
       "x-api-key": "{{secret:" + SECRET_NAME + "}}",
       "anthropic-version": "2023-06-01",
+      "anthropic-beta": BETA_HEADER,
       "content-type": "application/json",
     },
     body: JSON.stringify({
@@ -2435,25 +2458,26 @@ function callModel(
       // turn before it wrote, which is the shape that makes resending the
       // whole run affordable.
       //
-      // It does nothing at all until the whole prompt passes 4096 tokens,
-      // and that number is the model's rather than a choice: Haiku 4.5 has
-      // the highest minimum cacheable prefix of any current model, and a
-      // shorter prefix is refused silently — no error, just a `usage` that
-      // reports nothing cached. The tools and system prompt come to roughly
-      // 400 tokens together, so caching *those* — the obvious thing to
-      // reach for, and what this was expected to be — would never once have
-      // fired. What crosses 4096 is a long conversation, which is exactly
-      // the run whose bill is worth cutting.
-      //
-      // Moving up a tier lowers the threshold rather than raising it (512 on
-      // Opus 5), so this starts paying sooner there, not later. The 5-minute
-      // TTL is deliberate: a turn is queued the moment the one before it
-      // ends, so every turn refreshes the entry, and the 1-hour TTL would
-      // double the write price to buy a gap this loop does not have.
+      // It does nothing at all until the whole prompt passes 512 tokens,
+      // and that number is the model's rather than a choice: a shorter prefix
+      // is refused silently — no error, just a `usage` that reports nothing
+      // cached. The tools and system prompt come to roughly 400 tokens
+      // together, so they are not enough on their own; a conversation is,
+      // within a turn or two, and that is the run whose bill is worth
+      // cutting. The 5-minute TTL is deliberate: a turn is queued the moment
+      // the one before it ends, so every turn refreshes the entry, and the
+      // 1-hour TTL would double the write price to buy a gap this loop does
+      // not have.
       cache_control: summarising ? undefined : { type: "ephemeral" },
-      // No `output_config.effort` and no `thinking`: this model rejects the
-      // first and does not take the adaptive form of the second. Both come
-      // back if the model moves up a tier.
+      // Thinking counts toward `max_tokens`, so a ceiling sized for a model
+      // that did not think can end a turn before it says anything; see
+      // `authoring.ts`. `effort` is the lever, and changing it between turns
+      // would invalidate the cached messages, so it is a constant.
+      thinking: {
+        type: "adaptive",
+        block_binding: { prefix_mismatch_behavior: "drop_block" },
+      },
+      output_config: { effort: EFFORT },
     }),
   });
 
