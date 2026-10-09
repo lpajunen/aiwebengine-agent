@@ -7,6 +7,9 @@ import {
   blockFor,
   describeAttachments,
   originalNames,
+  MAX_PREVIEW_CHARS,
+  parseDetail,
+  previewOf,
   promptBlocks,
   telegramFiles,
 } from "./attachments.ts";
@@ -160,5 +163,33 @@ describe("files from Telegram", () => {
 
   test("a message with neither is no files and no refusal", () => {
     expect(telegramFiles({})).toEqual({ files: [] });
+  });
+});
+
+describe("what the page is shown", () => {
+  test("a picture is kept as it was uploaded", () => {
+    expect(previewOf("image/jpeg", "abcd")).toBe("abcd");
+  });
+
+  test("a document is not kept, and neither is a picture too large to", () => {
+    expect(previewOf("application/pdf", "abcd")).toBe("");
+    expect(previewOf("image/png", "a".repeat(MAX_PREVIEW_CHARS + 1))).toBe("");
+  });
+
+  test("stored details read back, and anything damaged reads as none", () => {
+    expect(
+      parseDetail(
+        '[{"id":7,"name":"photo.jpg","kind":"image","preview":true}]',
+      ),
+    ).toEqual([{ id: 7, name: "photo.jpg", kind: "image", preview: true }]);
+    expect(parseDetail("")).toEqual([]);
+    expect(parseDetail("not json")).toEqual([]);
+    expect(parseDetail(undefined)).toEqual([]);
+  });
+
+  test("a preview without a row to fetch it from is not offered", () => {
+    expect(
+      parseDetail('[{"id":0,"name":"a.png","kind":"image","preview":true}]'),
+    ).toEqual([{ id: 0, name: "a.png", kind: "image", preview: false }]);
   });
 });

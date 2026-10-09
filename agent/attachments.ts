@@ -31,6 +31,11 @@ export interface Attachment {
   name: string;
   contentType: string;
   fileId: string;
+  /**
+   * The bytes as base64, held only while the prompt is stored so the page's
+   * copy can be kept. Never part of a block.
+   */
+  data?: string;
 }
 
 /** Which block a media type becomes, or null when the model cannot read it. */
@@ -181,4 +186,53 @@ export function telegramFiles(message: {
   }
 
   return { files };
+}
+
+/**
+ * The largest picture kept for showing on the page, as base64. A picture the
+ * model reads is at most 1568 pixels on its long edge, which is nearly always
+ * well under this; a larger one is shown by name only.
+ */
+export const MAX_PREVIEW_CHARS = 700 * 1024;
+
+/** What the page needs to show one attachment in the log. */
+export interface AttachmentDetail {
+  /** The row holding the agent's own copy; 0 when none was kept. */
+  id: number;
+  name: string;
+  kind: "image" | "document";
+  /** Whether the page can ask for the picture. */
+  preview: boolean;
+}
+
+/**
+ * The copy kept for the page: the picture as uploaded, or nothing.
+ *
+ * The Files API will not hand back a file that was uploaded to it, only ones
+ * its tools made, so the page can be shown a picture only if the agent keeps
+ * one. Documents are not kept; their name is what the log shows.
+ */
+export function previewOf(contentType: string, data: string): string {
+  if (attachmentKind(contentType) !== "image") return "";
+  return data.length <= MAX_PREVIEW_CHARS ? data : "";
+}
+
+/** The details stored beside an activity, read back defensively. */
+export function parseDetail(raw: unknown): AttachmentDetail[] {
+  if (typeof raw !== "string" || !raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .filter((d) => d && typeof d === "object")
+    .map((d) => ({
+      id: Number(d.id) > 0 ? Number(d.id) : 0,
+      name: String(d.name ?? ""),
+      kind: d.kind === "image" ? "image" : "document",
+      preview: d.preview === true && Number(d.id) > 0,
+    }));
 }

@@ -118,6 +118,29 @@ function entryNode(entry, live) {
   const message = document.createElement("p");
   message.className = "message";
   message.textContent = entry.message;
+  const pictures = Array.isArray(entry.detail)
+    ? entry.detail.filter((d) => d && d.preview && d.id)
+    : [];
+  if (pictures.length > 0) {
+    // The agent's copy of each picture, at log size; the full one opens on
+    // its own.
+    const strip = document.createElement("span");
+    strip.className = "thumbs";
+    for (const picture of pictures) {
+      const url = "/agent/attachment?id=" + encodeURIComponent(picture.id);
+      const link = document.createElement("a");
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = picture.name;
+      img.loading = "lazy";
+      link.append(img);
+      strip.append(link);
+    }
+    message.append(strip);
+  }
   li.append(kind, message);
   return li;
 }

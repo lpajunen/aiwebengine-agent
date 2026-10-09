@@ -265,6 +265,20 @@
         padding: 0 var(--aw-space-1);
         line-height: 1.2;
       }
+      /* Pictures sent with a prompt, in the log. */
+      .thumbs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--aw-space-2);
+        margin-top: var(--aw-space-2);
+      }
+      .thumbs img {
+        display: block;
+        max-height: 160px;
+        max-width: 100%;
+        border: 1px solid var(--aw-color-border);
+        border-radius: 4px;
+      }
       /* A file being dragged over the prompt. */
       #prompt-section.dropping {
         border-color: var(--aw-color-focus);

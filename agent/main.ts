@@ -78,10 +78,13 @@ import {
 import { rememberArgs, skillWriteArgs } from "./plans.ts";
 import {
   Attachment,
+  AttachmentDetail,
   MAX_ATTACHMENTS,
   attachmentKind,
   describeAttachments,
   originalNames,
+  parseDetail,
+  previewOf,
   promptBlocks,
   TelegramFile,
   telegramFiles,
@@ -958,6 +961,7 @@ interface ActivityRow {
   kind: string;
   message: string;
   created_ms: number;
+  detail?: string;
 }
 
 // ============================================================================
@@ -1059,6 +1063,25 @@ function init(): void {
       { name: "run_id", type: "text" },
       { name: "kind", type: "text" },
       { name: "message", type: "text" },
+      { name: "created_ms", type: "bigint" },
+      // JSON the page renders beside the message: for an `attached` row,
+      // which pictures it can show. Empty for every other kind.
+      { name: "detail", type: "text" },
+    ],
+  });
+
+  // The agent's own copy of each picture sent with a prompt, for the page to
+  // show. The Files API will not hand back an uploaded file, so without this
+  // a picture is a name in the log. Documents are recorded without one.
+  database.ensureTable("attachments", {
+    columns: [
+      { name: "user_id", type: "text" },
+      { name: "run_id", type: "text" },
+      { name: "file_id", type: "text" },
+      { name: "name", type: "text" },
+      { name: "content_type", type: "text" },
+      // Base64, or empty when nothing was kept.
+      { name: "preview", type: "text" },
       { name: "created_ms", type: "bigint" },
     ],
   });
@@ -1173,6 +1196,12 @@ function init(): void {
     method: "POST",
     tags: ["Agent"],
     summary: "Accept a prompt and open a run",
+  });
+  routeRegistry.registerRoute("/agent/attachment", {
+    handler: "readAttachment",
+    method: "GET",
+    tags: ["Agent"],
+    summary: "A picture the person sent, for the page to show",
   });
   routeRegistry.registerRoute("/agent/conversations", {
     handler: "listConversations",
@@ -1420,7 +1449,7 @@ function startRun(context: HandlerContext): HttpResponse {
     prompt || "(" + attachments.length + " attached)",
   );
   if (attachments.length > 0) {
-    recordActivity(userId, runId, "attached", describeAttachments(attachments));
+    recordAttachments(userId, runId, attachments);
   }
 
   // The run is the engine's from here. Queued rather than run inline so this
@@ -2206,9 +2235,88 @@ function uploadAttachments(
             `the Files API answered ${response.status}`),
       );
     }
-    done.push({ name: name, contentType: contentType, fileId: answer.id });
+    done.push({
+      name: name,
+      contentType: contentType,
+      fileId: answer.id,
+      data: files[i].data,
+    });
   }
   return done;
+}
+
+/**
+ * Write the log row naming what was attached, keeping a copy of each picture
+ * the page can show. A copy that cannot be stored costs only the picture on
+ * the page, so it is logged and the prompt goes on.
+ */
+function recordAttachments(
+  userId: string,
+  runId: string,
+  attachments: Attachment[],
+): void {
+  const detail: AttachmentDetail[] = attachments.map((attachment) => {
+    const preview = previewOf(attachment.contentType, attachment.data ?? "");
+    let id = 0;
+    try {
+      id = database.insert("attachments", {
+        user_id: userId,
+        run_id: runId,
+        file_id: attachment.fileId,
+        name: attachment.name,
+        content_type: attachment.contentType,
+        preview: preview,
+        created_ms: Date.now(),
+      }).id;
+    } catch (e) {
+      quietLog(`agent: could not keep a copy of ${attachment.name}: ${e}`);
+    }
+    return {
+      id: id,
+      name: attachment.name,
+      kind: attachmentKind(attachment.contentType) ?? "document",
+      preview: preview !== "" && id > 0,
+    };
+  });
+  recordActivity(
+    userId,
+    runId,
+    "attached",
+    describeAttachments(attachments),
+    detail,
+  );
+}
+
+/**
+ * Serve the agent's copy of a picture, to the person who sent it and nobody
+ * else. Only pictures are kept, so what this answers is always an image.
+ */
+function readAttachment(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+  const id = Number(context.request?.query?.id ?? "");
+  if (!Number.isInteger(id) || id <= 0) {
+    return json(400, { error: "That is not an attachment id." });
+  }
+  const rows = database.query("attachments", {
+    where: { id: id, user_id: userId },
+    limit: 1,
+  });
+  const row = rows[0];
+  const contentType = String(row?.content_type ?? "");
+  if (!row || !row.preview || attachmentKind(contentType) !== "image") {
+    return json(404, { error: "No such picture." });
+  }
+  return {
+    status: 200,
+    bodyBase64: String(row.preview),
+    contentType: contentType,
+    headers: {
+      // A row never changes once written.
+      "cache-control": "private, max-age=31536000, immutable",
+      "x-content-type-options": "nosniff",
+    },
+  };
 }
 
 /** Remove uploaded files, as far as that works. Nothing refers to them. */
@@ -2308,6 +2416,7 @@ function readHistory(context: HandlerContext): HttpResponse {
       runId: row.run_id,
       kind: row.kind,
       message: row.message,
+      detail: parseDetail(row.detail),
       at: Number(row.created_ms),
     })),
     hasKey: secretStorage.exists(SECRET_NAME),
@@ -6061,12 +6170,7 @@ function startTelegramRun(context: HandlerContext): void {
       text || "(" + attachments.length + " attached)",
     );
     if (attachments.length > 0) {
-      recordActivity(
-        userId,
-        runId,
-        "attached",
-        describeAttachments(attachments),
-      );
+      recordAttachments(userId, runId, attachments);
     }
 
     const next = personalTasks.enqueue({
@@ -6262,6 +6366,7 @@ function recordActivity(
   runId: string,
   kind: string,
   message: string,
+  detail?: AttachmentDetail[],
 ): void {
   const at = Date.now();
   database.insert("activities", {
@@ -6269,11 +6374,14 @@ function recordActivity(
     run_id: runId,
     kind: kind,
     message: message,
+    detail: detail ? JSON.stringify(detail) : "",
     created_ms: at,
   });
   routeRegistry.sendStreamMessageFiltered(
     STREAM_PATH,
-    { runId: runId, kind: kind, message: message, at: at },
+    detail
+      ? { runId: runId, kind: kind, message: message, at: at, detail: detail }
+      : { runId: runId, kind: kind, message: message, at: at },
     { userId: userId },
     "subset",
   );
