@@ -1,13 +1,15 @@
 # Improvements
 
 What this agent has: a prompt box, an SSE activity log that fills in as the
-model writes, a Telegram bot answering out of the same run, five tools —
-`write_response`, `remember`, `list_memories`, `recall` and `run_js` — plus
-the ones a run is given conditionally (planning, skills, the engine's tools,
-the person's other apps), a script-building mode with its own tools, earlier
-conversations listed and continued, per-person keys, a durable turn chain that folds itself into a summary rather than filling
-up, plan and act modes enforced under the JavaScript, a cached prompt, a
-per-run cost display, and a stop button. The README describes how each works.
+model writes, a Telegram bot answering out of the same conversation, six tools
+— `write_response`, `write_image`, `remember`, `list_memories`, `recall` and
+`run_js` — plus the ones a run is given conditionally (planning, skills, the
+engine's tools, the person's other apps), a script-building mode with its own
+tools, earlier conversations listed and continued, pictures and documents sent
+with a prompt, dictation and answers read aloud on the page, per-person keys, a
+durable turn chain that folds itself into a summary rather than filling up,
+plan and act modes enforced under the JavaScript, a cached prompt, a per-run
+cost display, and a stop button. The README describes how each works.
 
 This file is what is not built: the status tables say what is, checked against
 `agent/main.ts` and `types/aiwebengine.d.ts`; the rest is the open work.
@@ -19,18 +21,18 @@ assumed.
 
 ### Context
 
-| Item                       | State      | Where, or what it waits on                                                    |
-| -------------------------- | ---------- | ----------------------------------------------------------------------------- |
-| Skills, read by the model  | Built      | `skills/<name>/SKILL.md`, the index in the prompt, `read_skill`               |
-| Skills the agent writes    | Built      | `write_skill`; always asks, and writes where the approval is                  |
-| `remember` / `recall`      | Built      | `personalStorage`, per person                                                 |
-| `list_memories`            | Built      | key, size and first line — the index `recall` needed                          |
-| Memory the person can read | Built      | `/agent/memories`, a panel above the log                                      |
-| Compaction                 | Built      | `COMPACT_AT_TOKENS`, at the top of a turn and nowhere else                    |
-| Prompt caching             | Built      | one breakpoint, at the end of the conversation                                |
-| Project instructions       | Ahead      | an asset for the deployment's text, `personalStorage` for theirs              |
-| Attachments and images     | Ahead      | all three paths are open now; `fetch(url, { binary: true })` was the last one |
-| Slash commands             | Superseded | by skills — what is missing is an entry point, not a second library           |
+| Item                       | State      | Where, or what it waits on                                                   |
+| -------------------------- | ---------- | ---------------------------------------------------------------------------- |
+| Skills, read by the model  | Built      | `skills/<name>/SKILL.md`, the index in the prompt, `read_skill`              |
+| Skills the agent writes    | Built      | `write_skill`; always asks, and writes where the approval is                 |
+| `remember` / `recall`      | Built      | `personalStorage`, per person                                                |
+| `list_memories`            | Built      | key, size and first line — the index `recall` needed                         |
+| Memory the person can read | Built      | `/agent/memories`, a panel above the log                                     |
+| Compaction                 | Built      | `COMPACT_AT_TOKENS`, at the top of a turn and nowhere else                   |
+| Prompt caching             | Built      | one breakpoint, at the end of the conversation                               |
+| Project instructions       | Ahead      | an asset for the deployment's text, `personalStorage` for theirs             |
+| Attachments and images     | Built      | `attachments.ts`; uploaded once to the person's Files API, held by `file_id` |
+| Slash commands             | Superseded | by skills — what is missing is an entry point, not a second library          |
 
 ### Tools
 
@@ -63,23 +65,40 @@ assumed.
 
 ### Channels and presentation
 
-| Item                        | State           | Where, or what it waits on                                |
-| --------------------------- | --------------- | --------------------------------------------------------- |
-| Telegram                    | Built           | `handleTelegram` onward; approvals arrive as buttons      |
-| Further adapters            | Ahead           | Slack needs no engine change; email cannot be signed      |
-| A lane per conversation     | Open question   | one lane per person now holds a chat behind a browser tab |
-| It starts the conversation  | Ahead           | `enqueue({ runAt })` — no engine change                   |
-| Artifacts                   | Ahead, reshaped | `personalStorage` behind a route, **not** the asset store |
-| Markdown, diffs, images out | Ahead           | presentation, on the page                                 |
+| Item                       | State           | Where, or what it waits on                                |
+| -------------------------- | --------------- | --------------------------------------------------------- |
+| Telegram                   | Built           | `handleTelegram` onward; a chat keeps its conversation    |
+| Further adapters           | Ahead           | Slack needs no engine change; email cannot be signed      |
+| A lane per conversation    | Open question   | one lane per person now holds a chat behind a browser tab |
+| It starts the conversation | Ahead           | `enqueue({ runAt })` — no engine change                   |
+| Artifacts                  | Ahead, reshaped | `personalStorage` behind a route, **not** the asset store |
+| Pictures out               | Built           | `write_image`: SVG rendered to PNG, on the page and chat  |
+| Markdown and diffs         | Ahead           | presentation, on the page                                 |
+| Reply to an older answer   | Ahead           | continue the conversation that message came from          |
+
+### Media and voice
+
+| Item                          | State        | Where, or what it waits on                                      |
+| ----------------------------- | ------------ | --------------------------------------------------------------- |
+| Pictures and documents in     | Built        | page and Telegram; JPEG, PNG, GIF, WebP, PDF, plain text        |
+| Voice on the page             | Built        | the browser's Web Speech API; neither script nor model hears it |
+| An attachment the API refuses | Open         | breaks every later turn of its conversation                     |
+| Telegram albums               | Ahead        | `media_group_id`; each photo is its own prompt now              |
+| Telegram voice notes          | Ahead        | a speech-to-text provider; `fetch` with `form` is enough        |
+| Spoken answers on Telegram    | Ahead        | text-to-speech as OGG/Opus, `sendVoice`                         |
+| More document formats         | Ahead        | `text/*`, JSON, CSV as text; Office files need converting       |
+| A voice mode on the page      | Ahead        | hands-free turns, a language picker, answers meant for the ear  |
+| `write_image` sees its result | Ahead, maybe | the PNG in the tool result; costs image tokens per call         |
 
 ### Gaps this file has no section for
 
 Three things that belong on this list and have no section of their own.
 
-- **A regression suite.** The `*.test.ts` cases cover the seven modules beside
-  `main.ts` (`protocol`, `capabilities`, `budget`, `skills`, `plans`, `engine`,
-  `authoring`). An agent saying it saved a note it had not is covered at its
-  decode layer, not at its effects.
+- **A regression suite.** The `*.test.ts` cases cover the modules beside
+  `main.ts`, not `main.ts` itself. An agent saying it saved a note it had not
+  is covered at its decode layer, not at its effects; uploading, downloading
+  from Telegram and serving `/agent/attachment` are not covered at all, and no
+  eval task sends a picture or a document.
 - **Spend on a channel.** "Each person pays with their own key, so the bill is
   theirs to see" is true on the page and false everywhere else.
 - **Approval provenance.** An approval can only carry out what the _approver's_
@@ -120,14 +139,52 @@ The cases run under the engine's `run_tests` and cover the modules beside
 in `setRunState`, the ordering in `decide`, the swap in `compactRun`. Each needs
 a fake of something.
 
+### An attachment the API refuses
+
+Uploading checks only the media type. When the Messages API later refuses a
+file — too large, an encrypted or malformed PDF, a `file_id` removed from the
+person's Files API — that turn fails, and so does every turn after it, since
+the conversation is resent whole. The likeliest way in is a Telegram document
+that is a photo sent "as file": it is not shrunk the way a photo is. Two
+halves: shrink image documents as photos are, and when a turn is refused over
+the newest prompt's attachments, replace those blocks with a line saying the
+file could not be read and tell the person.
+
+### Media and voice
+
+Roughly in the order it matters.
+
+- **Telegram albums.** An album arrives as one message per photo sharing a
+  `media_group_id`, and only one carries the caption, so "compare these" is
+  three answers today. Hold the parts briefly — a delayed task keyed by the
+  group — and start one prompt with all of them.
+- **Telegram voice notes.** `message.voice` and `message.audio` are refused.
+  The Messages API takes no audio, so this is a transcription provider on a
+  key the person stores: download as photos are, send with `fetch`'s `form`,
+  and prompt with the transcript, shown in the log as what was heard.
+- **Spoken answers on Telegram.** Text-to-speech as OGG/Opus and `sendVoice`,
+  when the prompt was spoken.
+- **More document formats.** Only `text/plain` is a text document, so `.md`,
+  `.csv`, `.json` and source files are refused; a browser often names `.md`
+  `text/markdown` or nothing. Take `text/*`, JSON and CSV, by extension when
+  the type is empty. Office files need converting to text first, and HEIC is
+  refused on desktop Chrome.
+- **A voice mode on the page.** Send when the person stops talking and listen
+  again after the answer is read, for hands-free turns. Tell the model a prompt
+  was spoken, so it answers briefly and without markdown, rather than stripping
+  the markdown afterwards. A language picker, since recognition and speech
+  follow `navigator.language`. Unlock speech on iOS with an empty utterance
+  inside the Run click — iOS likely refuses `speak()` that does not start from
+  a gesture, which an answer arriving on the stream does not. Read aloud only
+  in the tab that sent the prompt.
+- **`write_image` sees what it drew.** The rendered PNG in the tool result, so
+  the model can catch clipped text or overlaps. Costs image tokens on every
+  call; perhaps only on the first attempt.
+
 ### Context
 
 - **Project instructions.** An asset for the deployment's own text and a
   `personalStorage` entry for the person's, concatenated onto `SYSTEM_PROMPT`.
-- **Attachments and images.** An upload from the page is already base64
-  (`request.files[].data`); an image named by URL is fetched by the API itself;
-  a Telegram photo arrives as a `file_id`, takes a `getFile` call, and then
-  `fetch(fileUrl, { binary: true }).bodyBase64` is the content block.
 
 ### Tools
 
@@ -182,7 +239,10 @@ a fake of something.
 - **Artifacts.** A generated page rendered live, as `personalStorage` behind a
   route: per person by construction, and not the asset store, which belongs to
   the script and would serve one person's artifact to everyone.
-- **Markdown, diffs and images** on the page.
+- **Reply to an older answer.** A chat continues its newest conversation;
+  replying to an answer from an earlier one should continue that one. It needs
+  the Telegram `message_id` of each answer recorded against its run.
+- **Markdown and diffs** on the page.
 
 ## Designing the tools
 
