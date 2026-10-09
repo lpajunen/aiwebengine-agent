@@ -536,6 +536,17 @@ first does not merely squat on it, it intercepts them.
 A run started from Telegram begins in plan mode like every other, so nothing
 is written until a button is pressed.
 
+### Which conversation a message joins
+
+A chat has no conversation list, so `routeMessage` (`telegram.ts`) picks one:
+the chat's newest run, while it last did anything within three hours, and a
+new conversation after that. `/new` starts one at once, and the words after it
+are its first prompt; `/new` alone starts the next message afresh. A message
+that arrives while the run is still working is said to it, as Send does on the
+page; a file then is refused, since only a prompt carries files. A
+conversation started in the chat can be opened and continued on the page, and
+its answers still reach the chat.
+
 ### Setting it up
 
 Three things, none of which the script can do for itself.

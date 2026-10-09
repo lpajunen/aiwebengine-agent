@@ -90,6 +90,7 @@ import {
   telegramFiles,
 } from "./attachments.ts";
 import { renderSvg, telegramPhotoForm } from "./images.ts";
+import { Route, newConversationCommand, routeMessage } from "./telegram.ts";
 import {
   CONVERSATIONS_PER_PAGE,
   CONVERSATION_TABLES,
@@ -408,6 +409,7 @@ interface RunRow {
   nudges?: number;
   step_base?: number;
   title?: string;
+  created_ms?: number;
   updated_ms?: number;
 }
 
@@ -2080,6 +2082,11 @@ function finishRun(userId: string, runId: string, reason: string): void {
       runId,
       "error",
       `Not delivered, the run ended first: "${said}"`,
+    );
+    notifyChannel(
+      userId,
+      runId,
+      `I finished before I read this, so it was not answered: "${said}"`,
     );
   }
 
@@ -5964,6 +5971,13 @@ const TELEGRAM_API =
 const TELEGRAM_FILE_API =
   "https://api.telegram.org/file/bot{{secret:" + TELEGRAM_TOKEN_SECRET + "}}/";
 
+/**
+ * Per chat, in the person's `personalStorage`: when they last sent `/new` on
+ * its own, which no run marks because none has started yet. Outside
+ * `NOTE_PREFIX`, so it is not one of their notes.
+ */
+const TELEGRAM_FRESH_PREFIX = "telegram:fresh:";
+
 /** Telegram refuses a message over 4096 characters. */
 const MAX_TELEGRAM_CHARS = 3500;
 
@@ -6352,12 +6366,14 @@ function telegramButton(callback: TelegramCallback): HttpResponse {
 }
 
 /**
- * Open a run for a message that arrived from Telegram.
+ * Take a message that arrived from Telegram into the chat's conversation.
  *
  * Runs as the person who linked the sender, so it can do what the webhook
- * could not: write the run, write the prompt, and queue the first turn. It is
- * `startRun` with the session replaced by the link, and the chat recorded so
- * the answer knows where to go.
+ * could not: write the prompt and queue the turn. It is `startRun` with the
+ * session replaced by the link and the conversation chosen by `routeMessage`
+ * rather than by the page: the chat's latest run while it is recent, a new
+ * one after a quiet spell or a `/new`, and words for a run still working are
+ * said to it.
  */
 function startTelegramRun(context: HandlerContext): void {
   const userId = signedInUser(context);
@@ -6372,16 +6388,68 @@ function startTelegramRun(context: HandlerContext): void {
     chatId?: string;
     files?: TelegramFile[];
   };
-  const text = String(payload.text ?? "").trim();
+  const command = newConversationCommand(String(payload.text ?? "").trim());
+  const text = command.text;
   const chatId = String(payload.chatId ?? "");
   const files = Array.isArray(payload.files) ? payload.files : [];
-  if ((!text && files.length === 0) || !chatId) return;
+  if (!chatId) return;
+  const freshKey = TELEGRAM_FRESH_PREFIX + chatId;
+
+  if (!text && files.length === 0) {
+    // `/new` on its own: nothing to answer yet, so the boundary is kept for
+    // the next message to start after.
+    if (command.fresh) {
+      try {
+        personalStorage.setItem(freshKey, String(Date.now()));
+        sendTelegram(chatId, "Starting a new conversation.");
+      } catch (e) {
+        sendTelegram(chatId, `I could not start a new conversation: ${e}`);
+      }
+    }
+    return;
+  }
 
   if (!secretStorage.exists(SECRET_NAME)) {
     sendTelegram(
       chatId,
       "You have not stored an API key yet — runs are billed to your own. Add one on the agent page first.",
     );
+    return;
+  }
+
+  let route: Route;
+  try {
+    route = routeMessage(
+      latestChatRun(userId, chatId),
+      Date.now(),
+      Number(personalStorage.getItem(freshKey) ?? 0) || 0,
+      command.fresh,
+      files.length > 0,
+    );
+  } catch (e) {
+    sendTelegram(chatId, `I could not find our conversation: ${e}`);
+    return;
+  }
+  if (route.kind === "busy") {
+    sendTelegram(
+      chatId,
+      "I am still working on your last message. Send the file again once I have answered.",
+    );
+    return;
+  }
+
+  let existing: RunRow | null = null;
+  try {
+    if (route.kind === "say") {
+      if (sayToRun(userId, route.runId, text)) return;
+      // It finished first, so the words are its next prompt instead.
+      existing = runRow(userId, route.runId);
+    } else if (route.kind === "continue") {
+      existing = runRow(userId, route.runId);
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    sendTelegram(chatId, `I could not pass that on: ${message}`);
     return;
   }
 
@@ -6399,7 +6467,7 @@ function startTelegramRun(context: HandlerContext): void {
     }
   }
 
-  const runId = newRunId();
+  const runId = existing ? String(existing.run_id) : newRunId();
 
   // Everything from here writes, and a delegated task that may not write
   // throws rather than returning — which without this would be silence in
@@ -6407,6 +6475,12 @@ function startTelegramRun(context: HandlerContext): void {
   // grant covering reading and not writing is the likeliest cause, and it is
   // worth naming rather than leaving them to guess.
   try {
+    // Counted before this prompt is stored, as `startRun` does, so the
+    // prompt's turn budget starts at zero.
+    const spoken = existing
+      ? loadMessages(userId, runId).filter((m) => m.speaker === "assistant")
+          .length
+      : 0;
     appendMessage(userId, runId, "user", promptBlocks(text, attachments));
     recordActivity(
       userId,
@@ -6423,6 +6497,10 @@ function startTelegramRun(context: HandlerContext): void {
       payload: { runId: runId },
       maxAttempts: 1,
     });
+    if (existing) {
+      reopenRun(existing, next.taskId, spoken);
+      return;
+    }
     openRun(userId, runId, next.taskId, "chat");
     // Written after opening rather than as part of it, so `openRun` stays the
     // one shape every run starts in and the page path is untouched.
@@ -6443,6 +6521,40 @@ function startTelegramRun(context: HandlerContext): void {
     quietLog(`agent: could not start a telegram run: ${message}`);
     sendTelegram(chatId, `I could not start: ${message}`);
   }
+}
+
+/** The newest run this chat started, or null. */
+function latestChatRun(userId: string, chatId: string): RunRow | null {
+  const rows = queryRows(
+    "runs",
+    { user_id: userId, channel: TELEGRAM_CHANNEL, chat_id: chatId },
+    1,
+    "id",
+    "desc",
+  ) as RunRow[];
+  return rows.length > 0 ? rows[0] : null;
+}
+
+/**
+ * Say something to a run still working, as `/agent/say` does for the page.
+ *
+ * False when the run finished before any turn took the words, which are then
+ * taken back so they can become its next prompt instead. A run that finished
+ * after taking them has either answered them or, through `finishRun`, said in
+ * the chat that it did not.
+ */
+function sayToRun(userId: string, runId: string, text: string): boolean {
+  const row = database.insert("interjections", {
+    user_id: userId,
+    run_id: runId,
+    body: text,
+    created_ms: Date.now(),
+  });
+  if (runIsLive(userId, runId)) {
+    recordActivity(userId, runId, "interject", text);
+    return true;
+  }
+  return !database.delete("interjections", Number(row.id)).deleted;
 }
 
 /**
