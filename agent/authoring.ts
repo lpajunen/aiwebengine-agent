@@ -12,16 +12,18 @@ export type RunKind = "chat" | "author";
 /**
  * Budgets, per kind of run.
  *
- * A chat answer is short and a turn that writes several files is not, so the
- * two cannot share a ceiling: 16,000 output tokens on every chat turn would
- * only buy slower answers, and 4,096 on an authoring turn cuts a file off in
- * the middle.
+ * A turn that writes several files needs more than any chat turn. A chat turn
+ * still needs room for one `write_image` SVG, which for a busy diagram is
+ * several thousand tokens on its own; below that the SVG is cut off and the
+ * picture never arrives. Either ceiling is only a ceiling — a short answer
+ * costs the same under both — and both fit the 120 s job timeout this script
+ * is set to.
  *
  * Both leave room for thinking, which counts toward the ceiling. A ceiling
  * that is only the answer's length ends a turn on a thinking block with
  * nothing said.
  */
-export const CHAT_MAX_TOKENS = 4096;
+export const CHAT_MAX_TOKENS = 12000;
 export const CHAT_MAX_STEPS = 12;
 export const AUTHOR_MAX_TOKENS = 16000;
 export const AUTHOR_MAX_STEPS = 25;

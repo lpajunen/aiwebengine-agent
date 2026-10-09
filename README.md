@@ -111,7 +111,7 @@ What keeps a small model on the rails:
 - **The same failure three times stops the run** and writes a handoff note — the
   request, the script and revision, the last verdict and what was tried — for a
   person to give a developer. Running out of turns writes one too.
-- **Budgets:** 8,000 output tokens and 25 turns, against 1,024 and 12 for chat.
+- **Budgets:** 16,000 output tokens and 25 turns, against 12,000 and 12 for chat.
   Set the job timeout for this script to 120 s:
   `set_script_limits script=agent jobTimeoutMs=120000`.
 
