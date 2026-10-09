@@ -40,6 +40,8 @@ const el = {
   conversationsDetails: document.getElementById("conversations-details"),
   conversationsCount: document.getElementById("conversations-count"),
   conversationsList: document.getElementById("conversations-list"),
+  olderConversations: document.getElementById("older-conversations"),
+  conversationsStatus: document.getElementById("conversations-status"),
   planPanel: document.getElementById("plan-panel"),
   planBody: document.getElementById("plan-body"),
   planNote: document.getElementById("plan-note"),
@@ -617,23 +619,52 @@ el.newConversation.addEventListener("click", async () => {
 // ---------------------------------------------------------------------------
 
 let conversations = [];
+// The cursor for the next, older page, or null when the list is complete.
+let conversationsNext = null;
 
 async function loadConversations() {
   try {
     const answer = await api("/agent/conversations");
     conversations = answer.conversations ?? [];
+    conversationsNext = answer.next ?? null;
     renderConversations();
   } catch {
     // The list is a convenience; the page works without it.
   }
 }
 
+el.olderConversations.addEventListener("click", async () => {
+  if (conversationsNext === null) return;
+  el.olderConversations.disabled = true;
+  try {
+    const answer = await api(
+      "/agent/conversations?before=" + encodeURIComponent(conversationsNext),
+    );
+    // A conversation that became active while the list was open moved to
+    // the top; it is not shown twice.
+    const shown = new Set(conversations.map((c) => c.runId));
+    conversations = conversations.concat(
+      (answer.conversations ?? []).filter((c) => !shown.has(c.runId)),
+    );
+    conversationsNext = answer.next ?? null;
+    renderConversations();
+  } catch (e) {
+    setStatus(el.conversationsStatus, e.message, true);
+  } finally {
+    el.olderConversations.disabled = false;
+  }
+});
+
 function renderConversations() {
   el.conversationsCount.textContent =
     conversations.length === 0
       ? "Conversations"
-      : "Conversations (" + conversations.length + ")";
-  const items = conversations.map((c) => {
+      : "Conversations (" +
+        conversations.length +
+        (conversationsNext === null ? "" : "+") +
+        ")";
+  el.olderConversations.hidden = conversationsNext === null;
+  const rows = conversations.map((c) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "conversation-item";
@@ -649,14 +680,70 @@ function renderConversations() {
         : "") + new Date(c.at).toLocaleString();
     button.append(title, when);
     button.addEventListener("click", () => openConversation(c.runId));
-    return button;
-  });
-  const rows = items.map((button) => {
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "conversation-delete aw-button--secondary";
+    remove.dataset.runId = c.runId;
+    remove.textContent = "Delete";
+    remove.setAttribute("aria-label", "Delete " + (c.title || "conversation"));
+    remove.addEventListener("click", () => deleteConversation(c, remove));
+
     const li = document.createElement("li");
-    li.append(button);
+    li.append(button, remove);
     return li;
   });
   el.conversationsList.replaceChildren(...rows);
+  renderConversationMarks();
+}
+
+/**
+ * Delete on the second press. The first arms the button for a few seconds,
+ * which is enough of a question for something that cannot be undone without
+ * a dialog that would stop the page.
+ */
+async function deleteConversation(c, button) {
+  if (button.dataset.armed !== "true") {
+    button.dataset.armed = "true";
+    button.textContent = "Delete?";
+    setTimeout(() => {
+      button.dataset.armed = "false";
+      button.textContent = "Delete";
+    }, 4000);
+    return;
+  }
+  button.disabled = true;
+  try {
+    const answer = await api("/agent/delete", {
+      method: "POST",
+      body: JSON.stringify({ runId: c.runId }),
+    });
+    conversations = conversations.filter((x) => x.runId !== c.runId);
+    renderConversations();
+    setStatus(
+      el.conversationsStatus,
+      answer.filesLeft > 0
+        ? `Deleted. ${answer.filesLeft} attached file(s) could not be removed from your Anthropic storage.`
+        : "Deleted.",
+      answer.filesLeft > 0,
+    );
+    if (c.runId === shownRun) clearConversation();
+  } catch (e) {
+    button.disabled = false;
+    setStatus(el.conversationsStatus, e.message, true);
+  }
+}
+
+/** Show nothing: what a deleted conversation that was on screen leaves. */
+function clearConversation() {
+  shownRun = "";
+  entries = [];
+  pending = "";
+  spend = EMPTY_SPEND;
+  renderSpend();
+  hidePlan();
+  showConversation(false, "chat");
+  render();
   renderConversationMarks();
 }
 
@@ -664,11 +751,20 @@ function renderConversations() {
 // the conversation on screen, and moving away from it would leave its stop
 // button and its plan pointing at something the page no longer shows.
 function renderConversationMarks() {
-  for (const button of el.conversationsList.querySelectorAll("button")) {
+  for (const button of el.conversationsList.querySelectorAll(
+    ".conversation-item",
+  )) {
     const current = button.dataset.runId === shownRun;
     if (current) button.setAttribute("aria-current", "true");
     else button.removeAttribute("aria-current");
     button.disabled = runWorking && !current;
+  }
+  // The conversation that is working cannot be deleted; the script would
+  // refuse, and the button says so first.
+  for (const button of el.conversationsList.querySelectorAll(
+    ".conversation-delete",
+  )) {
+    button.disabled = runWorking && button.dataset.runId === shownRun;
   }
 }
 

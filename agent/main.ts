@@ -89,6 +89,13 @@ import {
   TelegramFile,
   telegramFiles,
 } from "./attachments.ts";
+import {
+  CONVERSATIONS_PER_PAGE,
+  CONVERSATION_TABLES,
+  conversationTitle,
+  legacyRuns,
+  pageOf,
+} from "./conversations.ts";
 
 /**
  * A prompt-driven agent that runs inside aiwebengine.
@@ -397,6 +404,8 @@ interface RunRow {
   fail_sig?: string;
   nudges?: number;
   step_base?: number;
+  title?: string;
+  updated_ms?: number;
 }
 
 /** A plan put to the person, before and after they answer it. */
@@ -1121,6 +1130,9 @@ function init(): void {
       // prompt began, so a continued conversation starts that prompt's turn
       // budget at zero rather than at everything said before it.
       { name: "step_base", type: "bigint" },
+      // The conversation's first prompt, for the list. Filled the first time
+      // the list needs it, so a run's own path does not have to know.
+      { name: "title", type: "text" },
     ],
   });
 
@@ -1188,6 +1200,8 @@ function init(): void {
     ],
   });
 
+  backfillRuns();
+
   routeRegistry.registerRoute("/agent", { file: "public/ui.html" });
   routeRegistry.registerRoute("/agent/app.js", { file: "public/app.js" });
 
@@ -1202,6 +1216,12 @@ function init(): void {
     method: "GET",
     tags: ["Agent"],
     summary: "A picture the person sent, for the page to show",
+  });
+  routeRegistry.registerRoute("/agent/delete", {
+    handler: "deleteConversation",
+    method: "POST",
+    tags: ["Agent"],
+    summary: "Delete a conversation, its log and its attachments",
   });
   routeRegistry.registerRoute("/agent/conversations", {
     handler: "listConversations",
@@ -1527,42 +1547,161 @@ function listConversations(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
   if (!userId) return json(401, { error: "Sign in first." });
 
-  const rows = database.query("activities", {
-    where: { user_id: userId, kind: "prompt" },
-    limit: MAX_CONVERSATION_PROMPTS,
-    orderBy: "id",
+  // One row per conversation, most recently active first. `before` is the
+  // cursor the previous page answered with: that page's oldest time.
+  const before = Number(context.request?.query?.before ?? "");
+  const where: Record<string, unknown> = { user_id: userId };
+  if (Number.isFinite(before) && before > 0) {
+    where.updated_ms = { $lt: before };
+  }
+  const rows = database.query("runs", {
+    where: where,
+    limit: CONVERSATIONS_PER_PAGE + 1,
+    orderBy: "updated_ms",
     order: "desc",
-  }) as unknown as ActivityRow[];
+  }) as unknown as RunRow[];
+  const page = pageOf(Array.isArray(rows) ? rows : [], CONVERSATIONS_PER_PAGE);
 
-  // Newest prompt first, so the first row of a run fixes when it was last
-  // prompted and the last one seen is the earliest prompt there is to name it.
-  const byRun: Record<string, { title: string; at: number; prompts: number }> =
-    {};
-  const order: string[] = [];
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const id = String(row.run_id ?? "");
-    if (!id) continue;
-    if (!byRun[id]) {
-      byRun[id] = { title: "", at: Number(row.created_ms), prompts: 0 };
-      order.push(id);
+  return json(200, {
+    conversations: page.items.map((row) => ({
+      runId: row.run_id,
+      title: titleOf(userId, row),
+      at: Number(row.updated_ms ?? 0),
+      kind: runKindOf(row.run_kind),
+      state: String(row.run_state || "done"),
+    })),
+    next: page.next,
+  });
+}
+
+/**
+ * A conversation's title, kept on its run row once known. A run's own path
+ * never writes it, so the first listing after a conversation starts reads the
+ * first prompt and stores what it found.
+ */
+function titleOf(userId: string, row: RunRow): string {
+  if (row.title) return row.title;
+  const prompts = database.query("activities", {
+    where: { user_id: userId, run_id: row.run_id, kind: "prompt" },
+    limit: 1,
+    orderBy: "id",
+    order: "asc",
+  });
+  const title = conversationTitle(prompts[0]?.message);
+  if (title) {
+    writeRow(
+      () => database.update("runs", Number(row.id), { title: title }),
+      "remembering a conversation's title",
+    );
+  }
+  return title;
+}
+
+/**
+ * Give every conversation from before the `runs` table a row of its own, so
+ * the list, which reads that table, can show it. Once per database, marked in
+ * script storage; a failure is logged and tried again at the next start.
+ */
+function backfillRuns(): void {
+  const MARK = "conversations:runs-backfilled";
+  try {
+    if (scriptStorage.getItem(MARK)) return;
+
+    const existing = new Set<string>();
+    let after = 0;
+    for (;;) {
+      const page = database.query("runs", {
+        where: { id: { $gt: after } },
+        limit: 1000,
+        orderBy: "id",
+        order: "asc",
+      });
+      if (page.length === 0) break;
+      for (const row of page) existing.add(row.user_id + "|" + row.run_id);
+      after = Number(page[page.length - 1].id);
     }
-    byRun[id].title = String(row.message ?? "");
-    byRun[id].prompts += 1;
+
+    const prompts: Record<string, unknown>[] = [];
+    after = 0;
+    for (;;) {
+      const page = database.query("activities", {
+        where: { kind: "prompt", id: { $gt: after } },
+        limit: 1000,
+        orderBy: "id",
+        order: "asc",
+      });
+      if (page.length === 0) break;
+      prompts.push(...page);
+      after = Number(page[page.length - 1].id);
+    }
+
+    const missing = legacyRuns(prompts, existing);
+    database.transaction(() => {
+      for (const row of missing) database.insert("runs", row);
+    });
+    scriptStorage.setItem(MARK, String(Date.now()));
+    if (missing.length > 0) {
+      console.log(
+        `agent: gave ${missing.length} older conversations a run row`,
+      );
+    }
+  } catch (e) {
+    console.log("agent: could not give older conversations a run row: " + e);
+  }
+}
+
+/**
+ * Delete a conversation: every row it has in every table, and its files in
+ * the person's Files API storage. A conversation still working is refused,
+ * since its next turn would write into what was just removed.
+ *
+ * The files go first and on a best-effort basis: a file that cannot be
+ * removed (the key was taken away, the API is down) is counted and the
+ * conversation is deleted anyway, so a person can always clear their list.
+ */
+function deleteConversation(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  let runId = "";
+  try {
+    const body = (context.request?.json() ?? {}) as { runId?: string };
+    runId = String(body.runId ?? "").trim();
+  } catch (e) {
+    return json(400, { error: "Expected a JSON body." });
+  }
+  if (!RUN_ID_PATTERN.test(runId)) {
+    return json(400, { error: "That is not a conversation id." });
+  }
+  if (runIsLive(userId, runId)) {
+    return json(409, {
+      error: "That conversation is still working. Stop it first.",
+      runLive: true,
+    });
   }
 
-  const conversations = order.slice(0, MAX_CONVERSATIONS).map((id) => {
-    const found = byRun[id];
-    const title = found.title.replace(/\s+/g, " ").trim();
-    return {
-      runId: id,
-      title: title.length > 80 ? title.slice(0, 79) + "\u2026" : title,
-      at: found.at,
-      prompts: found.prompts,
-      kind: kindOf(userId, id),
-      state: runStateOf(userId, id) ?? "done",
-    };
+  let filesLeft = 0;
+  const files = database.query("attachments", {
+    where: { user_id: userId, run_id: runId },
+    limit: 1000,
   });
-  return json(200, { conversations: conversations });
+  for (const row of files) {
+    if (!forgetFile(String(row.file_id ?? ""))) filesLeft += 1;
+  }
+
+  try {
+    database.transaction(() => {
+      for (const table of CONVERSATION_TABLES) {
+        database.deleteWhere(table, { user_id: userId, run_id: runId });
+      }
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return json(500, {
+      error: "Could not delete the conversation: " + message,
+    });
+  }
+  return json(200, { deleted: true, filesLeft: filesLeft });
 }
 
 function latestRunId(userId: string): string {
@@ -2321,18 +2460,27 @@ function readAttachment(context: HandlerContext): HttpResponse {
 
 /** Remove uploaded files, as far as that works. Nothing refers to them. */
 function forgetFiles(attachments: Attachment[]): void {
-  for (const attachment of attachments) {
-    try {
-      fetch(FILES_URL + "/" + encodeURIComponent(attachment.fileId), {
-        method: "DELETE",
-        headers: {
-          "x-api-key": "{{secret:" + SECRET_NAME + "}}",
-          "anthropic-version": "2023-06-01",
-        },
-      });
-    } catch (e) {
-      console.log("agent: could not remove an uploaded file: " + String(e));
-    }
+  for (const attachment of attachments) forgetFile(attachment.fileId);
+}
+
+/**
+ * Remove one file from the person's Files API storage. Answers whether it is
+ * gone, which a file that was already removed is.
+ */
+function forgetFile(fileId: string): boolean {
+  if (!fileId) return true;
+  try {
+    const answer = fetch(FILES_URL + "/" + encodeURIComponent(fileId), {
+      method: "DELETE",
+      headers: {
+        "x-api-key": "{{secret:" + SECRET_NAME + "}}",
+        "anthropic-version": "2023-06-01",
+      },
+    });
+    return answer.ok || answer.status === 404;
+  } catch (e) {
+    console.log("agent: could not remove an uploaded file: " + String(e));
+    return false;
   }
 }
 
@@ -6397,8 +6545,6 @@ function signedInUser(context: HandlerContext): string | null {
   return auth.userId;
 }
 
-const MAX_CONVERSATIONS = 30;
-const MAX_CONVERSATION_PROMPTS = 300;
 const RUN_ID_PATTERN = /^[a-z0-9-]{1,40}$/;
 
 function newRunId(): string {

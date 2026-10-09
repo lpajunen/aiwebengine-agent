@@ -90,9 +90,20 @@
       /* The page's own li is a two-column row for the activity log; a
          conversation is one button across the width. */
       .conversation-list li {
-        display: block;
+        display: flex;
+        align-items: center;
+        gap: var(--aw-space-2);
         border-top: 0;
         padding: 0;
+      }
+      .conversation-list li .conversation-item {
+        flex: 1;
+        min-width: 0;
+      }
+      /* Asks once more before it deletes; the second press is the one. */
+      .conversation-delete[data-armed="true"] {
+        border-color: var(--aw-color-danger);
+        color: var(--aw-color-danger);
       }
       .conversation-item {
         display: flex;
@@ -458,6 +469,16 @@
             <span id="conversations-count">Conversations</span>
           </summary>
           <ul id="conversations-list" class="conversation-list"></ul>
+          <div class="row">
+            <button
+              id="older-conversations"
+              class="aw-button--secondary"
+              hidden
+            >
+              Show older
+            </button>
+            <span id="conversations-status" class="status"></span>
+          </div>
         </details>
       </section>
 
