@@ -45,14 +45,23 @@ subject by importing it — so anything under test had to move out:
 Their tests are `agent/*.test.ts`, run with the `run_tests` tool
 or `POST /engine/run_tests` with `{"script": "<this script>"}`.
 
-The model gets five tools: `write_response` (the only way the person sees
-anything), `remember`, `list_memories` and `recall` over notes in that person's
-`personalStorage`, and `run_js`, which runs model-written JavaScript in a
-sandbox holding less than the turn around it. Seven more appear conditionally:
+The model gets six tools: `write_response` (the only way the person sees
+anything), `write_image`, `remember`, `list_memories` and `recall` over notes in
+that person's `personalStorage`, and `run_js`, which runs model-written
+JavaScript in a sandbox holding less than the turn around it. Seven more appear conditionally:
 `request_approval` while a run is planning, `read_skill` when the deployment
 has skills, `write_skill` with it, `engine_tools` / `engine_call` when the
 person has granted this app management authority, and `app_tools` /
 `app_call` when they have let it use their other apps.
+
+`write_image` takes an SVG and shows it as a picture: in the log on the page,
+and as a photo in Telegram. The engine renders it to PNG first
+(`convert.svg_to_png`), and only the PNG is kept, as an `attachments` row with
+no uploaded file behind it, so the page fetches it from `/agent/attachment`
+like a picture the person sent. Model-written SVG is never served, because as
+`image/svg+xml` it is a document that can carry script. An SVG the engine
+refuses goes back to the model with the reason. `images.ts` holds the sizes
+tried and the Telegram form.
 
 `list_memories` is what makes the notes readable rather than only writable:
 `recall` needs a key, so anything written in an earlier run was unreachable

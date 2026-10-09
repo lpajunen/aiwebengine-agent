@@ -290,6 +290,10 @@
         border: 1px solid var(--aw-color-border);
         border-radius: 4px;
       }
+      /* A picture the agent drew is the answer, not a reminder of one. */
+      .kind[data-kind="picture"] + .message .thumbs img {
+        max-height: 480px;
+      }
       /* A file being dragged over the prompt. */
       #prompt-section.dropping {
         border-color: var(--aw-color-focus);

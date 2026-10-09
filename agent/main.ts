@@ -89,6 +89,7 @@ import {
   TelegramFile,
   telegramFiles,
 } from "./attachments.ts";
+import { renderSvg, telegramPhotoForm } from "./images.ts";
 import {
   CONVERSATIONS_PER_PAGE,
   CONVERSATION_TABLES,
@@ -278,6 +279,8 @@ const SYSTEM_PROMPT = [
   "when the answer is short or the news is bad. If you end a turn with plain",
   "text and no tool call, that text is delivered as your answer and the run",
   "ends there — so never end a turn having said nothing at all.",
+  "When a picture would explain better than words — a diagram, a chart —",
+  "draw it as SVG with write_image, then answer with write_response.",
   "Use remember for anything worth keeping between runs, list_memories to see",
   "what you already know about this person, and recall to read one back.",
   "When the work is more than one step — fetching something, trying each of",
@@ -550,6 +553,28 @@ const TOOLS: ToolSpec[] = [
         },
       },
       required: ["text"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: "write_image",
+    description:
+      "Show the person a picture you draw as SVG: a diagram, a chart, a sketch. It appears beside your answers and, in a chat, as a photo. Text is drawn in Noto Sans whatever font-family you name, and <image> elements are never loaded. Keep it compact — every element is output you pay for. If it cannot be drawn you get the reason; fix the SVG and call again.",
+    input_schema: {
+      type: "object",
+      properties: {
+        svg: {
+          type: "string",
+          description:
+            "A complete SVG document with a viewBox, or a width and height.",
+        },
+        caption: {
+          type: "string",
+          description: "One line saying what the picture shows.",
+        },
+      },
+      required: ["svg", "caption"],
       additionalProperties: false,
     },
     strict: true,
@@ -2427,8 +2452,42 @@ function recordAttachments(
 }
 
 /**
- * Serve the agent's copy of a picture, to the person who sent it and nobody
- * else. Only pictures are kept, so what this answers is always an image.
+ * Show a picture the agent drew: kept as an attachment row with no uploaded
+ * file behind it, so the page fetches it the way it fetches one the person
+ * sent, and sent on to the chat the run came from.
+ */
+function showPicture(
+  userId: string,
+  runId: string,
+  png: string,
+  caption: string,
+): void {
+  const name = "picture.png";
+  let id = 0;
+  try {
+    id = database.insert("attachments", {
+      user_id: userId,
+      run_id: runId,
+      file_id: "",
+      name: name,
+      content_type: "image/png",
+      preview: png,
+      created_ms: Date.now(),
+    }).id;
+  } catch (e) {
+    quietLog(`agent: could not keep a picture: ${e}`);
+  }
+  recordActivity(userId, runId, "picture", caption, [
+    { id: id, name: caption || name, kind: "image", preview: id > 0 },
+  ]);
+  const to = channelFor(userId, runId);
+  if (to) sendTelegramPhoto(to.chatId, png, caption);
+}
+
+/**
+ * Serve the agent's copy of a picture — one the person sent, or one the agent
+ * drew — to that person and nobody else. Only pictures are kept, so what this
+ * answers is always an image.
  */
 function readAttachment(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
@@ -3993,6 +4052,19 @@ function runTool(
       // run started on the page.
       notifyChannel(userId, runId, text);
       return { content: "Delivered.", isError: false };
+    }
+
+    case "write_image": {
+      const caption = String(input.caption ?? "").trim();
+      const rendered = renderSvg(String(input.svg ?? ""));
+      if ("error" in rendered) {
+        return {
+          content: `${rendered.error}\nFix the SVG and call write_image again.`,
+          isError: true,
+        };
+      }
+      showPicture(userId, runId, rendered.png, caption);
+      return { content: "Shown to the person.", isError: false };
     }
 
     case "remember": {
@@ -5973,6 +6045,31 @@ function sendTelegram(
       // engine substituted and never wrote down.
       quietLog(
         `agent: telegram refused a message: ${String(answer.body).slice(0, 200)}`,
+      );
+      return false;
+    }
+    return true;
+  } catch (e) {
+    quietLog(`agent: could not reach telegram: ${String(e).slice(0, 200)}`);
+    return false;
+  }
+}
+
+/** Send a picture to a chat as a photo. */
+function sendTelegramPhoto(
+  chatId: string,
+  png: string,
+  caption: string,
+): boolean {
+  if (!chatId) return false;
+  try {
+    const answer = fetch(TELEGRAM_API + "sendPhoto", {
+      method: "POST",
+      form: telegramPhotoForm(chatId, png, caption),
+    });
+    if (!answer.ok) {
+      quietLog(
+        `agent: telegram refused a photo: ${String(answer.body).slice(0, 200)}`,
       );
       return false;
     }
