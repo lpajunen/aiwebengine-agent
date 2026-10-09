@@ -21,6 +21,9 @@ const el = {
   keyStatus: document.getElementById("key-status"),
   prompt: document.getElementById("prompt"),
   author: document.getElementById("author"),
+  talk: document.getElementById("talk"),
+  speak: document.getElementById("speak"),
+  speakChoice: document.getElementById("speak-choice"),
   run: document.getElementById("run"),
   newConversation: document.getElementById("new-conversation"),
   stop: document.getElementById("stop"),
@@ -554,6 +557,7 @@ function showConversation(has, kind) {
 
 el.newConversation.addEventListener("click", async () => {
   if (runWorking || running) return;
+  stopSpeaking();
   el.newConversation.disabled = true;
   try {
     const started = await api("/agent/new", { method: "POST", body: "{}" });
@@ -652,6 +656,10 @@ async function openConversation(runId) {
 // ---------------------------------------------------------------------------
 
 el.run.addEventListener("click", async () => {
+  // What is in the box is what was heard; a result still arriving would put
+  // it back after the box is cleared.
+  abortDictation();
+  stopSpeaking();
   const prompt = el.prompt.value.trim();
   if (!prompt || running) return;
 
@@ -725,6 +733,7 @@ el.run.addEventListener("click", async () => {
 });
 
 el.stop.addEventListener("click", async () => {
+  stopSpeaking();
   if (!shownRun) return;
   el.stop.disabled = true;
   try {
@@ -837,6 +846,167 @@ el.prompt.addEventListener("keydown", (event) => {
     el.run.click();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Voice
+// ---------------------------------------------------------------------------
+//
+// Both halves are the browser's own Web Speech API, so neither the script nor
+// the model ever handles audio. Dictation fills the prompt box and the person
+// still presses Run, so a misheard word is caught before it costs a turn. An
+// answer is read from the same text the log shows. Chrome sends dictated audio
+// to Google to recognise; Safari can recognise on the device.
+
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const synth = window.speechSynthesis;
+const SPEAK_KEY = "agent.speak";
+
+// Chrome stops an utterance that runs much past fifteen seconds, so an answer
+// is read as a queue of short ones.
+const UTTERANCE_CHARS = 200;
+
+let recognition = null;
+// What was in the box when dictation started. Recognised text goes after it
+// rather than over it.
+let dictationBase = "";
+let speakAnswers = false;
+
+function setListening(on) {
+  el.talk.setAttribute("aria-pressed", on ? "true" : "false");
+  el.talk.textContent = on ? "Stop talking" : "Talk";
+}
+
+function startDictation() {
+  stopSpeaking();
+  const r = new Recognition();
+  r.lang = navigator.language || "en-US";
+  r.continuous = true;
+  r.interimResults = true;
+  dictationBase = el.prompt.value.trim();
+
+  // Every result of the session, final and interim, so the box always shows
+  // the whole of what has been heard so far.
+  r.addEventListener("result", (event) => {
+    if (r !== recognition) return;
+    let heard = "";
+    for (const result of event.results) heard += result[0].transcript;
+    heard = heard.replace(/\s+/g, " ").trim();
+    el.prompt.value = [dictationBase, heard].filter(Boolean).join(" ");
+  });
+  r.addEventListener("error", (event) => {
+    if (
+      event.error === "not-allowed" ||
+      event.error === "service-not-allowed"
+    ) {
+      setStatus(
+        el.runStatus,
+        "The browser was not allowed to use the microphone.",
+        true,
+      );
+    } else if (event.error !== "no-speech" && event.error !== "aborted") {
+      setStatus(el.runStatus, "Dictation stopped: " + event.error + ".", true);
+    }
+  });
+  r.addEventListener("end", () => {
+    if (r !== recognition) return;
+    recognition = null;
+    setListening(false);
+    el.prompt.focus();
+  });
+
+  recognition = r;
+  setListening(true);
+  setStatus(el.runStatus, "");
+  r.start();
+}
+
+/** Stop listening and keep nothing that has not reached the box yet. */
+function abortDictation() {
+  if (!recognition) return;
+  const r = recognition;
+  recognition = null;
+  setListening(false);
+  r.abort();
+}
+
+if (Recognition) {
+  el.talk.hidden = false;
+  el.talk.addEventListener("click", () => {
+    // Stopping rather than aborting: the last words are still being
+    // recognised, and they are wanted.
+    if (recognition) recognition.stop();
+    else startDictation();
+  });
+}
+
+if (synth) {
+  el.speakChoice.hidden = false;
+  try {
+    speakAnswers = localStorage.getItem(SPEAK_KEY) === "1";
+  } catch {
+    // Storage can be unavailable; the switch then starts off.
+  }
+  el.speak.checked = speakAnswers;
+  el.speak.addEventListener("change", () => {
+    speakAnswers = el.speak.checked;
+    try {
+      localStorage.setItem(SPEAK_KEY, speakAnswers ? "1" : "0");
+    } catch {
+      // Remembered for this page only.
+    }
+    if (!speakAnswers) stopSpeaking();
+  });
+}
+
+function stopSpeaking() {
+  if (synth) synth.cancel();
+}
+
+/**
+ * Read an answer aloud, if the person asked for that. Every open tab with the
+ * switch on reads it: the switch is remembered per browser, not per tab.
+ */
+function speak(text) {
+  if (!synth || !speakAnswers) return;
+  const lang = navigator.language || "en-US";
+  for (const part of speakableParts(text)) {
+    const utterance = new SpeechSynthesisUtterance(part);
+    utterance.lang = lang;
+    synth.speak(utterance);
+  }
+}
+
+/**
+ * The answer as something to listen to: markdown marks dropped, code and
+ * addresses named rather than spelled out, line ends read as pauses, then cut
+ * at sentence ends into pieces short enough to be read whole.
+ */
+function speakableParts(text) {
+  const plain = text
+    .replace(/```[\s\S]*?```/g, " Code omitted. ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/https?:\/\/\S+?(?=[.,!?]?(\s|$))/g, "a link")
+    .replace(/^\s*(#+|[-*+]|\d+\.)\s+/gm, "")
+    .replace(/[*~>|]|_{2,}/g, "")
+    // A heading or a list item ends without a full stop; the line break is
+    // its pause.
+    .replace(/([^.!?:;,\s])[ \t]*\n+/g, "$1. ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const sentences = plain.match(/[^.!?]+[.!?]*\s*/g) ?? [];
+  const parts = [];
+  let current = "";
+  for (const sentence of sentences) {
+    if (current && current.length + sentence.length > UTTERANCE_CHARS) {
+      parts.push(current.trim());
+      current = "";
+    }
+    current += sentence;
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
 
 // ---------------------------------------------------------------------------
 // Start
@@ -1021,6 +1191,7 @@ async function start() {
         return;
       }
 
+      if (payload.kind === "response") speak(payload.message);
       addEntry(payload);
     } catch {
       // Keep-alives and anything else the engine sends are not activity.

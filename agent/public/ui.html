@@ -228,6 +228,11 @@
       .empty {
         color: var(--aw-color-muted);
       }
+      /* Dictating: the button is what stops it, so it looks live. */
+      #talk[aria-pressed="true"] {
+        border-color: var(--aw-color-danger);
+        color: var(--aw-color-danger);
+      }
       .spend {
         display: flex;
         align-items: center;
@@ -333,9 +338,23 @@
           Build a script: the agent writes it, checks it and asks before
           deploying.
         </label>
+        <!-- Voice is the browser's own; each control is shown only where the
+             browser can do it. -->
+        <label class="aw-choice aw-muted" id="speak-choice" hidden>
+          <input type="checkbox" id="speak" />
+          Read answers aloud.
+        </label>
         <div class="row">
           <button id="new-conversation" class="aw-button--secondary">
             New conversation
+          </button>
+          <button
+            id="talk"
+            class="aw-button--secondary"
+            aria-pressed="false"
+            hidden
+          >
+            Talk
           </button>
           <button id="run">Run</button>
           <button id="stop" class="aw-button--secondary" hidden>Stop</button>
