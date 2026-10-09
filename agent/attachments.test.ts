@@ -8,6 +8,7 @@ import {
   describeAttachments,
   originalNames,
   promptBlocks,
+  telegramFiles,
 } from "./attachments.ts";
 
 describe("which files the model reads", () => {
@@ -87,5 +88,77 @@ describe("names", () => {
         { name: "spec.pdf", contentType: "application/pdf", fileId: "g" },
       ]),
     ).toBe("cat.jpg (picture), spec.pdf (document)");
+  });
+});
+
+describe("files from Telegram", () => {
+  test("the largest photo size the model reads whole is chosen", () => {
+    const { files } = telegramFiles({
+      photo: [
+        { file_id: "s", width: 90, height: 67 },
+        { file_id: "m", width: 800, height: 600 },
+        { file_id: "l", width: 1280, height: 960 },
+        { file_id: "xl", width: 2560, height: 1920 },
+      ],
+    });
+    expect(files).toEqual([
+      { telegramId: "l", name: "photo.jpg", contentType: "image/jpeg" },
+    ]);
+  });
+
+  test("when every size is too large, the smallest is the least waste", () => {
+    const { files } = telegramFiles({
+      photo: [
+        { file_id: "big", width: 4000, height: 3000 },
+        { file_id: "bigger", width: 8000, height: 6000 },
+      ],
+    });
+    expect(files[0].telegramId).toBe("big");
+  });
+
+  test("a PDF is passed on under its own name", () => {
+    expect(
+      telegramFiles({
+        document: {
+          file_id: "d",
+          file_name: "spec.pdf",
+          mime_type: "application/pdf",
+          file_size: 1000,
+        },
+      }),
+    ).toEqual({
+      files: [
+        { telegramId: "d", name: "spec.pdf", contentType: "application/pdf" },
+      ],
+    });
+  });
+
+  test("a document the model cannot read is refused by name", () => {
+    const answer = telegramFiles({
+      document: {
+        file_id: "z",
+        file_name: "archive.zip",
+        mime_type: "application/zip",
+      },
+    });
+    expect(answer.files).toEqual([]);
+    expect(answer.refusal).toContain("archive.zip");
+  });
+
+  test("a document too large to download is refused before it is tried", () => {
+    const answer = telegramFiles({
+      document: {
+        file_id: "p",
+        file_name: "scan.pdf",
+        mime_type: "application/pdf",
+        file_size: 20 * 1024 * 1024,
+      },
+    });
+    expect(answer.files).toEqual([]);
+    expect(answer.refusal).toContain("9.5 MB");
+  });
+
+  test("a message with neither is no files and no refusal", () => {
+    expect(telegramFiles({})).toEqual({ files: [] });
   });
 });

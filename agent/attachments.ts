@@ -100,3 +100,85 @@ export function describeAttachments(attachments: Attachment[]): string {
     )
     .join(", ");
 }
+
+/**
+ * Every file one prompt may carry, together. The engine answers a `fetch`
+ * of at most 10 MB, so a file downloaded from Telegram has to fit in that,
+ * and the page keeps to the same figure.
+ */
+export const MAX_ATTACHMENT_BYTES = 9.5 * 1024 * 1024;
+
+/** The long edge the model reads a picture at; anything larger is scaled down. */
+export const IMAGE_EDGE = 1568;
+
+interface TelegramPhotoSize {
+  file_id?: string;
+  width?: number;
+  height?: number;
+  file_size?: number;
+}
+
+interface TelegramDocument {
+  file_id?: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+/** A file a Telegram message carries, before it has been downloaded. */
+export interface TelegramFile {
+  telegramId: string;
+  name: string;
+  contentType: string;
+}
+
+/**
+ * The files in a Telegram message, or why they cannot be read.
+ *
+ * Telegram sends a photo at several sizes. The largest the model will read
+ * whole is the one worth downloading: a larger one is only bytes, and a
+ * smaller one loses detail. Telegram re-encodes every photo as JPEG.
+ */
+export function telegramFiles(message: {
+  photo?: TelegramPhotoSize[];
+  document?: TelegramDocument;
+}): { files: TelegramFile[]; refusal?: string } {
+  const files: TelegramFile[] = [];
+
+  const sizes = (message.photo ?? []).filter((size) => size.file_id);
+  if (sizes.length > 0) {
+    const edge = (size: TelegramPhotoSize) =>
+      Math.max(Number(size.width ?? 0), Number(size.height ?? 0));
+    const fitting = sizes.filter((size) => edge(size) <= IMAGE_EDGE);
+    const chosen =
+      fitting.length > 0
+        ? fitting.reduce((a, b) => (edge(b) > edge(a) ? b : a))
+        : sizes.reduce((a, b) => (edge(b) < edge(a) ? b : a));
+    files.push({
+      telegramId: String(chosen.file_id),
+      name: "photo.jpg",
+      contentType: "image/jpeg",
+    });
+  }
+
+  const document = message.document;
+  if (document?.file_id) {
+    const name = String(document.file_name ?? "document").slice(0, 200);
+    const contentType = String(document.mime_type ?? "");
+    if (!attachmentKind(contentType)) {
+      return {
+        files: [],
+        refusal: `I can read pictures, PDFs and plain-text files, and ${name} is none of those.`,
+      };
+    }
+    if (Number(document.file_size ?? 0) > MAX_ATTACHMENT_BYTES) {
+      return {
+        files: [],
+        refusal: `${name} is larger than the 9.5 MB I can take.`,
+      };
+    }
+    files.push({ telegramId: String(document.file_id), name, contentType });
+  }
+
+  return { files };
+}

@@ -83,6 +83,8 @@ import {
   describeAttachments,
   originalNames,
   promptBlocks,
+  TelegramFile,
+  telegramFiles,
 } from "./attachments.ts";
 
 /**
@@ -1394,7 +1396,13 @@ function startRun(context: HandlerContext): HttpResponse {
   let attachments: Attachment[] = [];
   if (uploads.length > 0) {
     try {
-      attachments = uploadAttachments(uploads, names);
+      attachments = uploadAttachments(
+        uploads.map((upload, i) => ({
+          name: names[i],
+          contentType: String(upload.contentType ?? ""),
+          data: upload.data,
+        })),
+      );
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       return json(502, {
@@ -2161,15 +2169,12 @@ function decide(
  * because they would sit in the person's storage referred to by nothing.
  */
 function uploadAttachments(
-  uploads: NonNullable<HttpRequest["files"]>,
-  names: string[],
+  files: { name: string; contentType: string; data: string }[],
 ): Attachment[] {
   const done: Attachment[] = [];
-  for (let i = 0; i < uploads.length; i++) {
-    const contentType = String(uploads[i].contentType ?? "")
-      .split(";")[0]
-      .trim()
-      .toLowerCase();
+  for (let i = 0; i < files.length; i++) {
+    const name = files[i].name;
+    const contentType = files[i].contentType.split(";")[0].trim().toLowerCase();
     const response = fetch(FILES_URL, {
       method: "POST",
       timeout: MODEL_TIMEOUT_MS,
@@ -2180,8 +2185,8 @@ function uploadAttachments(
       form: [
         {
           name: "file",
-          base64: uploads[i].data,
-          filename: names[i],
+          base64: files[i].data,
+          filename: name,
           contentType: contentType,
         },
       ],
@@ -2195,13 +2200,13 @@ function uploadAttachments(
     if (!response.ok || !answer.id) {
       forgetFiles(done);
       throw new Error(
-        names[i] +
+        name +
           ": " +
           (answer.error?.message ??
             `the Files API answered ${response.status}`),
       );
     }
-    done.push({ name: names[i], contentType: contentType, fileId: answer.id });
+    done.push({ name: name, contentType: contentType, fileId: answer.id });
   }
   return done;
 }
@@ -5626,6 +5631,10 @@ const TELEGRAM_WEBHOOK_SECRET_KEY = "telegram:webhook_secret";
 const TELEGRAM_API =
   "https://api.telegram.org/bot{{secret:" + TELEGRAM_TOKEN_SECRET + "}}/";
 
+/** Where Telegram serves a file's bytes, once `getFile` has named its path. */
+const TELEGRAM_FILE_API =
+  "https://api.telegram.org/file/bot{{secret:" + TELEGRAM_TOKEN_SECRET + "}}/";
+
 /** Telegram refuses a message over 4096 characters. */
 const MAX_TELEGRAM_CHARS = 3500;
 
@@ -5639,6 +5648,15 @@ interface TelegramFrom {
 
 interface TelegramMessage {
   text?: string;
+  /** The text sent with a photo or a document, which then has no `text`. */
+  caption?: string;
+  photo?: { file_id?: string; width?: number; height?: number }[];
+  document?: {
+    file_id?: string;
+    file_name?: string;
+    mime_type?: string;
+    file_size?: number;
+  };
   chat?: TelegramChat;
   from?: TelegramFrom;
 }
@@ -5814,11 +5832,18 @@ function telegramIncoming(
   // chat would let anybody in that group start the agent of whoever linked
   // it. The identity is the person; the chat is only where to reply.
   const chatId = String(message.chat?.id ?? "");
-  const text = String(message.text ?? "").trim();
+  const text = String(message.text ?? message.caption ?? "").trim();
   if (!from || !chatId) return json(200, { ok: true });
 
-  if (!text) {
-    sendTelegram(chatId, "I can only read text messages.");
+  // Only Telegram's ids for the files, not the files: this webhook runs as
+  // nobody and holds no key to upload them with, so the run downloads them.
+  const attached = telegramFiles(message);
+  if (attached.refusal) {
+    sendTelegram(chatId, attached.refusal);
+    return json(200, { ok: true });
+  }
+  if (!text && attached.files.length === 0) {
+    sendTelegram(chatId, "I can read text, photos, PDFs and plain-text files.");
     return json(200, { ok: true });
   }
 
@@ -5842,7 +5867,7 @@ function telegramIncoming(
       channel: TELEGRAM_CHANNEL,
       identity: from,
       handler: "startTelegramRun",
-      payload: { text: text, chatId: chatId },
+      payload: { text: text, chatId: chatId, files: attached.files },
       maxAttempts: 1,
     });
   } catch (e) {
@@ -5988,10 +6013,15 @@ function startTelegramRun(context: HandlerContext): void {
   }
 
   const task = context.meta?.task;
-  const payload = (task?.payload ?? {}) as { text?: string; chatId?: string };
+  const payload = (task?.payload ?? {}) as {
+    text?: string;
+    chatId?: string;
+    files?: TelegramFile[];
+  };
   const text = String(payload.text ?? "").trim();
   const chatId = String(payload.chatId ?? "");
-  if (!text || !chatId) return;
+  const files = Array.isArray(payload.files) ? payload.files : [];
+  if ((!text && files.length === 0) || !chatId) return;
 
   if (!secretStorage.exists(SECRET_NAME)) {
     sendTelegram(
@@ -5999,6 +6029,20 @@ function startTelegramRun(context: HandlerContext): void {
       "You have not stored an API key yet — runs are billed to your own. Add one on the agent page first.",
     );
     return;
+  }
+
+  // Downloaded and uploaded before anything is stored, as on the page, so a
+  // failure leaves no prompt the model would answer without its files.
+  let attachments: Attachment[] = [];
+  if (files.length > 0) {
+    try {
+      attachments = uploadAttachments(files.map(downloadTelegramFile));
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      quietLog(`agent: could not take a telegram file: ${message}`);
+      sendTelegram(chatId, `I could not take the file: ${message}`);
+      return;
+    }
   }
 
   const runId = newRunId();
@@ -6009,8 +6053,21 @@ function startTelegramRun(context: HandlerContext): void {
   // grant covering reading and not writing is the likeliest cause, and it is
   // worth naming rather than leaving them to guess.
   try {
-    appendMessage(userId, runId, "user", [{ type: "text", text: text }]);
-    recordActivity(userId, runId, "prompt", text);
+    appendMessage(userId, runId, "user", promptBlocks(text, attachments));
+    recordActivity(
+      userId,
+      runId,
+      "prompt",
+      text || "(" + attachments.length + " attached)",
+    );
+    if (attachments.length > 0) {
+      recordActivity(
+        userId,
+        runId,
+        "attached",
+        describeAttachments(attachments),
+      );
+    }
 
     const next = personalTasks.enqueue({
       handler: "advanceRun",
@@ -6037,6 +6094,54 @@ function startTelegramRun(context: HandlerContext): void {
     quietLog(`agent: could not start a telegram run: ${message}`);
     sendTelegram(chatId, `I could not start: ${message}`);
   }
+}
+
+/**
+ * Download a file a Telegram message carried, as base64.
+ *
+ * Two calls, because Telegram answers a file id with a path and serves the
+ * bytes from a second address. The bot token is in both URLs' paths, where
+ * the engine substitutes it, so it is in no log and no error.
+ */
+function downloadTelegramFile(file: TelegramFile): {
+  name: string;
+  contentType: string;
+  data: string;
+} {
+  const located = fetch(
+    TELEGRAM_API + "getFile?file_id=" + encodeURIComponent(file.telegramId),
+  );
+  let path = "";
+  try {
+    const answer = located.json() as {
+      ok?: boolean;
+      result?: { file_path?: string };
+      description?: string;
+    };
+    path = String(answer.result?.file_path ?? "");
+    if (!path) {
+      throw new Error(answer.description ?? "Telegram did not say where it is");
+    }
+  } catch (e) {
+    throw new Error(
+      file.name + ": " + (e instanceof Error ? e.message : String(e)),
+    );
+  }
+
+  const download = fetch(TELEGRAM_FILE_API + path, {
+    binary: true,
+    timeout: MODEL_TIMEOUT_MS,
+  });
+  if (!download.ok || !download.bodyBase64) {
+    throw new Error(
+      `${file.name}: Telegram answered ${download.status} to the download`,
+    );
+  }
+  return {
+    name: file.name,
+    contentType: file.contentType,
+    data: download.bodyBase64,
+  };
 }
 
 /** Carry out a button press, as the person who pressed it. */
