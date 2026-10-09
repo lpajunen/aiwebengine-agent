@@ -76,6 +76,14 @@ import {
   testsPassed,
 } from "./authoring.ts";
 import { rememberArgs, skillWriteArgs } from "./plans.ts";
+import {
+  Attachment,
+  MAX_ATTACHMENTS,
+  attachmentKind,
+  describeAttachments,
+  originalNames,
+  promptBlocks,
+} from "./attachments.ts";
 
 /**
  * A prompt-driven agent that runs inside aiwebengine.
@@ -177,6 +185,7 @@ const PRICES = {
 const CONTEXT_WINDOW = 1000000;
 
 const API_URL = "https://api.anthropic.com/v1/messages";
+const FILES_URL = "https://api.anthropic.com/v1/files";
 
 /**
  * Where each person's own API key lives: `user_secrets`, keyed by
@@ -1297,19 +1306,43 @@ function startRun(context: HandlerContext): HttpResponse {
   let prompt = "";
   let kind: RunKind = "chat";
   let continuing = "";
+  // A prompt carrying files arrives as a form, its fields beside the files;
+  // one without arrives as JSON.
+  const uploads = context.request?.files ?? [];
+  let names: string[] = [];
   try {
-    const body = (context.request?.json() ?? {}) as {
+    const body = (
+      uploads.length > 0
+        ? (context.request?.form ?? {})
+        : (context.request?.json() ?? {})
+    ) as {
       prompt?: string;
       kind?: string;
       runId?: string;
+      names?: string;
     };
     prompt = String(body.prompt ?? "").trim();
     kind = runKindOf(body.kind);
     continuing = String(body.runId ?? "").trim();
+    names = originalNames(body.names, uploads.length);
   } catch (e) {
     return json(400, { error: "Expected a JSON body." });
   }
-  if (!prompt) return json(400, { error: "A prompt is required." });
+  if (!prompt && uploads.length === 0) {
+    return json(400, { error: "A prompt is required." });
+  }
+  if (uploads.length > MAX_ATTACHMENTS) {
+    return json(400, {
+      error: `Attach at most ${MAX_ATTACHMENTS} files to one prompt.`,
+    });
+  }
+  for (let i = 0; i < uploads.length; i++) {
+    if (!attachmentKind(uploads[i].contentType ?? "")) {
+      return json(400, {
+        error: `${names[i]} is not a picture (JPEG, PNG, GIF, WebP) or a document (PDF, plain text) the model can read.`,
+      });
+    }
+  }
   if (continuing && !RUN_ID_PATTERN.test(continuing)) {
     return json(400, { error: "That is not a conversation id." });
   }
@@ -1356,9 +1389,31 @@ function startRun(context: HandlerContext): HttpResponse {
     });
   }
 
+  // Uploaded before anything is stored, so a failed upload leaves no prompt
+  // behind it that the model would answer without its attachments.
+  let attachments: Attachment[] = [];
+  if (uploads.length > 0) {
+    try {
+      attachments = uploadAttachments(uploads, names);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      return json(502, {
+        error: "Could not upload the attachments: " + message,
+      });
+    }
+  }
+
   const runId = continuing || newRunId();
-  appendMessage(userId, runId, "user", [{ type: "text", text: prompt }]);
-  recordActivity(userId, runId, "prompt", prompt);
+  appendMessage(userId, runId, "user", promptBlocks(prompt, attachments));
+  recordActivity(
+    userId,
+    runId,
+    "prompt",
+    prompt || "(" + attachments.length + " attached)",
+  );
+  if (attachments.length > 0) {
+    recordActivity(userId, runId, "attached", describeAttachments(attachments));
+  }
 
   // The run is the engine's from here. Queued rather than run inline so this
   // answers immediately, and `maxAttempts: 1` because a retried turn is a
@@ -2098,6 +2153,76 @@ function decide(
  * which is the only point where "the model has not decided anything yet" is
  * true.
  */
+/**
+ * Upload a prompt's files to the person's Anthropic Files API, with their own
+ * key, and answer what the conversation should refer to.
+ *
+ * All or nothing: when one upload fails the ones before it are removed again,
+ * because they would sit in the person's storage referred to by nothing.
+ */
+function uploadAttachments(
+  uploads: NonNullable<HttpRequest["files"]>,
+  names: string[],
+): Attachment[] {
+  const done: Attachment[] = [];
+  for (let i = 0; i < uploads.length; i++) {
+    const contentType = String(uploads[i].contentType ?? "")
+      .split(";")[0]
+      .trim()
+      .toLowerCase();
+    const response = fetch(FILES_URL, {
+      method: "POST",
+      timeout: MODEL_TIMEOUT_MS,
+      headers: {
+        "x-api-key": "{{secret:" + SECRET_NAME + "}}",
+        "anthropic-version": "2023-06-01",
+      },
+      form: [
+        {
+          name: "file",
+          base64: uploads[i].data,
+          filename: names[i],
+          contentType: contentType,
+        },
+      ],
+    });
+    let answer: { id?: string; error?: { message?: string } } = {};
+    try {
+      answer = response.json() as typeof answer;
+    } catch (e) {
+      answer = {};
+    }
+    if (!response.ok || !answer.id) {
+      forgetFiles(done);
+      throw new Error(
+        names[i] +
+          ": " +
+          (answer.error?.message ??
+            `the Files API answered ${response.status}`),
+      );
+    }
+    done.push({ name: names[i], contentType: contentType, fileId: answer.id });
+  }
+  return done;
+}
+
+/** Remove uploaded files, as far as that works. Nothing refers to them. */
+function forgetFiles(attachments: Attachment[]): void {
+  for (const attachment of attachments) {
+    try {
+      fetch(FILES_URL + "/" + encodeURIComponent(attachment.fileId), {
+        method: "DELETE",
+        headers: {
+          "x-api-key": "{{secret:" + SECRET_NAME + "}}",
+          "anthropic-version": "2023-06-01",
+        },
+      });
+    } catch (e) {
+      console.log("agent: could not remove an uploaded file: " + String(e));
+    }
+  }
+}
+
 function interject(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
   if (!userId) return json(401, { error: "Sign in first." });
@@ -4160,8 +4285,7 @@ function appCallTool(
 // ============================================================================
 
 type EngineAnswer =
-  | { ok: true; value: Record<string, any> }
-  | { ok: false; error: string };
+  { ok: true; value: Record<string, any> } | { ok: false; error: string };
 
 /**
  * One engine operation, with refusals told apart from answers.

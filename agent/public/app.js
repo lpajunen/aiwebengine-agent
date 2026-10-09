@@ -22,6 +22,10 @@ const el = {
   prompt: document.getElementById("prompt"),
   author: document.getElementById("author"),
   talk: document.getElementById("talk"),
+  attach: document.getElementById("attach"),
+  fileInput: document.getElementById("file-input"),
+  attachments: document.getElementById("attachments"),
+  promptSection: document.getElementById("prompt-section"),
   speak: document.getElementById("speak"),
   speakChoice: document.getElementById("speak-choice"),
   run: document.getElementById("run"),
@@ -219,6 +223,8 @@ function setWorking(working) {
   // A boundary under a working run would leave it speaking into a
   // conversation that is no longer on screen.
   el.newConversation.disabled = working;
+  // Files go with a prompt that starts a turn, not into one under way.
+  el.attach.disabled = working;
   renderConversationMarks();
   el.run.textContent = working ? "Send" : "Run";
   el.prompt.placeholder = working
@@ -444,11 +450,13 @@ function signInUrl() {
 // ---------------------------------------------------------------------------
 
 async function api(path, options) {
+  // A form names its own Content-Type, with the boundary in it.
+  const isForm = options?.body instanceof FormData;
   const response = await fetch(path, {
     credentials: "same-origin",
     ...options,
     headers: {
-      "content-type": "application/json",
+      ...(isForm ? {} : { "content-type": "application/json" }),
       ...(options?.headers ?? {}),
     },
   });
@@ -661,7 +669,15 @@ el.run.addEventListener("click", async () => {
   abortDictation();
   stopSpeaking();
   const prompt = el.prompt.value.trim();
-  if (!prompt || running) return;
+  if ((!prompt && attachments.length === 0) || running) return;
+  if (runWorking && attachments.length > 0) {
+    setStatus(
+      el.runStatus,
+      "Files go with a new prompt. Wait for this run to finish, or stop it.",
+      true,
+    );
+    return;
+  }
 
   running = true;
   el.run.disabled = true;
@@ -688,17 +704,22 @@ el.run.addEventListener("click", async () => {
       }
     }
 
+    const fields = {
+      prompt,
+      kind: el.author && el.author.checked ? "author" : "chat",
+      // The conversation on screen: its earlier messages are the context.
+      // Empty after "New conversation" until this prompt starts it.
+      runId: shownRun || undefined,
+    };
     await api("/agent/prompt", {
       method: "POST",
-      body: JSON.stringify({
-        prompt,
-        kind: el.author && el.author.checked ? "author" : "chat",
-        // The conversation on screen: its earlier messages are the context.
-        // Empty after "New conversation" until this prompt starts it.
-        runId: shownRun || undefined,
-      }),
+      body:
+        attachments.length > 0
+          ? attachmentForm(fields)
+          : JSON.stringify(fields),
     });
     el.prompt.value = "";
+    clearAttachments();
     // The engine has it now. Everything from here — each turn, each tool, the
     // end of the run — arrives on the stream, the same way it arrives in any
     // other tab this person has open.
@@ -846,6 +867,208 @@ el.prompt.addEventListener("keydown", (event) => {
     el.run.click();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+//
+// Pictures and documents go with the prompt that starts a turn. The script
+// uploads each to the person's Anthropic Files API and the conversation refers
+// to it, so a picture is sent once rather than with every turn.
+
+const ATTACHABLE = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+  "text/plain",
+];
+const MAX_ATTACHMENTS = 5;
+// The engine refuses a request past 10 MB; this leaves room for the form.
+const MAX_ATTACHMENT_BYTES = 9.5 * 1024 * 1024;
+// The model works on pictures of at most about this many pixels on the long
+// edge and scales anything larger down itself, so a larger one is only bytes
+// to upload.
+const IMAGE_EDGE = 1568;
+
+let attachments = [];
+
+el.attach.addEventListener("click", () => el.fileInput.click());
+el.fileInput.addEventListener("change", () => {
+  addFiles(el.fileInput.files);
+  el.fileInput.value = "";
+});
+
+el.prompt.addEventListener("paste", (event) => {
+  const files = event.clipboardData?.files;
+  if (files && files.length > 0) {
+    event.preventDefault();
+    addFiles(files);
+  }
+});
+
+el.promptSection.addEventListener("dragover", (event) => {
+  if (!event.dataTransfer?.types.includes("Files")) return;
+  event.preventDefault();
+  el.promptSection.classList.add("dropping");
+});
+el.promptSection.addEventListener("dragleave", () => {
+  el.promptSection.classList.remove("dropping");
+});
+el.promptSection.addEventListener("drop", (event) => {
+  el.promptSection.classList.remove("dropping");
+  if (!event.dataTransfer?.files.length) return;
+  event.preventDefault();
+  addFiles(event.dataTransfer.files);
+});
+
+async function addFiles(fileList) {
+  if (runWorking) {
+    setStatus(
+      el.runStatus,
+      "Files go with a new prompt. Wait for this run to finish, or stop it.",
+      true,
+    );
+    return;
+  }
+  for (const file of Array.from(fileList)) {
+    if (attachments.length >= MAX_ATTACHMENTS) {
+      setStatus(el.runStatus, `At most ${MAX_ATTACHMENTS} files.`, true);
+      break;
+    }
+    if (!ATTACHABLE.includes(file.type)) {
+      setStatus(
+        el.runStatus,
+        `${file.name} is not a picture or a PDF or text document.`,
+        true,
+      );
+      continue;
+    }
+    let blob = file;
+    let name = file.name || "pasted";
+    if (file.type.startsWith("image/")) {
+      try {
+        ({ blob, name } = await shrinkImage(file, name));
+      } catch {
+        // Sent as it is; the size check below still applies.
+      }
+    }
+    if (attachedBytes() + blob.size > MAX_ATTACHMENT_BYTES) {
+      setStatus(
+        el.runStatus,
+        `${name} would take this prompt past 9.5 MB.`,
+        true,
+      );
+      continue;
+    }
+    attachments.push({
+      blob,
+      name,
+      preview: blob.type.startsWith("image/") ? URL.createObjectURL(blob) : "",
+    });
+  }
+  renderAttachments();
+}
+
+function attachedBytes() {
+  return attachments.reduce((sum, a) => sum + a.blob.size, 0);
+}
+
+/**
+ * A picture no larger than the model will look at. Left alone when it already
+ * is; otherwise redrawn as a JPEG, on white, since JPEG has no transparency.
+ * A GIF is left alone too, since redrawing it keeps only its first frame.
+ */
+async function shrinkImage(file, name) {
+  if (file.type === "image/gif") return { blob: file, name };
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
+  if (scale === 1 && file.size <= 3.5 * 1024 * 1024) {
+    bitmap.close();
+    return { blob: file, name };
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  const blob = await new Promise((resolve, reject) =>
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("could not encode"))),
+      "image/jpeg",
+      0.85,
+    ),
+  );
+  return { blob, name: name.replace(/\.[^.]*$/, "") + ".jpg" };
+}
+
+function renderAttachments() {
+  el.attachments.hidden = attachments.length === 0;
+  el.attachments.replaceChildren(
+    ...attachments.map((attachment, index) => {
+      const li = document.createElement("li");
+      if (attachment.preview) {
+        const img = document.createElement("img");
+        img.src = attachment.preview;
+        img.alt = "";
+        li.append(img);
+      }
+      const name = document.createElement("span");
+      name.className = "attachment-name";
+      name.textContent = attachment.name;
+      const size = document.createElement("span");
+      size.className = "attachment-size";
+      size.textContent = sizeLabel(attachment.blob.size);
+      const remove = document.createElement("button");
+      remove.className = "aw-button--secondary";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", "Remove " + attachment.name);
+      remove.addEventListener("click", () => {
+        if (attachment.preview) URL.revokeObjectURL(attachment.preview);
+        attachments.splice(index, 1);
+        renderAttachments();
+      });
+      li.append(name, size, remove);
+      return li;
+    }),
+  );
+}
+
+function clearAttachments() {
+  for (const attachment of attachments) {
+    if (attachment.preview) URL.revokeObjectURL(attachment.preview);
+  }
+  attachments = [];
+  renderAttachments();
+}
+
+function sizeLabel(bytes) {
+  return bytes < 1024 * 1024
+    ? Math.max(1, Math.round(bytes / 1024)) + " KB"
+    : (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+/**
+ * The prompt and its files as a form. The engine accepts only plain file
+ * names on an upload, so each goes up under a cleaned name and the names the
+ * person sees travel beside them.
+ */
+function attachmentForm(fields) {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined) form.append(key, value);
+  }
+  form.append("names", JSON.stringify(attachments.map((a) => a.name)));
+  attachments.forEach((attachment, index) => {
+    const extension = (attachment.name.match(/\.[A-Za-z0-9]{1,8}$/) ?? [""])[0];
+    form.append("file", attachment.blob, "file-" + (index + 1) + extension);
+  });
+  return form;
+}
 
 // ---------------------------------------------------------------------------
 // Voice
