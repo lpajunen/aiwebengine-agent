@@ -94,7 +94,7 @@ import {
   withoutRefused,
 } from "./attachments.ts";
 import { renderSvg, telegramPhotoForm } from "./images.ts";
-import { parseCommand } from "./commands.ts";
+import { parseCommand, skillPrompt } from "./commands.ts";
 import { Route, routeMessage } from "./telegram.ts";
 import {
   CONVERSATIONS_PER_PAGE,
@@ -1503,7 +1503,12 @@ function startRun(context: HandlerContext): HttpResponse {
   }
 
   const runId = continuing || newRunId();
-  appendMessage(userId, runId, "user", promptBlocks(prompt, attachments));
+  appendMessage(
+    userId,
+    runId,
+    "user",
+    promptBlocks(expandSkillCommand(prompt), attachments),
+  );
   recordActivity(
     userId,
     runId,
@@ -2633,7 +2638,7 @@ function interject(context: HandlerContext): HttpResponse {
     database.insert("interjections", {
       user_id: userId,
       run_id: runId,
-      body: text,
+      body: expandSkillCommand(text),
       created_ms: Date.now(),
     });
   } catch (e) {
@@ -4498,6 +4503,24 @@ function readSkillTool(
     };
   }
   return { content: content, isError: false };
+}
+
+/**
+ * What the model is given for what the person typed: `/<skill> words` becomes
+ * the skill's instructions and the words, and anything else is unchanged. The
+ * log keeps what they typed. A skill that cannot be read leaves the words as
+ * they are, and the model, which has `read_skill`, can still try.
+ */
+function expandSkillCommand(text: string): string {
+  if (text.indexOf("/") !== 0) return text;
+  const command = parseCommand(
+    text,
+    loadSkills().map((s) => s.name),
+  );
+  if (command.command !== "skill") return text;
+  const read = readSkillTool(command.skill, SKILL_FILE);
+  if (read.isError) return text;
+  return skillPrompt(command.skill, read.content, command.text);
 }
 
 /**
@@ -6572,10 +6595,12 @@ function startTelegramRun(context: HandlerContext): void {
     return;
   }
 
+  // What the model is given; `text` stays what the person sees they sent.
+  const said = expandSkillCommand(text);
   let existing: RunRow | null = null;
   try {
     if (route.kind === "say") {
-      if (sayToRun(userId, route.runId, text)) return;
+      if (sayToRun(userId, route.runId, said, text)) return;
       // It finished first, so the words are its next prompt instead.
       existing = runRow(userId, route.runId);
     } else if (route.kind === "continue") {
@@ -6615,7 +6640,7 @@ function startTelegramRun(context: HandlerContext): void {
       ? loadMessages(userId, runId).filter((m) => m.speaker === "assistant")
           .length
       : 0;
-    appendMessage(userId, runId, "user", promptBlocks(text, attachments));
+    appendMessage(userId, runId, "user", promptBlocks(said, attachments));
     recordActivity(
       userId,
       runId,
@@ -6675,13 +6700,19 @@ function latestChatRun(userId: string, chatId: string): RunRow | null {
  * False when the run finished before any turn took the words, which are then
  * taken back so they can become its next prompt instead. A run that finished
  * after taking them has either answered them or, through `finishRun`, said in
- * the chat that it did not.
+ * the chat that it did not. `said` is what the model is given, `text` what
+ * the log shows.
  */
-function sayToRun(userId: string, runId: string, text: string): boolean {
+function sayToRun(
+  userId: string,
+  runId: string,
+  said: string,
+  text: string,
+): boolean {
   const row = database.insert("interjections", {
     user_id: userId,
     run_id: runId,
-    body: text,
+    body: said,
     created_ms: Date.now(),
   });
   if (runIsLive(userId, runId)) {

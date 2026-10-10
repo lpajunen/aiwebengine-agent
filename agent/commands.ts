@@ -9,30 +9,55 @@
  * cannot `export`.
  */
 
-/** `new`: start a new conversation, the words after it its first prompt. */
-export type Command = "new";
+export type ParsedCommand =
+  /** A prompt, word for word. */
+  | { command: null; text: string }
+  /** Start a new conversation, the words after it its first prompt. */
+  | { command: "new"; text: string }
+  /** Follow this skill, the words after it what to follow it for. */
+  | { command: "skill"; skill: string; text: string };
 
-export interface ParsedCommand {
-  /** The command used, or null when the message is a prompt. */
-  command: Command | null;
-  /** The message without the command: the prompt, possibly empty. */
-  text: string;
-}
-
-const COMMANDS: Record<string, Command> = {
+/** Built in, so a skill of the same name cannot be called by it. */
+const BUILT_IN: Record<string, "new"> = {
   new: "new",
   // What Telegram sends when someone first opens the bot.
   start: "new",
 };
 
-/** The command a message begins with, and the words after it. */
-export function parseCommand(text: string): ParsedCommand {
+/**
+ * The command a message begins with, and the words after it. `skills` are the
+ * names a `/<name>` may call; anything else is left as a prompt.
+ */
+export function parseCommand(
+  text: string,
+  skills: readonly string[] = [],
+): ParsedCommand {
   // `@name` is how a command addresses one bot in a Telegram group.
-  const match = /^\/([a-z]+)(@\w+)?(?:\s+|$)/i.exec(text);
-  const name = match ? match[1].toLowerCase() : "";
+  const match = /^\/([a-z0-9][a-z0-9-]*)(@\w+)?(?:\s+|$)/i.exec(text);
+  if (!match) return { command: null, text: text };
+  const name = match[1].toLowerCase();
+  const rest = text.slice(match[0].length).trim();
   // Own keys only: `/constructor` is a prompt, not `Object.prototype`'s.
-  if (!match || !Object.prototype.hasOwnProperty.call(COMMANDS, name)) {
-    return { command: null, text: text };
+  if (Object.prototype.hasOwnProperty.call(BUILT_IN, name)) {
+    return { command: BUILT_IN[name], text: rest };
   }
-  return { command: COMMANDS[name], text: text.slice(match[0].length).trim() };
+  for (const skill of skills) {
+    if (skill.toLowerCase() === name) {
+      return { command: "skill", skill: skill, text: rest };
+    }
+  }
+  return { command: null, text: text };
+}
+
+/**
+ * What the model is given for `/<skill> words`: the skill's instructions in
+ * the message itself, so following them does not first cost a `read_skill`
+ * turn, and a continued conversation still has them.
+ */
+export function skillPrompt(skill: string, body: string, text: string): string {
+  return (
+    `The person called the skill "${skill}". Follow its instructions for ` +
+    `this request.\n\n<skill name="${skill}">\n${body.trim()}\n</skill>\n\n` +
+    (text || "(Nothing more was said: the skill is the request.)")
+  );
 }

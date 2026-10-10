@@ -34,16 +34,16 @@ There is no endpoint that advances a run. Each turn queues the next.
 are there because a root script cannot `export` and a test module reaches its
 subject by importing it — so anything under test had to move out:
 
-| Module            | What it holds                                             |
-| ----------------- | --------------------------------------------------------- |
-| `protocol.ts`     | reading what the model sent, half-written JSON included   |
-| `capabilities.ts` | what model-written code may do, and the pair it may not   |
-| `budget.ts`       | what a run has spent, and when it has had enough          |
-| `skills.ts`       | the SKILL.md format, written and read                     |
-| `plans.ts`        | decoding the call an approval carries                     |
-| `engine.ts`       | which management tools only read, and their arguments     |
-| `authoring.ts`    | what a script-building run is given, and how it is judged |
-| `commands.ts`     | `/new`, read the same on the page and in Telegram         |
+| Module            | What it holds                                                    |
+| ----------------- | ---------------------------------------------------------------- |
+| `protocol.ts`     | reading what the model sent, half-written JSON included          |
+| `capabilities.ts` | what model-written code may do, and the pair it may not          |
+| `budget.ts`       | what a run has spent, and when it has had enough                 |
+| `skills.ts`       | the SKILL.md format, written and read                            |
+| `plans.ts`        | decoding the call an approval carries                            |
+| `engine.ts`       | which management tools only read, and their arguments            |
+| `authoring.ts`    | what a script-building run is given, and how it is judged        |
+| `commands.ts`     | `/new` and `/<skill>`, read the same on the page and in Telegram |
 
 Their tests are `agent/*.test.ts`, run with the `run_tests` tool
 or `POST /engine/run_tests` with `{"script": "<this script>"}`.
@@ -403,6 +403,14 @@ characters. The index is rebuilt only when a skill file changes — it is kept
 in `scriptStorage` under a fingerprint of the skill files and their
 modification times, so the steady state is two asset reads a turn rather than
 one per skill.
+
+### Calling one by name
+
+A person can pick the skill rather than leave it to the model: `/refunds order
+1234`, on the page or in Telegram, puts the skill's instructions in the
+message with the words after the name, so the model follows it without first
+spending a turn on `read_skill`. The log shows what they typed. A name that is
+not a skill is an ordinary prompt, and `/new` and `/start` are never skills.
 
 ### The agent writes them too
 
