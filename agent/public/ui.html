@@ -322,8 +322,13 @@
         cursor: pointer;
         border: 0;
       }
+      .command-menu li:hover,
       .command-menu li[aria-selected="true"] {
         background: var(--aw-color-surface-sunken);
+      }
+      /* The one Enter would take, marked in more than a shade of grey. */
+      .command-menu li[aria-selected="true"] {
+        box-shadow: inset 3px 0 0 var(--aw-color-primary);
       }
       .command-name {
         font-family: var(--aw-font-mono, monospace);
