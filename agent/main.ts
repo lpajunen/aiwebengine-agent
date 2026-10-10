@@ -94,7 +94,12 @@ import {
   withoutRefused,
 } from "./attachments.ts";
 import { renderSvg, telegramPhotoForm } from "./images.ts";
-import { parseCommand, skillPrompt, telegramCommands } from "./commands.ts";
+import {
+  menuCommands,
+  parseCommand,
+  skillPrompt,
+  telegramCommands,
+} from "./commands.ts";
 import { Route, routeMessage } from "./telegram.ts";
 import {
   CONVERSATIONS_PER_PAGE,
@@ -1298,6 +1303,13 @@ function init(): void {
     method: "POST",
     tags: ["Agent"],
     summary: "Telegram webhook",
+  });
+
+  routeRegistry.registerRoute("/agent/commands", {
+    handler: "listCommands",
+    method: "GET",
+    tags: ["Agent"],
+    summary: "The /commands a prompt may begin with: /new and the skills",
   });
 
   routeRegistry.registerRoute("/agent/memories", {
@@ -2729,6 +2741,13 @@ function readHistory(context: HandlerContext): HttpResponse {
  * for somebody. This is the somebody, in their own request, editing their own
  * store. Asking them to approve their own correction would be theatre.
  */
+/** What the prompt box completes after a `/`. */
+function listCommands(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+  return json(200, { commands: menuCommands(loadSkills()) });
+}
+
 function readMemories(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
   if (!userId) return json(401, { error: "Sign in first." });

@@ -64,6 +64,33 @@ export function skillPrompt(skill: string, body: string, text: string): string {
   );
 }
 
+/** A command a person can type: what the page and Telegram offer. */
+export interface MenuCommand {
+  name: string;
+  description: string;
+}
+
+/**
+ * Every command a person can type, `/new` first: what the page completes and
+ * what Telegram's menu lists. A skill a built-in command shadows is left out,
+ * since typing its name would not call it.
+ */
+export function menuCommands(
+  skills: readonly { name: string; description: string }[],
+): MenuCommand[] {
+  const menu: MenuCommand[] = [
+    { name: "new", description: "Start a new conversation" },
+  ];
+  for (const skill of skills) {
+    if (Object.prototype.hasOwnProperty.call(BUILT_IN, skill.name)) continue;
+    menu.push({
+      name: skill.name,
+      description: skill.description.trim() || skill.name,
+    });
+  }
+  return menu;
+}
+
 /** One entry in Telegram's `/` menu. */
 export interface TelegramCommand {
   command: string;
@@ -76,27 +103,21 @@ const MAX_TELEGRAM_COMMAND_NAME = 32;
 const MAX_TELEGRAM_COMMAND_DESCRIPTION = 256;
 
 /**
- * The `/` menu for a chat: `/new`, then every skill under the name Telegram
- * will accept. A skill whose name is too long for Telegram is left out of the
+ * `menuCommands` as Telegram will take it: hyphens as underscores, within its
+ * limits. A skill whose name is too long for Telegram is left out of the
  * menu; typed out with hyphens it still works.
  */
 export function telegramCommands(
   skills: readonly { name: string; description: string }[],
 ): TelegramCommand[] {
-  const menu: TelegramCommand[] = [
-    { command: "new", description: "Start a new conversation" },
-  ];
-  for (const skill of skills) {
+  const menu: TelegramCommand[] = [];
+  for (const entry of menuCommands(skills)) {
     if (menu.length >= MAX_TELEGRAM_COMMANDS) break;
-    const command = skill.name.replace(/-/g, "_");
+    const command = entry.name.replace(/-/g, "_");
     if (command.length > MAX_TELEGRAM_COMMAND_NAME) continue;
-    if (Object.prototype.hasOwnProperty.call(BUILT_IN, skill.name)) continue;
     menu.push({
       command: command,
-      description: (skill.description.trim() || skill.name).slice(
-        0,
-        MAX_TELEGRAM_COMMAND_DESCRIPTION,
-      ),
+      description: entry.description.slice(0, MAX_TELEGRAM_COMMAND_DESCRIPTION),
     });
   }
   return menu;

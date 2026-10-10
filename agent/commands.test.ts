@@ -2,7 +2,12 @@
  * The commands a person types in place of a prompt.
  */
 
-import { parseCommand, skillPrompt, telegramCommands } from "./commands.ts";
+import {
+  menuCommands,
+  parseCommand,
+  skillPrompt,
+  telegramCommands,
+} from "./commands.ts";
 
 describe("parsing a command", () => {
   test("plain text is not a command", () => {
@@ -83,6 +88,22 @@ describe("calling a skill", () => {
     expect(skillPrompt("release-notes", "List.", "")).toContain(
       "the skill is the request",
     );
+  });
+});
+
+describe("the commands a person can type", () => {
+  test("/new first, then the skills under their own names", () => {
+    expect(
+      menuCommands([
+        { name: "release-notes", description: " Write release notes. " },
+        { name: "new", description: "shadowed" },
+        { name: "bare", description: "" },
+      ]),
+    ).toEqual([
+      { name: "new", description: "Start a new conversation" },
+      { name: "release-notes", description: "Write release notes." },
+      { name: "bare", description: "bare" },
+    ]);
   });
 });
 

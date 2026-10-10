@@ -20,6 +20,8 @@ for anybody's tokens.
 - `POST /agent/new` — starts a new conversation: the page shows only the
   newest run id, and the next prompt carries none of the earlier context.
   Refused while a run is working.
+- `GET /agent/commands` — the `/commands` a prompt may begin with: `/new` and
+  the skills, which the prompt box completes.
 - `GET /agent/events` — SSE; activity as it happens, for this person only.
 - `GET /agent/history` — the log, so a refresh loses nothing.
 - `POST /agent/cancel` — stops a run; `POST /agent/say` speaks into one.
@@ -411,6 +413,8 @@ A person can pick the skill rather than leave it to the model: `/refunds order
 message with the words after the name, so the model follows it without first
 spending a turn on `read_skill`. The log shows what they typed. A name that is
 not a skill is an ordinary prompt, and `/new` and `/start` are never skills.
+On the page, typing `/` opens a menu of `/new` and the skills, filtered as the
+name is typed.
 
 In Telegram the skills are also in the `/` menu, beside `/new`. Telegram
 allows no hyphen in a command, so `release-notes` is listed as

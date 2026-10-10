@@ -294,6 +294,49 @@
       .kind[data-kind="picture"] + .message .thumbs img {
         max-height: 480px;
       }
+      /* The /command completions, over whatever is under the prompt. */
+      .prompt-box {
+        position: relative;
+      }
+      .command-menu {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        z-index: 10;
+        max-height: 240px;
+        overflow-y: auto;
+        margin: 2px 0 0;
+        padding: var(--aw-space-1) 0;
+        list-style: none;
+        background: var(--aw-color-surface);
+        border: 1px solid var(--aw-color-border-strong);
+        border-radius: var(--aw-radius-lg);
+        box-shadow: var(--aw-shadow);
+      }
+      .command-menu li {
+        display: flex;
+        gap: var(--aw-space-2);
+        align-items: baseline;
+        padding: var(--aw-space-1) var(--aw-space-3);
+        cursor: pointer;
+        border: 0;
+      }
+      .command-menu li[aria-selected="true"] {
+        background: var(--aw-color-surface-sunken);
+      }
+      .command-name {
+        font-family: var(--aw-font-mono, monospace);
+        white-space: nowrap;
+      }
+      .command-description {
+        color: var(--aw-color-muted);
+        font-size: 0.85rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
       /* A file being dragged over the prompt. */
       #prompt-section.dropping {
         border-color: var(--aw-color-focus);
@@ -399,10 +442,18 @@
 
       <section id="prompt-section">
         <h2>Prompt</h2>
-        <textarea
-          id="prompt"
-          placeholder="Ask for something, or describe a task."
-        ></textarea>
+        <!-- The menu completes a /command: /new and the skills. -->
+        <div class="prompt-box">
+          <textarea
+            id="prompt"
+            placeholder="Ask for something, or describe a task. Type / for commands."
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded="false"
+            aria-controls="command-menu"
+          ></textarea>
+          <ul id="command-menu" class="command-menu" role="listbox" hidden></ul>
+        </div>
         <!-- Pictures and documents to send with the prompt. Also by pasting
              into the box or dropping onto this section. -->
         <input

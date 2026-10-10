@@ -20,6 +20,7 @@ const el = {
   forgetKey: document.getElementById("forget-key"),
   keyStatus: document.getElementById("key-status"),
   prompt: document.getElementById("prompt"),
+  commandMenu: document.getElementById("command-menu"),
   author: document.getElementById("author"),
   talk: document.getElementById("talk"),
   attach: document.getElementById("attach"),
@@ -992,10 +993,155 @@ function showAuthorizationNeeded(body) {
 }
 
 el.prompt.addEventListener("keydown", (event) => {
+  if (commandKey(event)) return;
   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
     el.run.click();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+//
+// A prompt may begin with /new or /<skill>; the script reads the command. The
+// box offers the names while the first word is being typed, from the same
+// list Telegram's / menu shows.
+
+let commands = [];
+let commandMatches = [];
+let commandActive = 0;
+// Escape closes the menu until the word changes, not until the next key.
+let commandDismissed = "";
+
+async function loadCommands() {
+  try {
+    commands = (await api("/agent/commands")).commands ?? [];
+  } catch {
+    // Without the list the box is a plain box; a typed command still works.
+    commands = [];
+  }
+  updateCommandMenu();
+}
+
+/** The `/word` the caret is in, if it is the prompt's first word. */
+function commandWord() {
+  const value = el.prompt.value;
+  const caret = el.prompt.selectionStart;
+  if (value[0] !== "/" || caret !== el.prompt.selectionEnd) return null;
+  const match = /^\/[a-z0-9_-]*/i.exec(value);
+  if (!match || caret > match[0].length) return null;
+  return match[0];
+}
+
+function updateCommandMenu() {
+  const word = commandWord();
+  if (word === null || word === commandDismissed) {
+    hideCommandMenu();
+    return;
+  }
+  commandDismissed = "";
+  // Telegram's spelling, release_notes, finds release-notes here too.
+  const typed = word.slice(1).toLowerCase().replace(/_/g, "-");
+  commandMatches = commands.filter((c) => c.name.indexOf(typed) === 0);
+  // Fully typed, with nothing else it could become: nothing left to offer.
+  if (
+    commandMatches.length === 0 ||
+    (commandMatches.length === 1 && commandMatches[0].name === typed)
+  ) {
+    hideCommandMenu();
+    return;
+  }
+  commandActive = Math.min(commandActive, commandMatches.length - 1);
+  renderCommandMenu();
+}
+
+function renderCommandMenu() {
+  el.commandMenu.replaceChildren(
+    ...commandMatches.map((command, i) => {
+      const item = document.createElement("li");
+      item.id = "command-" + i;
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", String(i === commandActive));
+      const name = document.createElement("span");
+      name.className = "command-name";
+      name.textContent = "/" + command.name;
+      const description = document.createElement("span");
+      description.className = "command-description";
+      description.textContent = command.description;
+      item.append(name, description);
+      // On mousedown, before the box loses focus and closes the menu.
+      item.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        acceptCommand(i);
+      });
+      return item;
+    }),
+  );
+  el.commandMenu.hidden = false;
+  el.prompt.setAttribute("aria-expanded", "true");
+  el.prompt.setAttribute("aria-activedescendant", "command-" + commandActive);
+  el.commandMenu.children[commandActive]?.scrollIntoView({ block: "nearest" });
+}
+
+function hideCommandMenu() {
+  commandMatches = [];
+  commandActive = 0;
+  el.commandMenu.hidden = true;
+  el.prompt.setAttribute("aria-expanded", "false");
+  el.prompt.removeAttribute("aria-activedescendant");
+}
+
+/** Put the chosen command in place of the word being typed. */
+function acceptCommand(i) {
+  const command = commandMatches[i];
+  const word = commandWord();
+  if (!command || word === null) return;
+  const rest = el.prompt.value.slice(word.length).replace(/^\s*/, "");
+  const head = "/" + command.name + " ";
+  el.prompt.value = head + rest;
+  el.prompt.setSelectionRange(head.length, head.length);
+  hideCommandMenu();
+  el.prompt.focus();
+}
+
+/** The menu's keys, while it is open. True when the key was the menu's. */
+function commandKey(event) {
+  if (el.commandMenu.hidden) return false;
+  const count = commandMatches.length;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    commandActive =
+      (commandActive + (event.key === "ArrowDown" ? 1 : count - 1)) % count;
+    renderCommandMenu();
+  } else if (
+    (event.key === "Enter" || event.key === "Tab") &&
+    !event.shiftKey &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey
+  ) {
+    acceptCommand(commandActive);
+  } else if (event.key === "Escape") {
+    commandDismissed = commandWord() ?? "";
+    hideCommandMenu();
+  } else {
+    return false;
+  }
+  event.preventDefault();
+  return true;
+}
+
+el.prompt.addEventListener("input", () => {
+  commandActive = 0;
+  updateCommandMenu();
+});
+// The caret moving in or out of the first word, by click or arrow key.
+el.prompt.addEventListener("click", updateCommandMenu);
+el.prompt.addEventListener("keyup", (event) => {
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    updateCommandMenu();
+  }
+});
+el.prompt.addEventListener("blur", hideCommandMenu);
 
 // ---------------------------------------------------------------------------
 // Attachments
@@ -1414,6 +1560,7 @@ async function start() {
 
     loadMemories();
     loadConversations();
+    loadCommands();
 
     // Say up front that a run will need permission, rather than letting them
     // write a prompt and meet the refusal afterwards.
@@ -1537,8 +1684,10 @@ async function start() {
       if (payload.kind === "done") {
         hidePlan();
         // A run that just finished may have written, corrected or removed a
-        // note. Re-read rather than guess from the activity that went past.
+        // note, or a skill. Re-read rather than guess from the activity that
+        // went past.
         loadMemories();
+        loadCommands();
         if (wasPending) render();
         setWorking(false);
         const stopped = STOP_REASONS.indexOf(payload.message) !== -1;
