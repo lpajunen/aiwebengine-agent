@@ -1006,6 +1006,9 @@ const ATTACHABLE = [
 const MAX_ATTACHMENTS = 5;
 // The engine refuses a request past 10 MB; this leaves room for the form.
 const MAX_ATTACHMENT_BYTES = 9.5 * 1024 * 1024;
+// The model refuses a single picture past about 7.5 MB. Only a GIF, which is
+// never redrawn, comes near it.
+const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 // The model works on pictures of at most about this many pixels on the long
 // edge and scales anything larger down itself, so a larger one is only bytes
 // to upload.
@@ -1072,6 +1075,14 @@ async function addFiles(fileList) {
       } catch {
         // Sent as it is; the size check below still applies.
       }
+    }
+    if (blob.type.startsWith("image/") && blob.size > MAX_IMAGE_BYTES) {
+      setStatus(
+        el.runStatus,
+        `${name} is a picture larger than the 7 MB the model reads.`,
+        true,
+      );
+      continue;
     }
     if (attachedBytes() + blob.size > MAX_ATTACHMENT_BYTES) {
       setStatus(

@@ -63,6 +63,19 @@ like a picture the person sent. Model-written SVG is never served, because as
 refuses goes back to the model with the reason. `images.ts` holds the sizes
 tried and the Telegram form.
 
+Pictures and documents sent with a prompt — from the page, or to the Telegram
+bot — are uploaded once to the person's Files API and held in the conversation
+by `file_id` (`attachments.ts`). A picture past 7 MB is refused before it is
+uploaded, since the Messages API would refuse it later; a large photo sent to
+Telegram as a file is refused with a suggestion to send it as a photo. When the
+Messages API still refuses a turn over an attachment — an encrypted PDF, a file
+removed from the Files API — the conversation would fail on every turn after,
+since it is resent whole. So `setAsideRefused` replaces that attachment with a
+line saying what was there and why it is gone, tells the person, and takes the
+turn again. The block is found from where the API's error names it, else from
+a file id the error quotes, else, for an error about an image or a document,
+the newest prompt's attachments while nothing has answered them.
+
 `list_memories` is what makes the notes readable rather than only writable:
 `recall` needs a key, so anything written in an earlier run was unreachable
 unless the model guessed the name. The listing gives each key, the note's size

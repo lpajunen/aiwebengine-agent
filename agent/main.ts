@@ -86,8 +86,12 @@ import {
   parseDetail,
   previewOf,
   promptBlocks,
+  refusedAttachments,
+  refusedName,
   TelegramFile,
   telegramFiles,
+  tooLargeToRead,
+  withoutRefused,
 } from "./attachments.ts";
 import { renderSvg, telegramPhotoForm } from "./images.ts";
 import { Route, newConversationCommand, routeMessage } from "./telegram.ts";
@@ -1871,6 +1875,13 @@ function advanceRun(context: HandlerContext): void {
   try {
     answer = callModel(userId, runId, history.map(toApiMessage));
   } catch (e) {
+    if (
+      e instanceof ModelApiError &&
+      e.status === 400 &&
+      setAsideRefused(userId, runId, history, e.detail)
+    ) {
+      return;
+    }
     const message = e instanceof Error ? e.message : String(e);
     recordActivity(userId, runId, "error", message);
     finishRun(userId, runId, "error");
@@ -2371,6 +2382,12 @@ function decide(
 function uploadAttachments(
   files: { name: string; contentType: string; data: string }[],
 ): Attachment[] {
+  // Checked before any is uploaded: the Files API takes a picture the
+  // Messages API then refuses, and the refusal would come a turn later.
+  for (const file of files) {
+    const reason = tooLargeToRead(file.name, file.contentType, file.data.length);
+    if (reason) throw new Error(reason + ". Send a smaller one.");
+  }
   const done: Attachment[] = [];
   for (let i = 0; i < files.length; i++) {
     const name = files[i].name;
@@ -2860,6 +2877,90 @@ function forgetKey(context: HandlerContext): HttpResponse {
  * blocks and dispatches tools exactly as it did, and cannot tell that the
  * answer was assembled rather than parsed.
  */
+/** The model API refusing a request, with its status and what it said. */
+class ModelApiError extends Error {
+  status: number;
+  detail: string;
+  constructor(status: number, detail: string) {
+    super(`The model API answered ${status}: ${detail}`);
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+/**
+ * Take out the attachments a refused request was about, and queue the turn
+ * again without them.
+ *
+ * The conversation is resent whole on every turn, so a picture or document
+ * the API will not read would otherwise fail this turn and every one after
+ * it. Each is replaced by a line saying what was there and why it is gone,
+ * the person is told, and the turn is tried once more. False when the
+ * refusal is not about an attachment, or the rows cannot be rewritten; the
+ * caller then ends the run as before. Every retry removes at least one
+ * attachment and counts as a turn, so this cannot go round for ever.
+ */
+function setAsideRefused(
+  userId: string,
+  runId: string,
+  history: MessageRow[],
+  detail: string,
+): boolean {
+  const sent = history.map(toApiMessage);
+  const refused = refusedAttachments(detail, sent);
+  if (refused.length === 0) return false;
+
+  const names: Record<string, string> = {};
+  try {
+    const rows = database.query("attachments", {
+      where: { user_id: userId, run_id: runId },
+      limit: 1000,
+    });
+    for (const row of rows) {
+      names[String(row.file_id ?? "")] = String(row.name ?? "");
+    }
+  } catch (e) {
+    // Only the names in the note are lost.
+  }
+
+  const gone: string[] = [];
+  const byMessage: Record<number, number[]> = {};
+  for (const at of refused) {
+    (byMessage[at.message] = byMessage[at.message] ?? []).push(at.block);
+    gone.push(refusedName(sent[at.message].content[at.block], names));
+  }
+  for (const key of Object.keys(byMessage)) {
+    const m = Number(key);
+    const ok = writeRow(
+      () =>
+        database.update("messages", Number(history[m].id), {
+          blocks: JSON.stringify(
+            withoutRefused(sent[m].content, byMessage[m], names, detail),
+          ),
+        }),
+      "setting aside an attachment the model could not read",
+    );
+    if (!ok) return false;
+  }
+
+  const note = `I could not read ${gone.join(", ")}, so I carried on without it. The model API said: ${detail}`;
+  recordActivity(userId, runId, "error", note);
+  notifyChannel(userId, runId, note);
+  try {
+    const task = personalTasks.enqueue({
+      handler: "advanceRun",
+      payload: { runId: runId },
+      maxAttempts: 1,
+    });
+    setRunState(userId, runId, "running", task.taskId, "running");
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    recordActivity(userId, runId, "error", `The run stopped: ${message}`);
+    finishRun(userId, runId, "error");
+  }
+  return true;
+}
+
 function callModel(
   userId: string,
   runId: string,
@@ -2938,8 +3039,7 @@ function callModel(
   // what streaming buys: a 401 for a key that has been revoked is answered
   // without waiting for a response that was never coming.
   if (!stream.ok) {
-    const detail = readErrorMessage(stream.text());
-    throw new Error(`The model API answered ${stream.status}: ${detail}`);
+    throw new ModelApiError(stream.status, readErrorMessage(stream.text()));
   }
 
   try {

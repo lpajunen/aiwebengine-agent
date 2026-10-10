@@ -6,12 +6,16 @@ import {
   attachmentKind,
   blockFor,
   describeAttachments,
+  MAX_IMAGE_BYTES,
   originalNames,
   MAX_PREVIEW_CHARS,
   parseDetail,
   previewOf,
   promptBlocks,
+  refusedAttachments,
   telegramFiles,
+  tooLargeToRead,
+  withoutRefused,
 } from "./attachments.ts";
 
 describe("which files the model reads", () => {
@@ -191,5 +195,140 @@ describe("what the page is shown", () => {
     expect(
       parseDetail('[{"id":0,"name":"a.png","kind":"image","preview":true}]'),
     ).toEqual([{ id: 0, name: "a.png", kind: "image", preview: false }]);
+  });
+});
+
+describe("pictures too large for the model", () => {
+  const charsFor = (bytes: number) => Math.ceil(bytes / 3) * 4;
+
+  test("a picture within the limit is read", () => {
+    expect(
+      tooLargeToRead("a.png", "image/png", charsFor(MAX_IMAGE_BYTES)),
+    ).toBe("");
+  });
+
+  test("a picture past it is refused by name", () => {
+    expect(
+      tooLargeToRead("a.png", "image/png", charsFor(MAX_IMAGE_BYTES + 3)),
+    ).toContain("a.png");
+  });
+
+  test("a document of the same size is not a picture and is left alone", () => {
+    expect(
+      tooLargeToRead(
+        "a.pdf",
+        "application/pdf",
+        charsFor(MAX_IMAGE_BYTES * 1.2),
+      ),
+    ).toBe("");
+  });
+
+  test("a large photo sent to Telegram as a file is refused, saying to send it as a photo", () => {
+    const { files, refusal } = telegramFiles({
+      document: {
+        file_id: "d",
+        file_name: "IMG_1.jpg",
+        mime_type: "image/jpeg",
+        file_size: MAX_IMAGE_BYTES + 1,
+      },
+    });
+    expect(files).toEqual([]);
+    expect(refusal).toContain("as a photo");
+  });
+
+  test("a PDF of the same size from Telegram is still taken", () => {
+    const { files } = telegramFiles({
+      document: {
+        file_id: "d",
+        file_name: "big.pdf",
+        mime_type: "application/pdf",
+        file_size: MAX_IMAGE_BYTES + 1,
+      },
+    });
+    expect(files.length).toBe(1);
+  });
+});
+
+describe("attachments the API refused", () => {
+  const picture = {
+    type: "image",
+    source: { type: "file", file_id: "file_pic" },
+  };
+  const pdf = {
+    type: "document",
+    source: { type: "file", file_id: "file_pdf" },
+    title: "report.pdf",
+  };
+  const words = { type: "text", text: "what is this?" };
+  const conversation = [
+    { role: "user", content: [words] },
+    { role: "assistant", content: [{ type: "text", text: "Ask away." }] },
+    { role: "user", content: [picture, pdf, words] },
+  ];
+
+  test("the block the API names by its place", () => {
+    expect(
+      refusedAttachments(
+        "messages.2.content.1.document.source: The PDF is encrypted",
+        conversation,
+      ),
+    ).toEqual([{ message: 2, block: 1 }]);
+  });
+
+  test("a place that is not an attachment is not one of ours to remove", () => {
+    expect(
+      refusedAttachments("messages.0.content.0.text: too long", conversation),
+    ).toEqual([]);
+  });
+
+  test("a refusal quoting a file id is about that file", () => {
+    expect(
+      refusedAttachments("File not found: file_pic", conversation),
+    ).toEqual([{ message: 2, block: 0 }]);
+  });
+
+  test("an image refusal without a place means the newest prompt's attachments", () => {
+    expect(refusedAttachments("Could not process image", conversation)).toEqual(
+      [
+        { message: 2, block: 0 },
+        { message: 2, block: 1 },
+      ],
+    );
+  });
+
+  test("not once something has answered them, since they were readable then", () => {
+    const answered = [
+      ...conversation,
+      { role: "assistant", content: [{ type: "text", text: "It is a cat." }] },
+    ];
+    expect(refusedAttachments("Could not process image", answered)).toEqual([]);
+  });
+
+  test("a refusal about something else removes nothing", () => {
+    expect(
+      refusedAttachments("prompt is too long: 1200000 tokens", conversation),
+    ).toEqual([]);
+  });
+
+  test("each refused block becomes a line naming it and the reason", () => {
+    const content = withoutRefused(
+      [picture, pdf, words],
+      [0, 1],
+      { file_pic: "cat.jpg" },
+      "bad file",
+    );
+    expect(content[0]).toEqual({
+      type: "text",
+      text: "[cat.jpg was attached here, but the model API could not read it: bad file]",
+    });
+    expect(String(content[1].text)).toContain("report.pdf");
+    expect(content[2]).toBe(words);
+  });
+
+  test("a picture with no known name is called a picture", () => {
+    const content = withoutRefused([picture], [0], {}, "x");
+    expect(String(content[0].text).startsWith("[a picture was attached")).toBe(
+      true,
+    );
   });
 });

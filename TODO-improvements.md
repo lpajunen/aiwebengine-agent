@@ -82,7 +82,7 @@ assumed.
 | ----------------------------- | ------------ | --------------------------------------------------------------- |
 | Pictures and documents in     | Built        | page and Telegram; JPEG, PNG, GIF, WebP, PDF, plain text        |
 | Voice on the page             | Built        | the browser's Web Speech API; neither script nor model hears it |
-| An attachment the API refuses | Open         | breaks every later turn of its conversation                     |
+| An attachment the API refuses | Built        | set aside with a note, the turn taken again; `setAsideRefused`  |
 | Telegram albums               | Ahead        | `media_group_id`; each photo is its own prompt now              |
 | Telegram voice notes          | Ahead        | a speech-to-text provider; `fetch` with `form` is enough        |
 | Spoken answers on Telegram    | Ahead        | text-to-speech as OGG/Opus, `sendVoice`                         |
@@ -138,17 +138,6 @@ The cases run under the engine's `run_tests` and cover the modules beside
 `main.ts`. What is not covered is the part that is not pure: the state machine
 in `setRunState`, the ordering in `decide`, the swap in `compactRun`. Each needs
 a fake of something.
-
-### An attachment the API refuses
-
-Uploading checks only the media type. When the Messages API later refuses a
-file — too large, an encrypted or malformed PDF, a `file_id` removed from the
-person's Files API — that turn fails, and so does every turn after it, since
-the conversation is resent whole. The likeliest way in is a Telegram document
-that is a photo sent "as file": it is not shrunk the way a photo is. Two
-halves: shrink image documents as photos are, and when a turn is refused over
-the newest prompt's attachments, replace those blocks with a line saying the
-file could not be read and tell the person.
 
 ### Media and voice
 
