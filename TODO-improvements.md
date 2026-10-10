@@ -21,18 +21,19 @@ assumed.
 
 ### Context
 
-| Item                       | State      | Where, or what it waits on                                                   |
-| -------------------------- | ---------- | ---------------------------------------------------------------------------- |
-| Skills, read by the model  | Built      | `skills/<name>/SKILL.md`, the index in the prompt, `read_skill`              |
-| Skills the agent writes    | Built      | `write_skill`; always asks, and writes where the approval is                 |
-| `remember` / `recall`      | Built      | `personalStorage`, per person                                                |
-| `list_memories`            | Built      | key, size and first line — the index `recall` needed                         |
-| Memory the person can read | Built      | `/agent/memories`, a panel above the log                                     |
-| Compaction                 | Built      | `COMPACT_AT_TOKENS`, at the top of a turn and nowhere else                   |
-| Prompt caching             | Built      | one breakpoint, at the end of the conversation                               |
-| Project instructions       | Ahead      | an asset for the deployment's text, `personalStorage` for theirs             |
-| Attachments and images     | Built      | `attachments.ts`; uploaded once to the person's Files API, held by `file_id` |
-| Slash commands             | Superseded | by skills — what is missing is an entry point, not a second library          |
+| Item                       | State | Where, or what it waits on                                                   |
+| -------------------------- | ----- | ---------------------------------------------------------------------------- |
+| Skills, read by the model  | Built | `skills/<name>/SKILL.md`, the index in the prompt, `read_skill`              |
+| Skills the agent writes    | Built | `write_skill`; always asks, and writes where the approval is                 |
+| `remember` / `recall`      | Built | `personalStorage`, per person                                                |
+| `list_memories`            | Built | key, size and first line — the index `recall` needed                         |
+| Memory the person can read | Built | `/agent/memories`, a panel above the log                                     |
+| Compaction                 | Built | `COMPACT_AT_TOKENS`, at the top of a turn and nowhere else                   |
+| Prompt caching             | Built | one breakpoint, at the end of the conversation                               |
+| Project instructions       | Ahead | an asset for the deployment's text, `personalStorage` for theirs             |
+| Attachments and images     | Built | `attachments.ts`; uploaded once to the person's Files API, held by `file_id` |
+| Commands (`/new`)          | Built | `commands.ts`, one parser for the page and Telegram                          |
+| A skill called by name     | Ahead | `/<skill>` as a command; skills replace a library of slash commands          |
 
 ### Tools
 

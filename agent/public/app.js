@@ -588,24 +588,29 @@ function showConversation(has, kind) {
   el.author.disabled = hasConversation;
 }
 
+/** An empty conversation on screen, the id the script handed out for it. */
+function showFreshConversation(runId) {
+  shownRun = runId;
+  entries = [];
+  pending = "";
+  spend = EMPTY_SPEND;
+  renderSpend();
+  hidePlan();
+  showConversation(false, "chat");
+  render();
+  renderConversationMarks();
+  el.prompt.value = "";
+  setStatus(el.runStatus, "");
+  el.prompt.focus();
+}
+
 el.newConversation.addEventListener("click", async () => {
   if (runWorking || running) return;
   stopSpeaking();
   el.newConversation.disabled = true;
   try {
     const started = await api("/agent/new", { method: "POST", body: "{}" });
-    shownRun = started.runId;
-    entries = [];
-    pending = "";
-    spend = EMPTY_SPEND;
-    renderSpend();
-    hidePlan();
-    showConversation(false, "chat");
-    render();
-    renderConversationMarks();
-    el.prompt.value = "";
-    setStatus(el.runStatus, "");
-    el.prompt.focus();
+    showFreshConversation(started.runId);
   } catch (e) {
     if (e.body?.runLive) setWorking(true);
     setStatus(el.runStatus, e.message, true);
@@ -830,13 +835,18 @@ el.run.addEventListener("click", async () => {
       // Empty after "New conversation" until this prompt starts it.
       runId: shownRun || undefined,
     };
-    await api("/agent/prompt", {
+    const started = await api("/agent/prompt", {
       method: "POST",
       body:
         attachments.length > 0
           ? attachmentForm(fields)
           : JSON.stringify(fields),
     });
+    // `/new` on its own: the button, typed. No run was started.
+    if (started.fresh) {
+      showFreshConversation(started.runId);
+      return;
+    }
     el.prompt.value = "";
     clearAttachments();
     // The engine has it now. Everything from here — each turn, each tool, the

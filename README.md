@@ -11,7 +11,9 @@ for anybody's tokens.
   activity log.
 - `POST /agent/prompt` — accepts a prompt and queues the run. With a `runId`
   it continues that conversation (the earlier messages are the context; the
-  conversation's kind stays what it was); without one it starts a new one.
+  conversation's kind stays what it was); without one it starts a new one. A
+  prompt beginning `/new` starts a new one whatever the `runId`; `/new` alone
+  is `POST /agent/new`.
 - `GET /agent/conversations` — the person's earlier conversations, newest
   first; `GET /agent/history?runId=` shows one of them, and a prompt sent with
   its `runId` continues it.
@@ -28,8 +30,8 @@ for anybody's tokens.
 
 There is no endpoint that advances a run. Each turn queues the next.
 
-`agent/main.ts` is the root script and holds the loop. Seven modules sit beside
-it, because a root script cannot `export` and a test module reaches its
+`agent/main.ts` is the root script and holds the loop. The modules beside it
+are there because a root script cannot `export` and a test module reaches its
 subject by importing it — so anything under test had to move out:
 
 | Module            | What it holds                                             |
@@ -41,6 +43,7 @@ subject by importing it — so anything under test had to move out:
 | `plans.ts`        | decoding the call an approval carries                     |
 | `engine.ts`       | which management tools only read, and their arguments     |
 | `authoring.ts`    | what a script-building run is given, and how it is judged |
+| `commands.ts`     | `/new`, read the same on the page and in Telegram         |
 
 Their tests are `agent/*.test.ts`, run with the `run_tests` tool
 or `POST /engine/run_tests` with `{"script": "<this script>"}`.

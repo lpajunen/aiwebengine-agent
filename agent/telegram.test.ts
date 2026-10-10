@@ -2,11 +2,7 @@
  * Which conversation a Telegram message goes to.
  */
 
-import {
-  CONVERSATION_IDLE_MS,
-  newConversationCommand,
-  routeMessage,
-} from "./telegram.ts";
+import { CONVERSATION_IDLE_MS, routeMessage } from "./telegram.ts";
 
 const NOW = 10 * CONVERSATION_IDLE_MS;
 
@@ -18,38 +14,6 @@ function run(state: string, idleMs: number) {
     updated_ms: NOW - idleMs,
   };
 }
-
-describe("the new-conversation command", () => {
-  test("plain text is not a command", () => {
-    expect(newConversationCommand("hello")).toEqual({
-      fresh: false,
-      text: "hello",
-    });
-  });
-
-  test("/new alone starts fresh with nothing to say", () => {
-    expect(newConversationCommand("/new")).toEqual({ fresh: true, text: "" });
-  });
-
-  test("the words after /new are the first prompt", () => {
-    expect(newConversationCommand("/new  what is this?")).toEqual({
-      fresh: true,
-      text: "what is this?",
-    });
-  });
-
-  test("/start, a bot name and any case count", () => {
-    expect(newConversationCommand("/start").fresh).toBe(true);
-    expect(newConversationCommand("/NEW@agent_bot hi")).toEqual({
-      fresh: true,
-      text: "hi",
-    });
-  });
-
-  test("a longer word that begins with new is not the command", () => {
-    expect(newConversationCommand("/newsletter").fresh).toBe(false);
-  });
-});
 
 describe("routing", () => {
   test("a chat with no run starts one", () => {

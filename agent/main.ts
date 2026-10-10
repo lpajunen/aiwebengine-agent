@@ -94,7 +94,8 @@ import {
   withoutRefused,
 } from "./attachments.ts";
 import { renderSvg, telegramPhotoForm } from "./images.ts";
-import { Route, newConversationCommand, routeMessage } from "./telegram.ts";
+import { parseCommand } from "./commands.ts";
+import { Route, routeMessage } from "./telegram.ts";
 import {
   CONVERSATIONS_PER_PAGE,
   CONVERSATION_TABLES,
@@ -1378,13 +1379,6 @@ function startRun(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
   if (!userId) return json(401, { error: "Sign in first." });
 
-  if (!secretStorage.exists(SECRET_NAME)) {
-    return json(400, {
-      error: "Store your own API key before running the agent.",
-      needsKey: true,
-    });
-  }
-
   let prompt = "";
   let kind: RunKind = "chat";
   let continuing = "";
@@ -1410,8 +1404,25 @@ function startRun(context: HandlerContext): HttpResponse {
   } catch (e) {
     return json(400, { error: "Expected a JSON body." });
   }
+
+  // `/new` is the New conversation button typed: the conversation on screen
+  // is left, and the words after it, if any, begin the next one.
+  const command = parseCommand(prompt);
+  if (command.command === "new") {
+    prompt = command.text;
+    continuing = "";
+    if (!prompt && uploads.length === 0) return startConversation(userId);
+    const refusal = liveRunRefusal(userId);
+    if (refusal) return refusal;
+  }
   if (!prompt && uploads.length === 0) {
     return json(400, { error: "A prompt is required." });
+  }
+  if (!secretStorage.exists(SECRET_NAME)) {
+    return json(400, {
+      error: "Store your own API key before running the agent.",
+      needsKey: true,
+    });
   }
   if (uploads.length > MAX_ATTACHMENTS) {
     return json(400, {
@@ -1544,14 +1555,13 @@ function startRun(context: HandlerContext): HttpResponse {
 function newConversation(context: HandlerContext): HttpResponse {
   const userId = signedInUser(context);
   if (!userId) return json(401, { error: "Sign in first." });
+  return startConversation(userId);
+}
 
-  const latest = latestRunId(userId);
-  if (latest && runIsLive(userId, latest)) {
-    return json(409, {
-      error: "Stop the run in progress first.",
-      runLive: true,
-    });
-  }
+/** `newConversation` for a person already signed in; `/new` on the page too. */
+function startConversation(userId: string): HttpResponse {
+  const refusal = liveRunRefusal(userId);
+  if (refusal) return refusal;
 
   const runId = newRunId();
   try {
@@ -1566,7 +1576,17 @@ function newConversation(context: HandlerContext): HttpResponse {
     const message = e instanceof Error ? e.message : String(e);
     return json(500, { error: message });
   }
-  return json(200, { runId });
+  return json(200, { runId, fresh: true });
+}
+
+/** Why no new conversation may start yet: the newest one is still working. */
+function liveRunRefusal(userId: string): HttpResponse | null {
+  const latest = latestRunId(userId);
+  if (!latest || !runIsLive(userId, latest)) return null;
+  return json(409, {
+    error: "Stop the run in progress first.",
+    runLive: true,
+  });
 }
 
 /**
@@ -2385,7 +2405,11 @@ function uploadAttachments(
   // Checked before any is uploaded: the Files API takes a picture the
   // Messages API then refuses, and the refusal would come a turn later.
   for (const file of files) {
-    const reason = tooLargeToRead(file.name, file.contentType, file.data.length);
+    const reason = tooLargeToRead(
+      file.name,
+      file.contentType,
+      file.data.length,
+    );
     if (reason) throw new Error(reason + ". Send a smaller one.");
   }
   const done: Attachment[] = [];
@@ -2594,6 +2618,14 @@ function interject(context: HandlerContext): HttpResponse {
       error: "That run has already finished.",
       runEnded: true,
       state: runStateOf(userId, runId) ?? "done",
+    });
+  }
+  // Not words for the model: a new conversation under a live run is refused,
+  // as the button is.
+  if (parseCommand(text).command === "new") {
+    return json(409, {
+      error: "Stop the run in progress first.",
+      runLive: true,
     });
   }
 
@@ -4726,7 +4758,8 @@ function appCallTool(
 // ============================================================================
 
 type EngineAnswer =
-  { ok: true; value: Record<string, any> } | { ok: false; error: string };
+  | { ok: true; value: Record<string, any> }
+  | { ok: false; error: string };
 
 /**
  * One engine operation, with refusals told apart from answers.
@@ -6488,7 +6521,8 @@ function startTelegramRun(context: HandlerContext): void {
     chatId?: string;
     files?: TelegramFile[];
   };
-  const command = newConversationCommand(String(payload.text ?? "").trim());
+  const command = parseCommand(String(payload.text ?? "").trim());
+  const fresh = command.command === "new";
   const text = command.text;
   const chatId = String(payload.chatId ?? "");
   const files = Array.isArray(payload.files) ? payload.files : [];
@@ -6498,7 +6532,7 @@ function startTelegramRun(context: HandlerContext): void {
   if (!text && files.length === 0) {
     // `/new` on its own: nothing to answer yet, so the boundary is kept for
     // the next message to start after.
-    if (command.fresh) {
+    if (fresh) {
       try {
         personalStorage.setItem(freshKey, String(Date.now()));
         sendTelegram(chatId, "Starting a new conversation.");
@@ -6523,7 +6557,7 @@ function startTelegramRun(context: HandlerContext): void {
       latestChatRun(userId, chatId),
       Date.now(),
       Number(personalStorage.getItem(freshKey) ?? 0) || 0,
-      command.fresh,
+      fresh,
       files.length > 0,
     );
   } catch (e) {

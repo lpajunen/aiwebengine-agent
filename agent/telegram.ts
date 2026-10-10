@@ -15,18 +15,6 @@
  */
 export const CONVERSATION_IDLE_MS = 3 * 60 * 60 * 1000;
 
-/** The words after `/new` or `/start`, and whether either was used. */
-export function newConversationCommand(text: string): {
-  fresh: boolean;
-  text: string;
-} {
-  // `/start` is what Telegram sends when someone first opens the bot.
-  // `@name` is how a command addresses one bot in a group.
-  const match = /^\/(new|start)(@\w+)?(?:\s+|$)/i.exec(text);
-  if (!match) return { fresh: false, text: text };
-  return { fresh: true, text: text.slice(match[0].length).trim() };
-}
-
 /** As much of a `runs` row as the choice needs. */
 export interface ChatRun {
   run_id?: unknown;
