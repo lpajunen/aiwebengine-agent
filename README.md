@@ -20,8 +20,8 @@ for anybody's tokens.
 - `POST /agent/new` — starts a new conversation: the page shows only the
   newest run id, and the next prompt carries none of the earlier context.
   Refused while a run is working.
-- `GET /agent/commands` — the `/commands` a prompt may begin with: `/new` and
-  the skills, which the prompt box completes.
+- `GET /agent/commands` — the `/commands` a prompt may begin with: `/new`,
+  `/stop` and the skills, which the prompt box completes.
 - `GET /agent/events` — SSE; activity as it happens, for this person only.
 - `GET /agent/history` — the log, so a refresh loses nothing.
 - `POST /agent/cancel` — stops a run; `POST /agent/say` speaks into one.
@@ -36,16 +36,16 @@ There is no endpoint that advances a run. Each turn queues the next.
 are there because a root script cannot `export` and a test module reaches its
 subject by importing it — so anything under test had to move out:
 
-| Module            | What it holds                                                    |
-| ----------------- | ---------------------------------------------------------------- |
-| `protocol.ts`     | reading what the model sent, half-written JSON included          |
-| `capabilities.ts` | what model-written code may do, and the pair it may not          |
-| `budget.ts`       | what a run has spent, and when it has had enough                 |
-| `skills.ts`       | the SKILL.md format, written and read                            |
-| `plans.ts`        | decoding the call an approval carries                            |
-| `engine.ts`       | which management tools only read, and their arguments            |
-| `authoring.ts`    | what a script-building run is given, and how it is judged        |
-| `commands.ts`     | `/new` and `/<skill>`, read the same on the page and in Telegram |
+| Module            | What it holds                                                             |
+| ----------------- | ------------------------------------------------------------------------- |
+| `protocol.ts`     | reading what the model sent, half-written JSON included                   |
+| `capabilities.ts` | what model-written code may do, and the pair it may not                   |
+| `budget.ts`       | what a run has spent, and when it has had enough                          |
+| `skills.ts`       | the SKILL.md format, written and read                                     |
+| `plans.ts`        | decoding the call an approval carries                                     |
+| `engine.ts`       | which management tools only read, and their arguments                     |
+| `authoring.ts`    | what a script-building run is given, and how it is judged                 |
+| `commands.ts`     | `/new`, `/stop` and `/<skill>`, read the same on the page and in Telegram |
 
 Their tests are `agent/*.test.ts`, run with the `run_tests` tool
 or `POST /engine/run_tests` with `{"script": "<this script>"}`.
@@ -413,11 +413,11 @@ A person can pick the skill rather than leave it to the model: `/refunds order
 message with the words after the name, so the model follows it without first
 spending a turn on `read_skill`. The log shows what they typed. A name that is
 not a skill is an ordinary prompt, and `/new` and `/start` are never skills.
-On the page, typing `/` opens a menu of `/new` and the skills, filtered as the
-name is typed.
+On the page, typing `/` opens a menu of `/new`, `/stop` and the skills,
+filtered as the name is typed.
 
-In Telegram the skills are also in the `/` menu, beside `/new`. Telegram
-allows no hyphen in a command, so `release-notes` is listed as
+In Telegram the skills are also in the `/` menu, beside `/new` and `/stop`.
+Telegram allows no hyphen in a command, so `release-notes` is listed as
 `/release_notes`, and either spelling calls it. The menu is set for each
 linked person's private chat when one of their messages arrives and the skills
 have changed since — not for the bot as a whole, whose menu anybody who opens
@@ -581,6 +581,10 @@ that arrives while the run is still working is said to it, as Send does on the
 page; a file then is refused, since only a prompt carries files. A
 conversation started in the chat can be opened and continued on the page, and
 its answers still reach the chat.
+
+`/stop` stops the chat's newest run if it is working, as Stop does on the page
+(where typing `/stop` works too). A turn already in flight stops at its next
+boundary, the same as for the button.
 
 ### Setting it up
 

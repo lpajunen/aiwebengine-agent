@@ -37,6 +37,11 @@ describe("parsing a command", () => {
     expect(parseCommand("/newsletter").command).toBe(null);
   });
 
+  test("/stop, with or without words after it", () => {
+    expect(parseCommand("/stop").command).toBe("stop");
+    expect(parseCommand("/STOP@agent_bot now").command).toBe("stop");
+  });
+
   test("an unknown command is a prompt, word for word", () => {
     expect(parseCommand("/etc/hosts has what?")).toEqual({
       command: null,
@@ -101,6 +106,7 @@ describe("the commands a person can type", () => {
       ]),
     ).toEqual([
       { name: "new", description: "Start a new conversation" },
+      { name: "stop", description: "Stop the run that is working" },
       { name: "release-notes", description: "Write release notes." },
       { name: "bare", description: "bare" },
     ]);
@@ -115,6 +121,7 @@ describe("the Telegram menu", () => {
       ]),
     ).toEqual([
       { command: "new", description: "Start a new conversation" },
+      { command: "stop", description: "Stop the run that is working" },
       { command: "release_notes", description: "Write release notes." },
     ]);
   });
@@ -133,13 +140,13 @@ describe("the Telegram menu", () => {
       { name: long, description: "x" },
       { name: "new", description: "x" },
     ]);
-    expect(menu.map((c) => c.command)).toEqual(["new"]);
+    expect(menu.map((c) => c.command)).toEqual(["new", "stop"]);
   });
 
   test("a description is never empty and never too long", () => {
-    const [, skill] = telegramCommands([{ name: "a", description: "" }]);
+    const [, , skill] = telegramCommands([{ name: "a", description: "" }]);
     expect(skill.description).toBe("a");
-    const [, cut] = telegramCommands([
+    const [, , cut] = telegramCommands([
       { name: "b", description: "d".repeat(300) },
     ]);
     expect(cut.description.length).toBe(256);

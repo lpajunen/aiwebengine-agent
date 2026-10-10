@@ -32,7 +32,7 @@ assumed.
 | Prompt caching             | Built | one breakpoint, at the end of the conversation                               |
 | Project instructions       | Ahead | an asset for the deployment's text, `personalStorage` for theirs             |
 | Attachments and images     | Built | `attachments.ts`; uploaded once to the person's Files API, held by `file_id` |
-| Commands (`/new`)          | Built | `commands.ts`, one parser for the page and Telegram                          |
+| Commands (`/new`, `/stop`) | Built | `commands.ts`, one parser for the page and Telegram                          |
 | A skill called by name     | Built | `/<skill>` puts its instructions in the message, on the page and Telegram    |
 
 ### Tools

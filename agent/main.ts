@@ -1420,6 +1420,11 @@ function startRun(context: HandlerContext): HttpResponse {
   // `/new` is the New conversation button typed: the conversation on screen
   // is left, and the words after it, if any, begin the next one.
   const command = parseCommand(prompt);
+  // `/stop` reaches here only when the page saw nothing working; a run that
+  // is working is stopped through `/agent/say`.
+  if (command.command === "stop") {
+    return json(409, { error: "Nothing is working to stop." });
+  }
   if (command.command === "new") {
     prompt = command.text;
     continuing = "";
@@ -2180,10 +2185,30 @@ function cancelRun(context: HandlerContext): HttpResponse {
   // nothing rather than being stopped.
   if (!row) return json(404, { error: "No such run." });
 
+  const stopped = stopRun(userId, row);
+  if (!stopped.stopped) {
+    // Already over. Not an error: the person pressed stop as it finished.
+    return json(200, {
+      runId: runId,
+      state: stopped.state,
+      alreadyEnded: true,
+    });
+  }
+  return json(200, { runId: runId, state: "cancelled" });
+}
+
+/**
+ * Stop a run that is working: the page's Stop, and `/stop` on the page and in
+ * Telegram. A run already over is left as it is, and its state reported.
+ */
+function stopRun(
+  userId: string,
+  row: RunRow,
+): { stopped: boolean; state: string } {
+  const runId = String(row.run_id);
   const state = String(row.run_state ?? "running");
   if (state !== "running" && state !== "waiting") {
-    // Already over. Not an error: the person pressed stop as it finished.
-    return json(200, { runId: runId, state: state, alreadyEnded: true });
+    return { stopped: false, state: state };
   }
 
   if (row.task_id) {
@@ -2198,7 +2223,7 @@ function cancelRun(context: HandlerContext): HttpResponse {
   setRunState(userId, runId, "cancelled");
   recordActivity(userId, runId, "note", "Stopped by you.");
   recordActivity(userId, runId, "done", "cancelled");
-  return json(200, { runId: runId, state: "cancelled" });
+  return { stopped: true, state: "cancelled" };
 }
 
 /**
@@ -2637,9 +2662,15 @@ function interject(context: HandlerContext): HttpResponse {
       state: runStateOf(userId, runId) ?? "done",
     });
   }
-  // Not words for the model: a new conversation under a live run is refused,
-  // as the button is.
-  if (parseCommand(text).command === "new") {
+  // Not words for the model: `/stop` is the Stop button typed, and a new
+  // conversation under a live run is refused, as the button is.
+  const command = parseCommand(text).command;
+  if (command === "stop") {
+    const row = runRow(userId, runId);
+    if (row) stopRun(userId, row);
+    return json(200, { runId: runId, stopped: true });
+  }
+  if (command === "new") {
     return json(409, {
       error: "Stop the run in progress first.",
       runLive: true,
@@ -6578,6 +6609,11 @@ function startTelegramRun(context: HandlerContext): void {
   const freshKey = TELEGRAM_FRESH_PREFIX + chatId;
   syncTelegramMenu(chatId);
 
+  if (command.command === "stop") {
+    stopTelegramRun(userId, chatId);
+    return;
+  }
+
   if (!text && files.length === 0) {
     // `/new` on its own: nothing to answer yet, so the boundary is kept for
     // the next message to start after.
@@ -6743,6 +6779,22 @@ function syncTelegramMenu(chatId: string): void {
     quietLog(
       `agent: could not set the telegram menu: ${String(e).slice(0, 200)}`,
     );
+  }
+}
+
+/**
+ * `/stop`: stop the chat's run if it is working. Its newest run only, since
+ * that is the one a message would be said to. Its state is read and not its
+ * age, so a run that went quiet while still marked working is stopped too.
+ */
+function stopTelegramRun(userId: string, chatId: string): void {
+  try {
+    const latest = latestChatRun(userId, chatId);
+    const stopped = latest ? stopRun(userId, latest).stopped : false;
+    sendTelegram(chatId, stopped ? "Stopped." : "Nothing is working to stop.");
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    sendTelegram(chatId, `I could not stop it: ${message}`);
   }
 }
 

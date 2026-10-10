@@ -14,14 +14,17 @@ export type ParsedCommand =
   | { command: null; text: string }
   /** Start a new conversation, the words after it its first prompt. */
   | { command: "new"; text: string }
+  /** Stop the run that is working; any words after it are ignored. */
+  | { command: "stop"; text: string }
   /** Follow this skill, the words after it what to follow it for. */
   | { command: "skill"; skill: string; text: string };
 
 /** Built in, so a skill of the same name cannot be called by it. */
-const BUILT_IN: Record<string, "new"> = {
+const BUILT_IN: Record<string, "new" | "stop"> = {
   new: "new",
   // What Telegram sends when someone first opens the bot.
   start: "new",
+  stop: "stop",
 };
 
 /**
@@ -71,7 +74,7 @@ export interface MenuCommand {
 }
 
 /**
- * Every command a person can type, `/new` first: what the page completes and
+ * Every command a person can type, the built-in ones first: what the page completes and
  * what Telegram's menu lists. A skill a built-in command shadows is left out,
  * since typing its name would not call it.
  */
@@ -80,6 +83,7 @@ export function menuCommands(
 ): MenuCommand[] {
   const menu: MenuCommand[] = [
     { name: "new", description: "Start a new conversation" },
+    { name: "stop", description: "Stop the run that is working" },
   ];
   for (const skill of skills) {
     if (Object.prototype.hasOwnProperty.call(BUILT_IN, skill.name)) continue;

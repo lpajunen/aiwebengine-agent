@@ -814,11 +814,17 @@ el.run.addEventListener("click", async () => {
       // boundary, which is the soonest the model can be told anything
       // without it arriving in the middle of a decision.
       try {
-        await api("/agent/say", {
+        const said = await api("/agent/say", {
           method: "POST",
           body: JSON.stringify({ runId: shownRun, text: prompt }),
         });
         el.prompt.value = "";
+        // `/stop`, the Stop button typed. The stream's `done` may have landed
+        // first, so this says the same rather than something earlier.
+        if (said.stopped) {
+          setStatus(el.runStatus, "Stopped.");
+          return;
+        }
         setStatus(el.runStatus, "Sent. It lands at the next turn.");
         return;
       } catch (e) {
