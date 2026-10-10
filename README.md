@@ -22,6 +22,10 @@ for anybody's tokens.
   Refused while a run is working.
 - `GET /agent/commands` — the `/commands` a prompt may begin with: `/new`,
   `/stop` and the skills, which the prompt box completes.
+- `GET /agent/context?runId=` — what one conversation sends the model: each
+  version of the system prompt in its parts, the tools and the settings, the
+  turns that sent each, and the messages. `GET /agent/inspect` is the page.
+- `GET /agent/skills` — every skill with its full text, read-only.
 - `GET /agent/events` — SSE; activity as it happens, for this person only.
 - `GET /agent/history` — the log, so a refresh loses nothing.
 - `POST /agent/cancel` — stops a run; `POST /agent/say` speaks into one.
@@ -46,6 +50,7 @@ subject by importing it — so anything under test had to move out:
 | `engine.ts`       | which management tools only read, and their arguments                     |
 | `authoring.ts`    | what a script-building run is given, and how it is judged                 |
 | `commands.ts`     | `/new`, `/stop` and `/<skill>`, read the same on the page and in Telegram |
+| `context.ts`      | the system prompt as labelled parts, and the record of what a turn sent   |
 
 Their tests are `agent/*.test.ts`, run with the `run_tests` tool
 or `POST /engine/run_tests` with `{"script": "<this script>"}`.
@@ -531,6 +536,35 @@ agent: prompt 5312 tokens (cached 5000, wrote 300, new 12), reply 44
 the last turn added. `cached` sitting at 0 in a run well past a few thousand
 tokens means something above the breakpoint is being rewritten between turns.
 
+## What the model sees
+
+`/agent/inspect`, linked from the account menu as "What the model sees", lays
+out one conversation in the order the model reads it: the settings, the system
+prompt, the tools and the messages, each part with an estimate of its size,
+then a row per turn with the token counts the model reported, and the whole
+request as JSON. Below it, every skill with its full text. It is a page of its
+own so the agent page stays a prompt box for someone who does not care.
+
+The system prompt is built as labelled parts (`systemPartsFor`), each saying
+why this turn has it — plan or act mode, the engine and app paragraphs that
+follow what the person granted, the skill list. Joining the parts is what is
+sent, so the page cannot show a prompt the model never got.
+
+What a turn sends before the conversation is **kept, not rebuilt** when the
+page asks: the tools and the engine and app paragraphs follow what the run's
+grant held, and a page request holds something else. `sent_prompts` keeps one
+row per version per run, `turn_usage.prompt_mark` says which version each turn
+sent, and deleting the conversation deletes them. A conversation older than
+this record shows its messages and turns only.
+
+The messages are shown as the next turn would send them, which is what the
+last turn sent plus its answer. The API key is never in it: the engine fills
+it in on the way out.
+
+Skills are shown and not edited here. A skill changes the agent for everyone,
+so changing one stays with `write_skill` and its approval, or with whoever can
+edit this script.
+
 ## When a run misbehaves
 
 Queued work is visible to an administrator without reading this script's own
@@ -664,8 +698,10 @@ not access to the bot and not access to anybody's account.
 agent/
   main.ts     the script
   public/
-    ui.html   the page          (asset)
-    app.js    the browser loop  (asset)
+    ui.html       the page          (asset)
+    app.js        the browser loop  (asset)
+    inspect.html  what the model sees (asset)
+    inspect.js    its loader        (asset)
 types/
   aiwebengine.d.ts   snapshot for typechecking
 ```

@@ -35,6 +35,13 @@ import {
 } from "./skills.ts";
 import { onlyReads, parseArgs } from "./engine.ts";
 import {
+  PromptPart,
+  SentPrompt,
+  joinParts,
+  requestMark,
+  sentPromptOf,
+} from "./context.ts";
+import {
   AUTHOR_PROMPT,
   AUTHOR_TOOLS,
   INSTRUCTIONS_PLACEHOLDER,
@@ -307,7 +314,7 @@ const SYSTEM_PROMPT = [
  * Kept out of [`SYSTEM_PROMPT`] rather than written conditionally into it,
  * because most runs have no management authority and a paragraph about tools
  * that are not there is a paragraph the model has to rule out on every turn.
- * It joins the prefix in [`systemPromptFor`], where the tool list is decided,
+ * It joins the prefix in [`systemPartsFor`], where the tool list is decided,
  * so the two never disagree about whether these exist.
  */
 const ENGINE_PROMPT = [
@@ -1234,6 +1241,26 @@ function init(): void {
       { name: "wrote_tokens", type: "bigint" },
       { name: "fresh_tokens", type: "bigint" },
       { name: "out_tokens", type: "bigint" },
+      // Which version of `sent_prompts` the turn sent; empty for a
+      // summarising call.
+      { name: "prompt_mark", type: "text" },
+      { name: "created_ms", type: "bigint" },
+    ],
+  });
+
+  // What a turn sent before the conversation — the system prompt in its
+  // parts, the tools and the settings — once per version per run, for the
+  // inspect page. Kept rather than rebuilt when asked, because what a run
+  // gets depends on what its grant held then, which a page request cannot
+  // see.
+  database.ensureTable("sent_prompts", {
+    columns: [
+      { name: "user_id", type: "text" },
+      { name: "run_id", type: "text" },
+      { name: "mark", type: "text" },
+      { name: "system_parts", type: "text" },
+      { name: "tools", type: "text" },
+      { name: "settings", type: "text" },
       { name: "created_ms", type: "bigint" },
     ],
   });
@@ -1311,6 +1338,27 @@ function init(): void {
     method: "GET",
     tags: ["Agent"],
     summary: "The /commands a prompt may begin with: /new and the skills",
+  });
+
+  routeRegistry.registerRoute("/agent/inspect", {
+    file: "public/inspect.html",
+  });
+  routeRegistry.registerRoute("/agent/inspect.js", {
+    file: "public/inspect.js",
+  });
+
+  routeRegistry.registerRoute("/agent/context", {
+    handler: "readContext",
+    method: "GET",
+    tags: ["Agent"],
+    summary: "What one conversation sends the model: prompt, tools, messages",
+  });
+
+  routeRegistry.registerRoute("/agent/skills", {
+    handler: "readSkills",
+    method: "GET",
+    tags: ["Agent"],
+    summary: "Every skill with its full text, read-only",
   });
 
   routeRegistry.registerRoute("/agent/memories", {
@@ -2795,6 +2843,118 @@ function readHistory(context: HandlerContext): HttpResponse {
   });
 }
 
+/** How many turns and prompt versions the inspect page reads for one run. */
+const MAX_INSPECT_TURNS = 200;
+const MAX_INSPECT_PROMPTS = 20;
+
+/**
+ * Everything one conversation sends the model, for the inspect page: each
+ * version of the system prompt, tools and settings its turns sent, which
+ * version each turn used and what it cost, and the conversation itself as the
+ * next turn would send it.
+ *
+ * The person's own rows only. Nothing here is secret from them: the key is
+ * not in the request — the engine fills it in on the way out — and the rest
+ * is their conversation and instructions the model would repeat if asked.
+ */
+function readContext(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  const asked = String(context.request?.query?.runId ?? "").trim();
+  if (asked && !RUN_ID_PATTERN.test(asked)) {
+    return json(400, { error: "That is not a conversation id." });
+  }
+  const runId = asked || latestRunId(userId);
+  if (!runId) {
+    return json(200, {
+      runId: "",
+      prompts: [],
+      turns: [],
+      messages: [],
+      pricing: PRICES,
+    });
+  }
+
+  let prompts: SentPrompt[] = [];
+  let turns: Record<string, unknown>[] = [];
+  let messages: ApiMessage[] = [];
+  try {
+    for (const row of queryRows(
+      "sent_prompts",
+      { user_id: userId, run_id: runId },
+      MAX_INSPECT_PROMPTS,
+      "id",
+      "asc",
+    )) {
+      const kept = sentPromptOf(row as Record<string, unknown>);
+      if (kept) prompts.push(kept);
+    }
+    turns = (
+      queryRows(
+        "turn_usage",
+        { user_id: userId, run_id: runId },
+        MAX_INSPECT_TURNS,
+        "id",
+        "asc",
+      ) as Record<string, unknown>[]
+    ).map((row) => ({
+      at: Number(row.created_ms ?? 0),
+      mark: String(row.prompt_mark ?? ""),
+      cached: Number(row.cached_tokens ?? 0),
+      wrote: Number(row.wrote_tokens ?? 0),
+      fresh: Number(row.fresh_tokens ?? 0),
+      output: Number(row.out_tokens ?? 0),
+    }));
+    messages = loadMessages(userId, runId).map(toApiMessage);
+  } catch (e) {
+    return json(500, { error: "Could not read the conversation: " + e });
+  }
+
+  const row = runRow(userId, runId);
+  return json(200, {
+    runId: runId,
+    title: row ? titleOf(userId, row) : "",
+    kind: kindOf(userId, runId),
+    mode: runModeOf(userId, runId),
+    prompts: prompts,
+    turns: turns,
+    messages: messages,
+    pricing: PRICES,
+  });
+}
+
+/**
+ * Every skill with its full text, for the inspect page. Read-only: a skill
+ * changes the agent for everyone, so changing one stays with `write_skill`
+ * and its approval, or with whoever can edit this script.
+ */
+function readSkills(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  const assets = listAssetInfo();
+  const skills = loadSkills().map((skill) => {
+    const folder = SKILLS_PREFIX + skill.name + "/";
+    const text = readAssetText(folder + SKILL_FILE);
+    const body = text === null ? "" : skillBody(text);
+    const others: string[] = [];
+    for (const asset of assets) {
+      if (asset.path.indexOf(folder) !== 0) continue;
+      const file = asset.path.slice(folder.length);
+      if (file !== SKILL_FILE) others.push(file);
+    }
+    return {
+      name: skill.name,
+      description: skill.description,
+      body: body.slice(0, MAX_SKILL_CHARS),
+      cut: body.length > MAX_SKILL_CHARS,
+      files: others,
+    };
+  });
+  return json(200, { skills: skills });
+}
+
 /**
  * Everything this agent has written down about the person asking.
  *
@@ -3109,6 +3269,24 @@ function callModel(
   // the tools sit at the front of it; see `REQUEST_APPROVAL_TOOL`.
   const mode = summarising ? "plan" : runModeOf(userId, runId);
   const kind: RunKind = kindOf(userId, runId);
+  // Everything before the conversation, built once so what is sent and what
+  // is kept for the inspect page are the same values.
+  const parts = summarising ? [] : systemPartsFor(skills, mode, kind);
+  const toolList = summarising ? undefined : toolsFor(skills, mode, kind);
+  const settings = {
+    model: MODEL,
+    max_tokens: maxTokensFor(kind),
+    cache_control: summarising ? undefined : { type: "ephemeral" },
+    thinking: {
+      type: "adaptive",
+      block_binding: { prefix_mismatch_behavior: "drop_block" },
+    },
+    output_config: { effort: EFFORT },
+    anthropic_beta: BETA_HEADER,
+  };
+  const mark = summarising
+    ? ""
+    : keepSentPrompt(userId, runId, parts, toolList ?? [], settings);
   const stream = fetchStream(API_URL, {
     method: "POST",
     // Without this the call inherits the engine's 30-second default. See
@@ -3121,15 +3299,13 @@ function callModel(
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: MODEL,
-      max_tokens: maxTokensFor(kind),
+      model: settings.model,
+      max_tokens: settings.max_tokens,
       // Both of these follow the skill library rather than the turn, so they
       // are as stable across a run as anything else in the cached prefix.
-      system: summarising
-        ? COMPACT_PROMPT
-        : systemPromptFor(skills, mode, kind),
+      system: summarising ? COMPACT_PROMPT : joinParts(parts),
       messages: messages,
-      tools: summarising ? undefined : toolsFor(skills, mode, kind),
+      tools: toolList,
       stream: true,
       // Cache the prompt, which for this loop means the conversation.
       //
@@ -3150,16 +3326,13 @@ function callModel(
       // the one before it ends, so every turn refreshes the entry, and the
       // 1-hour TTL would double the write price to buy a gap this loop does
       // not have.
-      cache_control: summarising ? undefined : { type: "ephemeral" },
+      cache_control: settings.cache_control,
       // Thinking counts toward `max_tokens`, so a ceiling sized for a model
       // that did not think can end a turn before it says anything; see
       // `authoring.ts`. `effort` is the lever, and changing it between turns
       // would invalidate the cached messages, so it is a constant.
-      thinking: {
-        type: "adaptive",
-        block_binding: { prefix_mismatch_behavior: "drop_block" },
-      },
-      output_config: { effort: EFFORT },
+      thinking: settings.thinking,
+      output_config: settings.output_config,
     }),
   });
 
@@ -3171,7 +3344,7 @@ function callModel(
   }
 
   try {
-    return readModelStream(stream, userId, runId, summarising);
+    return readModelStream(stream, userId, runId, summarising, mark);
   } finally {
     // An abandoned stream holds a socket until the execution ends, and an
     // execution may hold only a few. Closing one that already finished is a
@@ -3189,6 +3362,7 @@ function readModelStream(
   userId: string,
   runId: string,
   silent?: boolean,
+  mark?: string,
 ): ApiResponse {
   const turn: Turn = {
     blocks: [],
@@ -3232,7 +3406,7 @@ function readModelStream(
   turn.outbound = "";
 
   logUsage(turn);
-  recordUsage(userId, runId, turn.usage);
+  recordUsage(userId, runId, turn.usage, mark ?? "");
 
   if (!turn.sawStop) {
     // The body ended early. Saying so is better than returning a turn that
@@ -3849,6 +4023,46 @@ function compactRun(
 // ============================================================================
 
 /**
+ * Keep what this turn sends before the conversation, once per version per
+ * run, and return the version's mark for the turn's usage row.
+ *
+ * Failing to keep it is not failing the turn, for the reason `recordUsage`
+ * gives: the inspect page loses a record, the person keeps their answer.
+ */
+function keepSentPrompt(
+  userId: string,
+  runId: string,
+  parts: PromptPart[],
+  toolList: ToolSpec[],
+  settings: Record<string, unknown>,
+): string {
+  const mark = requestMark(parts, toolList, settings);
+  try {
+    const kept = queryRows(
+      "sent_prompts",
+      { user_id: userId, run_id: runId, mark: mark },
+      1,
+      "id",
+      "asc",
+    );
+    if (kept.length === 0) {
+      database.insert("sent_prompts", {
+        user_id: userId,
+        run_id: runId,
+        mark: mark,
+        system_parts: JSON.stringify(parts),
+        tools: JSON.stringify(toolList),
+        settings: JSON.stringify(settings),
+        created_ms: Date.now(),
+      });
+    }
+  } catch (e) {
+    console.log("agent: could not keep what a turn sent: " + String(e));
+  }
+  return mark;
+}
+
+/**
  * Keep what this turn spent, and tell the person's open tabs.
  *
  * Written as one row per turn rather than a running total updated in place.
@@ -3865,7 +4079,12 @@ function compactRun(
  * and the person has already paid; losing the bookkeeping is worth strictly
  * less than losing the answer.
  */
-function recordUsage(userId: string, runId: string, usage: StreamUsage): void {
+function recordUsage(
+  userId: string,
+  runId: string,
+  usage: StreamUsage,
+  mark: string,
+): void {
   const cached = usage.cache_read_input_tokens ?? 0;
   const wrote = usage.cache_creation_input_tokens ?? 0;
   const fresh = usage.input_tokens ?? 0;
@@ -3880,6 +4099,7 @@ function recordUsage(userId: string, runId: string, usage: StreamUsage): void {
       wrote_tokens: wrote,
       fresh_tokens: fresh,
       out_tokens: output,
+      prompt_mark: mark,
       created_ms: Date.now(),
     });
   } catch (e) {
@@ -4210,63 +4430,127 @@ function hasAppAuthority(): boolean {
   }
 }
 
-function systemPromptFor(
+/**
+ * The system prompt for a turn, as labelled parts. Joined, they are what the
+ * model is sent; apart, they are what the inspect page shows, each with why
+ * this turn has it.
+ */
+function systemPartsFor(
   skills: Skill[],
   mode: RunMode,
   kind: RunKind,
-): string {
+): PromptPart[] {
   if (kind === "author") {
-    return (
-      AUTHOR_PROMPT +
-      "\nAnswer by calling write_response; that is how the person sees what you say."
-    );
+    return [
+      {
+        key: "author",
+        label: "How to build a script",
+        why: "This conversation builds a script, so it has its own instructions and tools.",
+        sep: "",
+        text: AUTHOR_PROMPT,
+      },
+      {
+        key: "answer",
+        label: "How to answer",
+        why: "Every run answers through write_response.",
+        sep: "\n",
+        text: "Answer by calling write_response; that is how the person sees what you say.",
+      },
+    ];
   }
-  const engine =
-    (hasEngineAuthority() ? " " + ENGINE_PROMPT : "") +
-    (hasAppAuthority() ? " " + APP_PROMPT : "");
-  const preamble =
-    mode === "act"
-      ? SYSTEM_PROMPT +
-        " Your plan has been approved, so run_js can now write to this " +
-        "person's stored notes. Reading them is still recall and " +
-        "list_memories, in act mode as in plan. Do what you said you would " +
-        "do and nothing wider — the approval was for that plan."
-      : SYSTEM_PROMPT +
-        " You can read, fetch and compute, but you cannot change anything " +
-        "yet. If what you have been asked for needs writing, work out what " +
-        "you intend to do and call request_approval with it; the run stops " +
-        "until the person answers. Never tell the person you have saved or " +
-        "changed something you have not. remember counts as a change: " +
-        "calling it here pauses the run and asks on your behalf, so use it " +
-        "normally and expect to be interrupted. Anything that only reads — " +
-        "recall and list_memories included — just do.";
 
+  const parts: PromptPart[] = [
+    {
+      key: "base",
+      label: "Instructions every run gets",
+      why: "Always sent.",
+      sep: "",
+      text: SYSTEM_PROMPT,
+    },
+    mode === "act"
+      ? {
+          key: "mode",
+          label: "Act mode",
+          why: "A plan in this conversation was approved, so it may now change things.",
+          sep: " ",
+          text:
+            "Your plan has been approved, so run_js can now write to this " +
+            "person's stored notes. Reading them is still recall and " +
+            "list_memories, in act mode as in plan. Do what you said you would " +
+            "do and nothing wider — the approval was for that plan.",
+        }
+      : {
+          key: "mode",
+          label: "Plan mode",
+          why: "No plan has been approved yet, so the run may read but not change anything.",
+          sep: " ",
+          text:
+            "You can read, fetch and compute, but you cannot change anything " +
+            "yet. If what you have been asked for needs writing, work out what " +
+            "you intend to do and call request_approval with it; the run stops " +
+            "until the person answers. Never tell the person you have saved or " +
+            "changed something you have not. remember counts as a change: " +
+            "calling it here pauses the run and asks on your behalf, so use it " +
+            "normally and expect to be interrupted. Anything that only reads — " +
+            "recall and list_memories included — just do.",
+        },
+  ];
+  if (hasEngineAuthority()) {
+    parts.push({
+      key: "engine",
+      label: "The engine's management tools",
+      why: "You allowed this agent to author or administer on the permissions page.",
+      sep: " ",
+      text: ENGINE_PROMPT,
+    });
+  }
+  if (hasAppAuthority()) {
+    parts.push({
+      key: "apps",
+      label: "Your other apps' tools",
+      why: "You allowed this agent to use your other apps' tools on the permissions page.",
+      sep: " ",
+      text: APP_PROMPT,
+    });
+  }
+  if (skills.length > 0) {
+    parts.push({
+      key: "skills-use",
+      label: "How to use skills",
+      why: "This agent has skills.",
+      sep: "\n\n",
+      text:
+        "Skills are instructions for particular kinds of work. When one covers " +
+        "what you have been asked to do, call read_skill and follow it before " +
+        "you start. Read at most the ones you need.",
+    });
+  }
   // Said whether or not any exist, because the first one has to come from
   // somewhere and a deployment with none is where writing one pays most.
-  const authoring =
-    "If you work out a procedure worth repeating — the steps, the gotchas, " +
-    "the thing you got wrong first — write it down with write_skill so every " +
-    "future run does it the same way. That is for how to do work, not for " +
-    "facts about the person, which are remember's job. It always pauses and " +
-    "asks, because a skill changes this agent for everyone.";
-
-  if (skills.length === 0) {
-    return preamble + engine + "\n\n" + authoring;
+  parts.push({
+    key: "skills-write",
+    label: "Writing skills",
+    why: "Always sent, so the first skill can be written.",
+    sep: skills.length > 0 ? " " : "\n\n",
+    text:
+      "If you work out a procedure worth repeating — the steps, the gotchas, " +
+      "the thing you got wrong first — write it down with write_skill so every " +
+      "future run does it the same way. That is for how to do work, not for " +
+      "facts about the person, which are remember's job. It always pauses and " +
+      "asks, because a skill changes this agent for everyone.",
+  });
+  if (skills.length > 0) {
+    parts.push({
+      key: "skills-index",
+      label: "The skill list",
+      why: "Each skill's name and description; the model reads a skill's body only when it needs it.",
+      sep: "\n\n",
+      text: skills
+        .map((skill) => "- " + skill.name + ": " + skill.description)
+        .join("\n"),
+    });
   }
-
-  const lines = [
-    preamble + engine,
-    "",
-    "Skills are instructions for particular kinds of work. When one covers " +
-      "what you have been asked to do, call read_skill and follow it before " +
-      "you start. Read at most the ones you need. " +
-      authoring,
-    "",
-  ];
-  for (const skill of skills) {
-    lines.push("- " + skill.name + ": " + skill.description);
-  }
-  return lines.join("\n");
+  return parts;
 }
 
 // ============================================================================

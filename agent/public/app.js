@@ -51,6 +51,7 @@ const el = {
   reject: document.getElementById("reject"),
   openKey: document.getElementById("open-key"),
   grantLink: document.getElementById("grant-link"),
+  inspectLink: document.getElementById("inspect-link"),
   memoryPanel: document.getElementById("memory-panel"),
   memoryDetails: document.getElementById("memory-details"),
   memoryCount: document.getElementById("memory-count"),
@@ -534,6 +535,13 @@ function showKeyState(hasKey) {
   el.key.placeholder = hasKey ? "A key is stored" : "sk-ant-...";
   setStatus(el.keyStatus, hasKey ? "Key stored." : "No key stored yet.");
 }
+
+// Opens on the conversation this page shows, not merely the newest.
+el.inspectLink.addEventListener("click", () => {
+  el.inspectLink.href =
+    "/agent/inspect" +
+    (shownRun ? "?runId=" + encodeURIComponent(shownRun) : "");
+});
 
 el.openKey.addEventListener("click", () => {
   keyFormOpen = !(keyStored && !el.keyPanel.hidden);

@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>What the model sees</title>
+    <link rel="stylesheet" href="/engine/engine.css" />
+    <script src="/engine/engine.js" defer></script>
+    <style>
+      /* Written against the engine's --aw-* properties, as the agent page is,
+         so it follows the same look and dark mode. */
+      body {
+        padding: var(--aw-space-5) var(--aw-space-4) 4rem;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+      }
+      h1 {
+        padding-right: 3rem;
+        margin-bottom: var(--aw-space-1);
+      }
+      .sub {
+        color: var(--aw-color-muted);
+        margin: 0 0 var(--aw-space-4);
+      }
+      section {
+        background: var(--aw-color-surface);
+        border: 1px solid var(--aw-color-border);
+        border-radius: var(--aw-radius-lg);
+        box-shadow: var(--aw-shadow);
+        padding: var(--aw-space-4);
+        margin-bottom: var(--aw-space-4);
+      }
+      h2 {
+        margin: 0;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--aw-color-muted);
+      }
+      .head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: var(--aw-space-2);
+        margin-bottom: var(--aw-space-2);
+      }
+      .size {
+        color: var(--aw-color-muted);
+        font-size: 0.85rem;
+        white-space: nowrap;
+      }
+      .help {
+        color: var(--aw-color-muted);
+        font-size: 0.9rem;
+        margin: 0 0 var(--aw-space-3);
+      }
+      .status {
+        color: var(--aw-color-muted);
+        font-size: 0.9rem;
+      }
+      .status.error {
+        color: var(--aw-color-danger);
+      }
+      /* One collapsible entry: a part of the prompt, a tool, a message or a
+         skill. Closed by default, so the page reads as an outline first. */
+      details.item {
+        border-top: 1px solid var(--aw-color-border);
+      }
+      details.item:first-of-type {
+        border-top: none;
+      }
+      details.item > summary {
+        cursor: pointer;
+        padding: var(--aw-space-2) 0;
+        display: flex;
+        gap: var(--aw-space-2);
+        align-items: baseline;
+      }
+      details.item > summary::-webkit-details-marker {
+        display: none;
+      }
+      details.item > summary::before {
+        content: "▸";
+        color: var(--aw-color-muted);
+        flex: none;
+      }
+      details.item[open] > summary::before {
+        content: "▾";
+      }
+      .item-title {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .item-name {
+        font-family: var(--aw-font-mono);
+        font-size: 0.9rem;
+      }
+      .item-note {
+        color: var(--aw-color-muted);
+      }
+      .item-body {
+        padding: 0 0 var(--aw-space-3) var(--aw-space-4);
+      }
+      .why {
+        color: var(--aw-color-muted);
+        font-size: 0.85rem;
+        margin: 0 0 var(--aw-space-2);
+      }
+      pre {
+        margin: 0 0 var(--aw-space-2);
+        padding: var(--aw-space-2) var(--aw-space-3);
+        background: var(--aw-color-surface-sunken);
+        border-radius: var(--aw-radius-sm);
+        font-family: var(--aw-font-mono);
+        font-size: 0.82rem;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        max-height: 28rem;
+        overflow-y: auto;
+      }
+      .block-label {
+        font-size: 0.8rem;
+        color: var(--aw-color-muted);
+        margin: var(--aw-space-2) 0 var(--aw-space-1);
+      }
+      .role {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--aw-color-muted);
+        flex: none;
+        width: 5.5rem;
+      }
+      /* Where the tokens go, as one bar: the proportions are the lesson. */
+      .bar {
+        display: flex;
+        height: 0.75rem;
+        border-radius: var(--aw-radius-sm);
+        overflow: hidden;
+        background: var(--aw-color-surface-sunken);
+        margin: var(--aw-space-2) 0;
+      }
+      .bar span {
+        display: block;
+        min-width: 2px;
+      }
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--aw-space-1) var(--aw-space-4);
+        font-size: 0.85rem;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .swatch {
+        display: inline-block;
+        width: 0.7rem;
+        height: 0.7rem;
+        border-radius: 2px;
+        margin-right: var(--aw-space-1);
+        vertical-align: -1px;
+      }
+      .c-system {
+        background: var(--aw-color-primary);
+      }
+      .c-tools {
+        background: var(--aw-color-warning);
+      }
+      .c-messages {
+        background: var(--aw-color-success);
+      }
+      dl.settings {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: var(--aw-space-1) var(--aw-space-3);
+        margin: 0;
+      }
+      dl.settings dt {
+        font-family: var(--aw-font-mono);
+        font-size: 0.85rem;
+      }
+      dl.settings dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      dl.settings dd small {
+        display: block;
+        color: var(--aw-color-muted);
+      }
+      .versions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--aw-space-2);
+        margin: 0 0 var(--aw-space-3);
+      }
+      .versions button[aria-pressed="true"] {
+        box-shadow: inset 0 -2px 0 var(--aw-color-primary);
+      }
+      .table-wrap {
+        overflow-x: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+        font-variant-numeric: tabular-nums;
+      }
+      th,
+      td {
+        text-align: right;
+        padding: var(--aw-space-1) var(--aw-space-2);
+        border-bottom: 1px solid var(--aw-color-border);
+        white-space: nowrap;
+      }
+      th:first-child,
+      td:first-child,
+      th:nth-child(2),
+      td:nth-child(2) {
+        text-align: left;
+      }
+      th {
+        color: var(--aw-color-muted);
+        font-weight: normal;
+      }
+      .row {
+        display: flex;
+        gap: var(--aw-space-2);
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      @media (max-width: 520px) {
+        .role {
+          width: auto;
+        }
+        dl.settings {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aw-account-menu></aw-account-menu>
+    <main>
+      <h1>What the model sees</h1>
+      <p class="sub">
+        Everything this agent sends the model on a turn of
+        <span id="conversation">your latest conversation</span>, in the order
+        the model reads it. <a id="back" href="/agent">Back to the agent</a>
+      </p>
+      <p id="status" class="status">Loading…</p>
+
+      <div id="content" hidden>
+        <section>
+          <div class="head">
+            <h2>Where the tokens go</h2>
+            <span id="total-size" class="size"></span>
+          </div>
+          <div id="bar" class="bar" aria-hidden="true"></div>
+          <ul id="legend" class="legend"></ul>
+          <p class="help" style="margin-top: var(--aw-space-3)">
+            Sizes marked ≈ are estimates, about four characters a token. The
+            turns table further down has the exact counts the model reported.
+            Every turn sends all of this again; the cache is what keeps that
+            cheap.
+          </p>
+        </section>
+
+        <section id="versions-section" hidden>
+          <h2>Versions</h2>
+          <p class="help">
+            What a turn sends before the conversation changed during this
+            conversation, for example when a plan was approved. Pick a version
+            to see it.
+          </p>
+          <div id="versions" class="versions"></div>
+        </section>
+
+        <section>
+          <div class="head"><h2>Settings</h2></div>
+          <dl id="settings" class="settings"></dl>
+        </section>
+
+        <section>
+          <div class="head">
+            <h2>Instructions</h2>
+            <span id="system-size" class="size"></span>
+          </div>
+          <p class="help">
+            The system prompt, in the parts it is built from. Which parts a turn
+            gets depends on the conversation and on what you allowed.
+          </p>
+          <div id="system"></div>
+        </section>
+
+        <section>
+          <div class="head">
+            <h2>Tools</h2>
+            <span id="tools-size" class="size"></span>
+          </div>
+          <p class="help">
+            What the model may call. Each tool's description and input schema is
+            sent on every turn, whether or not it is used.
+          </p>
+          <div id="tools"></div>
+        </section>
+
+        <section>
+          <div class="head">
+            <h2>Conversation</h2>
+            <span id="messages-size" class="size"></span>
+          </div>
+          <p class="help">
+            Every message so far, as the next turn would send it: what was said,
+            what the model called and what each call returned.
+          </p>
+          <div id="messages"></div>
+        </section>
+
+        <section>
+          <div class="head">
+            <h2>Turns</h2>
+            <span id="turns-size" class="size"></span>
+          </div>
+          <p class="help">
+            One row for each call to the model, as the model counted it.
+            <em>Cache read</em> is the part sent again unchanged, at a tenth of
+            the price; <em>cache write</em> is new prefix stored for the next
+            turn.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Turn</th>
+                  <th>Version</th>
+                  <th>Cache read</th>
+                  <th>Cache write</th>
+                  <th>New</th>
+                  <th>Out</th>
+                  <th>Cost</th>
+                </tr>
+              </thead>
+              <tbody id="turns"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section>
+          <div class="head">
+            <h2>The whole request</h2>
+          </div>
+          <p class="help">
+            The same as above as one JSON body, the way it goes to the model.
+            Your API key is not in it: the engine adds it on the way out.
+          </p>
+          <details id="raw" class="item">
+            <summary><span class="item-title">Show the JSON</span></summary>
+            <div class="item-body">
+              <div class="row" style="margin-bottom: var(--aw-space-2)">
+                <button id="copy-raw" class="aw-button--secondary">Copy</button>
+                <span id="copy-status" class="status"></span>
+              </div>
+              <pre id="raw-json"></pre>
+            </div>
+          </details>
+        </section>
+      </div>
+
+      <section>
+        <div class="head">
+          <h2>Skills</h2>
+          <span id="skills-size" class="size"></span>
+        </div>
+        <p class="help">
+          Instructions for particular kinds of work, shared by everyone who uses
+          this agent. Every turn sends each skill's name and description; the
+          model reads the rest when it needs it, and you can call one yourself
+          by typing <code>/</code> and its name.
+        </p>
+        <div id="skills"><p class="status">Loading…</p></div>
+      </section>
+    </main>
+    <script src="/agent/inspect.js"></script>
+  </body>
+</html>

@@ -31,6 +31,8 @@ assumed.
 | Compaction                 | Built | `COMPACT_AT_TOKENS`, at the top of a turn and nowhere else                   |
 | Prompt caching             | Built | one breakpoint, at the end of the conversation                               |
 | Project instructions       | Ahead | an asset for the deployment's text, `personalStorage` for theirs             |
+| What the model sees        | Built | `/agent/inspect`; `sent_prompts` keeps what each turn sent                   |
+| Skills a person can read   | Built | `/agent/inspect`, read-only; editing stays with `write_skill`                |
 | Attachments and images     | Built | `attachments.ts`; uploaded once to the person's Files API, held by `file_id` |
 | Commands (`/new`, `/stop`) | Built | `commands.ts`, one parser for the page and Telegram                          |
 | A skill called by name     | Built | `/<skill>` puts its instructions in the message, on the page and Telegram    |
@@ -172,7 +174,12 @@ Roughly in the order it matters.
 ### Context
 
 - **Project instructions.** An asset for the deployment's own text and a
-  `personalStorage` entry for the person's, concatenated onto `SYSTEM_PROMPT`.
+  `personalStorage` entry for the person's, as two more parts in
+  `systemPartsFor`, so the inspect page shows them with the rest; the
+  person's own text could be edited there.
+- **Editing skills from the page.** For whoever can edit this script, with a
+  skill's history and revert over `list_revisions` and `revert_script` — the
+  checkpoints item below.
 
 ### Tools
 

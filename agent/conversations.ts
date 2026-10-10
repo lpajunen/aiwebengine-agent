@@ -18,6 +18,7 @@ export const CONVERSATION_TABLES = [
   "interjections",
   "plans",
   "turn_usage",
+  "sent_prompts",
   "run_scripts",
   "runs",
 ];
