@@ -2,7 +2,7 @@
  * The commands a person types in place of a prompt.
  */
 
-import { parseCommand, skillPrompt } from "./commands.ts";
+import { parseCommand, skillPrompt, telegramCommands } from "./commands.ts";
 
 describe("parsing a command", () => {
   test("plain text is not a command", () => {
@@ -83,5 +83,51 @@ describe("calling a skill", () => {
     expect(skillPrompt("release-notes", "List.", "")).toContain(
       "the skill is the request",
     );
+  });
+});
+
+describe("the Telegram menu", () => {
+  test("/new first, then each skill as Telegram spells it", () => {
+    expect(
+      telegramCommands([
+        { name: "release-notes", description: "Write release notes." },
+      ]),
+    ).toEqual([
+      { command: "new", description: "Start a new conversation" },
+      { command: "release_notes", description: "Write release notes." },
+    ]);
+  });
+
+  test("the name Telegram sends back calls the skill", () => {
+    expect(parseCommand("/release_notes v2", ["release-notes"])).toEqual({
+      command: "skill",
+      skill: "release-notes",
+      text: "v2",
+    });
+  });
+
+  test("a name too long for Telegram and a shadowed one are left out", () => {
+    const long = "a".repeat(33);
+    const menu = telegramCommands([
+      { name: long, description: "x" },
+      { name: "new", description: "x" },
+    ]);
+    expect(menu.map((c) => c.command)).toEqual(["new"]);
+  });
+
+  test("a description is never empty and never too long", () => {
+    const [, skill] = telegramCommands([{ name: "a", description: "" }]);
+    expect(skill.description).toBe("a");
+    const [, cut] = telegramCommands([
+      { name: "b", description: "d".repeat(300) },
+    ]);
+    expect(cut.description.length).toBe(256);
+  });
+
+  test("at most a hundred entries", () => {
+    const many = [];
+    for (let i = 0; i < 150; i++)
+      many.push({ name: "s" + i, description: "x" });
+    expect(telegramCommands(many).length).toBe(100);
   });
 });

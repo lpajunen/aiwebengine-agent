@@ -94,7 +94,7 @@ import {
   withoutRefused,
 } from "./attachments.ts";
 import { renderSvg, telegramPhotoForm } from "./images.ts";
-import { parseCommand, skillPrompt } from "./commands.ts";
+import { parseCommand, skillPrompt, telegramCommands } from "./commands.ts";
 import { Route, routeMessage } from "./telegram.ts";
 import {
   CONVERSATIONS_PER_PAGE,
@@ -6134,6 +6134,12 @@ const TELEGRAM_FILE_API =
  */
 const TELEGRAM_FRESH_PREFIX = "telegram:fresh:";
 
+/**
+ * Per chat, in the person's `personalStorage`: the `/` menu last given to
+ * Telegram for it, so it is sent again only when the skills change.
+ */
+const TELEGRAM_MENU_PREFIX = "telegram:menu:";
+
 /** Telegram refuses a message over 4096 characters. */
 const MAX_TELEGRAM_CHARS = 3500;
 
@@ -6551,6 +6557,7 @@ function startTelegramRun(context: HandlerContext): void {
   const files = Array.isArray(payload.files) ? payload.files : [];
   if (!chatId) return;
   const freshKey = TELEGRAM_FRESH_PREFIX + chatId;
+  syncTelegramMenu(chatId);
 
   if (!text && files.length === 0) {
     // `/new` on its own: nothing to answer yet, so the boundary is kept for
@@ -6679,6 +6686,44 @@ function startTelegramRun(context: HandlerContext): void {
     const message = e instanceof Error ? e.message : String(e);
     quietLog(`agent: could not start a telegram run: ${message}`);
     sendTelegram(chatId, `I could not start: ${message}`);
+  }
+}
+
+/**
+ * Give this chat a `/` menu of `/new` and the skills, when it has changed.
+ *
+ * Scoped to the chat rather than set for the bot, because the bot's default
+ * menu is shown to anybody who opens it and the skill names are this
+ * deployment's. Only a private chat: in a group the menu would be every
+ * member's. Telegram allows no hyphen in a command, so skills are listed as
+ * `parseCommand` reads them back, with underscores. A failure is logged and
+ * tried again with the next message, since nothing was stored.
+ */
+function syncTelegramMenu(chatId: string): void {
+  if (chatId.indexOf("-") === 0) return;
+  const menu = JSON.stringify(telegramCommands(loadSkills()));
+  const key = TELEGRAM_MENU_PREFIX + chatId;
+  try {
+    if (personalStorage.getItem(key) === menu) return;
+    const answer = fetch(TELEGRAM_API + "setMyCommands", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commands: JSON.parse(menu),
+        scope: { type: "chat", chat_id: chatId },
+      }),
+    });
+    if (!answer.ok) {
+      quietLog(
+        `agent: telegram refused the menu: ${String(answer.body).slice(0, 200)}`,
+      );
+      return;
+    }
+    personalStorage.setItem(key, menu);
+  } catch (e) {
+    quietLog(
+      `agent: could not set the telegram menu: ${String(e).slice(0, 200)}`,
+    );
   }
 }
 

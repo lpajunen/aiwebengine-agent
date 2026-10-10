@@ -412,6 +412,13 @@ message with the words after the name, so the model follows it without first
 spending a turn on `read_skill`. The log shows what they typed. A name that is
 not a skill is an ordinary prompt, and `/new` and `/start` are never skills.
 
+In Telegram the skills are also in the `/` menu, beside `/new`. Telegram
+allows no hyphen in a command, so `release-notes` is listed as
+`/release_notes`, and either spelling calls it. The menu is set for each
+linked person's private chat when one of their messages arrives and the skills
+have changed since — not for the bot as a whole, whose menu anybody who opens
+it would see.
+
 ### The agent writes them too
 
 `write_skill` lets the agent write down a procedure it has just worked out.

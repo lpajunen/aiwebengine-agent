@@ -33,9 +33,11 @@ export function parseCommand(
   skills: readonly string[] = [],
 ): ParsedCommand {
   // `@name` is how a command addresses one bot in a Telegram group.
-  const match = /^\/([a-z0-9][a-z0-9-]*)(@\w+)?(?:\s+|$)/i.exec(text);
+  const match = /^\/([a-z0-9][a-z0-9_-]*)(@\w+)?(?:\s+|$)/i.exec(text);
   if (!match) return { command: null, text: text };
-  const name = match[1].toLowerCase();
+  // Telegram allows no hyphen in a command, so `release-notes` is offered in
+  // its menu as `release_notes`; no skill name has an underscore to confuse.
+  const name = match[1].toLowerCase().replace(/_/g, "-");
   const rest = text.slice(match[0].length).trim();
   // Own keys only: `/constructor` is a prompt, not `Object.prototype`'s.
   if (Object.prototype.hasOwnProperty.call(BUILT_IN, name)) {
@@ -60,4 +62,42 @@ export function skillPrompt(skill: string, body: string, text: string): string {
     `this request.\n\n<skill name="${skill}">\n${body.trim()}\n</skill>\n\n` +
     (text || "(Nothing more was said: the skill is the request.)")
   );
+}
+
+/** One entry in Telegram's `/` menu. */
+export interface TelegramCommand {
+  command: string;
+  description: string;
+}
+
+/** Telegram's limits on a menu: entries, name and description length. */
+const MAX_TELEGRAM_COMMANDS = 100;
+const MAX_TELEGRAM_COMMAND_NAME = 32;
+const MAX_TELEGRAM_COMMAND_DESCRIPTION = 256;
+
+/**
+ * The `/` menu for a chat: `/new`, then every skill under the name Telegram
+ * will accept. A skill whose name is too long for Telegram is left out of the
+ * menu; typed out with hyphens it still works.
+ */
+export function telegramCommands(
+  skills: readonly { name: string; description: string }[],
+): TelegramCommand[] {
+  const menu: TelegramCommand[] = [
+    { command: "new", description: "Start a new conversation" },
+  ];
+  for (const skill of skills) {
+    if (menu.length >= MAX_TELEGRAM_COMMANDS) break;
+    const command = skill.name.replace(/-/g, "_");
+    if (command.length > MAX_TELEGRAM_COMMAND_NAME) continue;
+    if (Object.prototype.hasOwnProperty.call(BUILT_IN, skill.name)) continue;
+    menu.push({
+      command: command,
+      description: (skill.description.trim() || skill.name).slice(
+        0,
+        MAX_TELEGRAM_COMMAND_DESCRIPTION,
+      ),
+    });
+  }
+  return menu;
 }
