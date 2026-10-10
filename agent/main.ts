@@ -18,6 +18,7 @@ import {
   MAX_HISTORY_ROWS,
   overHistoryLimit,
   shouldCompact,
+  spendLine,
   spendOf,
   stepsSincePrompt,
 } from "./budget.ts";
@@ -2154,6 +2155,46 @@ function finishRun(userId: string, runId: string, reason: string): void {
   // already said whatever it had to say.
   if (reason !== "end_turn") {
     notifyChannel(userId, runId, `The run stopped: ${reason}.`);
+  }
+  notifySpend(userId, runId);
+}
+
+/**
+ * Under the answer on a channel, what it cost: the page shows a spend line
+ * and a chat has nowhere else to, while the key it spends is the person's own.
+ * This prompt's turns only, not the conversation's, since that is what the
+ * person just asked for.
+ */
+function notifySpend(userId: string, runId: string): void {
+  const to = channelFor(userId, runId);
+  if (!to) return;
+  const line = spendLine(promptSpend(userId, runId), PRICES);
+  if (line) sendTelegram(to.chatId, "Spent: " + line, undefined, true);
+}
+
+/** What the turns since the conversation's latest prompt have spent. */
+function promptSpend(userId: string, runId: string) {
+  try {
+    const prompts = queryRows(
+      "activities",
+      { user_id: userId, run_id: runId, kind: "prompt" },
+      1,
+      "id",
+      "desc",
+    ) as { created_ms?: unknown }[];
+    const since = Number(prompts[0]?.created_ms ?? 0) || 0;
+    return spendOf(
+      queryRows(
+        "turn_usage",
+        { user_id: userId, run_id: runId, created_ms: { $gte: since } },
+        MOST_STEPS + 1,
+        "id",
+        "asc",
+      ),
+    );
+  } catch (e) {
+    // A missing footnote is better than a failed end to the run.
+    return emptySpend();
   }
 }
 
@@ -6250,6 +6291,7 @@ function sendTelegram(
   chatId: string,
   text: string,
   keyboard?: unknown,
+  quiet?: boolean,
 ): boolean {
   if (!chatId || !text.trim()) return false;
 
@@ -6258,6 +6300,8 @@ function sendTelegram(
     text: cut(text, MAX_TELEGRAM_CHARS),
   };
   if (keyboard) body.reply_markup = keyboard;
+  // No second buzz for a footnote to the message that just arrived.
+  if (quiet) body.disable_notification = true;
 
   try {
     const answer = fetch(TELEGRAM_API + "sendMessage", {
@@ -6791,7 +6835,12 @@ function stopTelegramRun(userId: string, chatId: string): void {
   try {
     const latest = latestChatRun(userId, chatId);
     const stopped = latest ? stopRun(userId, latest).stopped : false;
-    sendTelegram(chatId, stopped ? "Stopped." : "Nothing is working to stop.");
+    if (!latest || !stopped) {
+      sendTelegram(chatId, "Nothing is working to stop.");
+      return;
+    }
+    const line = spendLine(promptSpend(userId, String(latest.run_id)), PRICES);
+    sendTelegram(chatId, line ? "Stopped. Spent: " + line : "Stopped.");
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     sendTelegram(chatId, `I could not stop it: ${message}`);

@@ -188,3 +188,47 @@ function count(value: unknown): number {
   const n = Number(value ?? 0);
   return isFinite(n) ? n : 0;
 }
+
+/** Dollars per million tokens, by kind. */
+export interface Prices {
+  freshPerM: number;
+  cacheWritePerM: number;
+  cacheReadPerM: number;
+  outputPerM: number;
+}
+
+/** What tokens cost at these rates, in dollars. The page's `estimateCost`. */
+export function costOf(spend: Spend, prices: Prices): number {
+  return (
+    (spend.fresh * prices.freshPerM +
+      spend.wrote * prices.cacheWritePerM +
+      spend.cached * prices.cacheReadPerM +
+      spend.output * prices.outputPerM) /
+    1000000
+  );
+}
+
+/**
+ * One line saying what an answer cost, for a channel with no spend display:
+ * turns, tokens in and out, and dollars, approximate and labelled so. Empty
+ * when nothing was spent. The page's spend line, in the same words.
+ */
+export function spendLine(spend: Spend, prices: Prices): string {
+  if (spend.turns === 0) return "";
+  const parts = [
+    spend.turns === 1 ? "1 turn" : spend.turns + " turns",
+    thousands(spend.cached + spend.wrote + spend.fresh) + " in",
+    thousands(spend.output) + " out",
+  ];
+  const cost = costOf(spend, prices);
+  parts.push(
+    "≈ " +
+      (cost >= 0.01 ? "$" + cost.toFixed(2) : cost > 0 ? "<$0.01" : "$0.00"),
+  );
+  return parts.join(" · ");
+}
+
+/** 12345 as "12,345", without relying on the runtime's locale data. */
+function thousands(n: number): string {
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}

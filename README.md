@@ -586,6 +586,11 @@ its answers still reach the chat.
 (where typing `/stop` works too). A turn already in flight stops at its next
 boundary, the same as for the button.
 
+When a run ends, a quiet message under its answer says what that prompt cost —
+`Spent: 3 turns · 12,345 in · 1,678 out · ≈ $0.03` — the page's spend line in
+the same words, since the key it spent is the person's own. `/stop` says the
+same about the run it stopped.
+
 ### Setting it up
 
 Three things, none of which the script can do for itself.

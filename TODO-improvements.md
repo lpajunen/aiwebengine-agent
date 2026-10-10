@@ -93,15 +93,13 @@ assumed.
 
 ### Gaps this file has no section for
 
-Three things that belong on this list and have no section of their own.
+Two things that belong on this list and have no section of their own.
 
 - **A regression suite.** The `*.test.ts` cases cover the modules beside
   `main.ts`, not `main.ts` itself. An agent saying it saved a note it had not
   is covered at its decode layer, not at its effects; uploading, downloading
   from Telegram and serving `/agent/attachment` are not covered at all, and no
   eval task sends a picture or a document.
-- **Spend on a channel.** "Each person pays with their own key, so the bill is
-  theirs to see" is true on the page and false everywhere else.
 - **Approval provenance.** An approval can only carry out what the _approver's_
   context may hold — which is why a skill approved from Telegram is refused.
   That is a general rule and will bind every deferred action after this one.
@@ -206,9 +204,6 @@ Roughly in the order it matters.
 - **Session management.** Earlier conversations are listed and continued
   (`/agent/conversations`, a prompt with a `runId`). Forking from a turn is
   not built.
-- **Spend on a channel.** A Telegram run spends the person's key with no
-  display. `turn_usage` is written either way, so this is delivery — a line
-  under the answer.
 - **Model and effort per run.** A tier is four things that move together —
   model string, `PRICES`, the thinking/effort shape, and the minimum cacheable
   prefix (512 tokens on `claude-haiku-5-5`), which prompt caching turns on —

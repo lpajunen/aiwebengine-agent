@@ -12,9 +12,11 @@ import {
   COMPACT_AT_TOKENS,
   HISTORY_QUERY_LIMIT,
   MAX_HISTORY_ROWS,
+  costOf,
   emptySpend,
   overHistoryLimit,
   shouldCompact,
+  spendLine,
   spendOf,
   stepsFrom,
   stepsSincePrompt,
@@ -145,5 +147,49 @@ describe("spendOf", () => {
     expect(spend.cached).toBe(5);
     expect(spend.output).toBe(0);
     expect(spend.largestPrompt).toBe(5);
+  });
+});
+
+describe("the spend line", () => {
+  const prices = {
+    freshPerM: 1,
+    cacheWritePerM: 2,
+    cacheReadPerM: 0.5,
+    outputPerM: 10,
+  };
+
+  test("each kind of token at its own rate", () => {
+    const spend = {
+      turns: 1,
+      cached: 1000000,
+      wrote: 1000000,
+      fresh: 1000000,
+      output: 1000000,
+      largestPrompt: 0,
+    };
+    expect(costOf(spend, prices)).toBe(13.5);
+  });
+
+  test("turns, tokens in and out, and dollars", () => {
+    const spend = {
+      turns: 3,
+      cached: 10000,
+      wrote: 2000,
+      fresh: 345,
+      output: 1678,
+      largestPrompt: 0,
+    };
+    expect(spendLine(spend, prices)).toBe(
+      "3 turns · 12,345 in · 1,678 out · ≈ $0.03",
+    );
+  });
+
+  test("one turn, and a cost too small to show in cents", () => {
+    const spend = { ...emptySpend(), turns: 1, fresh: 10, output: 5 };
+    expect(spendLine(spend, prices)).toBe("1 turn · 10 in · 5 out · ≈ <$0.01");
+  });
+
+  test("nothing spent is nothing to say", () => {
+    expect(spendLine(emptySpend(), prices)).toBe("");
   });
 });
