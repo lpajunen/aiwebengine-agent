@@ -86,3 +86,81 @@ export function sentPromptOf(row: SentPromptRow): SentPrompt | null {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Instructions: the deployment's and the person's own
+// ---------------------------------------------------------------------------
+
+/** The deployment's instructions: a private file beside `main.ts`. */
+export const SHARED_INSTRUCTIONS_FILE = "INSTRUCTIONS.md";
+
+/** Every turn pays for these, so both are bounded. */
+export const MAX_OWN_INSTRUCTIONS_CHARS = 4000;
+export const MAX_SHARED_INSTRUCTIONS_CHARS = 8000;
+
+/** Instructions as stored and sent: one kind of newline, no outer space. */
+export function tidyInstructions(text: unknown, max: number): string {
+  return String(text ?? "")
+    .replace(/\r\n?/g, "\n")
+    .trim()
+    .slice(0, max);
+}
+
+/** Why a person's instructions cannot be saved, or null when they can. */
+export function ownInstructionsProblem(text: string): string | null {
+  if (text.length <= MAX_OWN_INSTRUCTIONS_CHARS) return null;
+  return (
+    "Your instructions are " +
+    text.length +
+    " characters; the most is " +
+    MAX_OWN_INSTRUCTIONS_CHARS +
+    ". Every turn sends them, so keep them to what applies every time."
+  );
+}
+
+/**
+ * The instruction parts of a system prompt, after everything the agent itself
+ * says. The deployment's come first and win over the person's; the person's
+ * yield to everything above them, so they can shape style and preferences but
+ * not talk a run out of asking before it changes something. A run that builds
+ * a script follows a fixed procedure and gets the deployment's only.
+ */
+export function instructionParts(
+  shared: string,
+  own: string,
+  kind: string,
+): PromptPart[] {
+  const parts: PromptPart[] = [];
+  if (shared) {
+    parts.push({
+      key: "deployment",
+      label: "This deployment's instructions",
+      why:
+        "Written by whoever runs this agent, in " +
+        SHARED_INSTRUCTIONS_FILE +
+        ".",
+      sep: "\n\n",
+      text:
+        "Instructions from whoever runs this agent. Follow them; where the " +
+        "person's own instructions disagree with them, these win.\n\n" +
+        "<deployment_instructions>\n" +
+        shared +
+        "\n</deployment_instructions>",
+    });
+  }
+  if (own && kind !== "author") {
+    parts.push({
+      key: "person",
+      label: "Your instructions",
+      why: "You wrote these. They apply to every conversation, from the prompt after you save them.",
+      sep: "\n\n",
+      text:
+        "Instructions the person wrote for every conversation with you. " +
+        "Follow them, except where they conflict with anything above.\n\n" +
+        "<person_instructions>\n" +
+        own +
+        "\n</person_instructions>",
+    });
+  }
+  return parts;
+}

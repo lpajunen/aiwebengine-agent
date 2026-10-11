@@ -51,6 +51,9 @@
         font-size: 0.85rem;
         white-space: nowrap;
       }
+      .size.error {
+        color: var(--aw-color-danger);
+      }
       .help {
         color: var(--aw-color-muted);
         font-size: 0.9rem;
@@ -228,6 +231,14 @@
         color: var(--aw-color-muted);
         font-weight: normal;
       }
+      textarea {
+        width: 100%;
+        min-height: 6rem;
+        resize: vertical;
+      }
+      #shared-block {
+        margin-top: var(--aw-space-3);
+      }
       .row {
         display: flex;
         gap: var(--aw-space-2);
@@ -253,6 +264,32 @@
         <span id="conversation">your latest conversation</span>, in the order
         the model reads it. <a id="back" href="/agent">Back to the agent</a>
       </p>
+      <section id="instructions" hidden>
+        <div class="head">
+          <h2>Your instructions</h2>
+          <span id="own-size" class="size"></span>
+        </div>
+        <p class="help">
+          What you want the agent to do in every conversation, on this page and
+          in Telegram: how to answer, what to call things, what to leave out.
+          Every turn sends them, and they apply from your next prompt.
+        </p>
+        <textarea
+          id="own-instructions"
+          aria-label="Your instructions"
+          rows="5"
+          placeholder="For example: answer in Finnish, and keep answers short unless I ask for detail."
+        ></textarea>
+        <div class="row" style="margin-top: var(--aw-space-2)">
+          <button id="save-instructions">Save</button>
+          <span id="instructions-status" class="status"></span>
+        </div>
+        <div id="shared-block">
+          <p class="block-label" id="shared-label"></p>
+          <pre id="shared-instructions" hidden></pre>
+        </div>
+      </section>
+
       <p id="status" class="status">Loading…</p>
 
       <div id="content" hidden>

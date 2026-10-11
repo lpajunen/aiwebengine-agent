@@ -73,6 +73,80 @@ function systemText(prompt) {
 // Loading
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Instructions: the person's, editable, and the deployment's, read-only
+// ---------------------------------------------------------------------------
+
+let ownMax = 4000;
+let savedOwn = "";
+
+function showOwnSize() {
+  const text = $("own-instructions").value.trim();
+  $("own-size").textContent =
+    text.length.toLocaleString("en-US") +
+    " / " +
+    ownMax.toLocaleString("en-US") +
+    " characters · " +
+    tokens(estimate(text));
+  $("own-size").classList.toggle("error", text.length > ownMax);
+  $("save-instructions").disabled = text === savedOwn || text.length > ownMax;
+}
+
+async function loadInstructions() {
+  const response = await fetch("/agent/instructions");
+  if (!response.ok) return;
+  const body = await response.json();
+  ownMax = body.max || ownMax;
+  savedOwn = body.own || "";
+  $("own-instructions").value = savedOwn;
+  $("own-instructions").maxLength = ownMax;
+  if (body.shared) {
+    $("shared-label").textContent =
+      "This deployment's instructions, from " +
+      body.sharedFile +
+      ". Where yours disagree, these win.";
+    $("shared-instructions").textContent = body.shared;
+    $("shared-instructions").hidden = false;
+  } else {
+    $("shared-label").textContent =
+      "This deployment has no instructions of its own.";
+  }
+  $("instructions").hidden = false;
+  showOwnSize();
+  if (location.hash === "#instructions") $("instructions").scrollIntoView();
+}
+
+$("own-instructions").addEventListener("input", () => {
+  $("instructions-status").textContent = "";
+  showOwnSize();
+});
+
+$("save-instructions").addEventListener("click", async () => {
+  const text = $("own-instructions").value.trim();
+  $("save-instructions").disabled = true;
+  $("instructions-status").classList.remove("error");
+  $("instructions-status").textContent = "Saving…";
+  try {
+    const response = await fetch("/agent/instructions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: text }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw new Error(body.error || "status " + response.status);
+    savedOwn = body.own;
+    $("own-instructions").value = savedOwn;
+    $("instructions-status").textContent = savedOwn
+      ? "Saved. Your next prompt uses them."
+      : "Cleared. Your next prompt goes without.";
+  } catch (e) {
+    $("instructions-status").classList.add("error");
+    $("instructions-status").textContent = "Could not save: " + e.message;
+  }
+  showOwnSize();
+});
+
 async function load() {
   const runId = new URLSearchParams(location.search).get("runId") || "";
   const [context, library] = await Promise.all([
@@ -579,6 +653,7 @@ function renderSkills() {
   }
 }
 
+loadInstructions().catch(() => {});
 load().catch((e) => {
   $("status").textContent = "Could not load: " + e;
   $("status").classList.add("error");

@@ -2,7 +2,15 @@
  * What a turn sends the model, as parts and as the record of it.
  */
 
-import { joinParts, requestMark, sentPromptOf } from "./context.ts";
+import {
+  MAX_OWN_INSTRUCTIONS_CHARS,
+  instructionParts,
+  joinParts,
+  ownInstructionsProblem,
+  requestMark,
+  sentPromptOf,
+  tidyInstructions,
+} from "./context.ts";
 
 const part = (key: string, sep: string, text: string) => ({
   key: key,
@@ -69,5 +77,52 @@ describe("a stored version read back", () => {
   test("a row that does not parse is left out", () => {
     expect(sentPromptOf({ mark: "x", system_parts: "{" })).toBe(null);
     expect(sentPromptOf({ mark: "x", system_parts: "{}" })).toBe(null);
+  });
+});
+
+describe("instructions", () => {
+  test("tidied: one kind of newline, trimmed, bounded", () => {
+    expect(tidyInstructions("  a\r\nb\rc  ", 100)).toBe("a\nb\nc");
+    expect(tidyInstructions(undefined, 100)).toBe("");
+    expect(tidyInstructions("abcdef", 3)).toBe("abc");
+  });
+
+  test("a person's are refused past the limit, saying the limit", () => {
+    expect(ownInstructionsProblem("x".repeat(MAX_OWN_INSTRUCTIONS_CHARS))).toBe(
+      null,
+    );
+    expect(
+      ownInstructionsProblem("x".repeat(MAX_OWN_INSTRUCTIONS_CHARS + 1)),
+    ).toContain(String(MAX_OWN_INSTRUCTIONS_CHARS));
+  });
+
+  test("none of either is no parts, so the prompt is unchanged", () => {
+    expect(instructionParts("", "", "chat")).toEqual([]);
+  });
+
+  test("the deployment's first, and they win", () => {
+    const parts = instructionParts("Be formal.", "Be brief.", "chat");
+    expect(parts.map((p) => p.key)).toEqual(["deployment", "person"]);
+    expect(parts[0].text).toContain("these win");
+    expect(parts[0].text).toContain(
+      "<deployment_instructions>\nBe formal.\n</deployment_instructions>",
+    );
+    expect(parts[1].text).toContain(
+      "<person_instructions>\nBe brief.\n</person_instructions>",
+    );
+    expect(parts[1].text).toContain("except where they conflict");
+  });
+
+  test("they come after everything the agent says, on their own lines", () => {
+    const parts = instructionParts("A", "B", "chat");
+    expect(joinParts(parts).indexOf("\n\n")).toBe(0);
+    expect(parts[1].sep).toBe("\n\n");
+  });
+
+  test("a script-building run gets the deployment's only", () => {
+    expect(
+      instructionParts("Be formal.", "Be brief.", "author").map((p) => p.key),
+    ).toEqual(["deployment"]);
+    expect(instructionParts("", "Be brief.", "author")).toEqual([]);
   });
 });

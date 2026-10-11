@@ -35,11 +35,17 @@ import {
 } from "./skills.ts";
 import { onlyReads, parseArgs } from "./engine.ts";
 import {
+  MAX_OWN_INSTRUCTIONS_CHARS,
+  MAX_SHARED_INSTRUCTIONS_CHARS,
   PromptPart,
+  SHARED_INSTRUCTIONS_FILE,
   SentPrompt,
+  instructionParts,
   joinParts,
+  ownInstructionsProblem,
   requestMark,
   sentPromptOf,
+  tidyInstructions,
 } from "./context.ts";
 import {
   AUTHOR_PROMPT,
@@ -427,8 +433,16 @@ interface RunRow {
   nudges?: number;
   step_base?: number;
   title?: string;
+  shared_instr?: string;
+  own_instr?: string;
   created_ms?: number;
   updated_ms?: number;
+}
+
+/** The deployment's instructions and the person's, as one prompt froze them. */
+interface Instructions {
+  shared: string;
+  own: string;
 }
 
 /** A plan put to the person, before and after they answer it. */
@@ -1178,6 +1192,25 @@ function init(): void {
       // The conversation's first prompt, for the list. Filled the first time
       // the list needs it, so a run's own path does not have to know.
       { name: "title", type: "text" },
+      // The deployment's instructions and the person's, as they were when
+      // the latest prompt began. Frozen there so an edit lands at the next
+      // prompt rather than partway through a run, and so the cached prefix
+      // does not move under a run that is working.
+      { name: "shared_instr", type: "text" },
+      { name: "own_instr", type: "text" },
+    ],
+  });
+
+  // What a person tells the agent to do in every conversation. A table
+  // rather than a `personalStorage` key because an approved `run_js` holds
+  // `write_storage`: a page the model fetched could otherwise have it write
+  // an instruction every later run obeys. Nothing the model runs holds
+  // `write_script_data`, so only the person's own request writes this.
+  database.ensureTable("instructions", {
+    columns: [
+      { name: "user_id", type: "text" },
+      { name: "body", type: "text" },
+      { name: "updated_ms", type: "bigint" },
     ],
   });
 
@@ -1352,6 +1385,19 @@ function init(): void {
     method: "GET",
     tags: ["Agent"],
     summary: "What one conversation sends the model: prompt, tools, messages",
+  });
+
+  routeRegistry.registerRoute("/agent/instructions", {
+    handler: "readInstructions",
+    method: "GET",
+    tags: ["Agent"],
+    summary: "Your instructions for every conversation, and the deployment's",
+  });
+  routeRegistry.registerRoute("/agent/instructions", {
+    handler: "writeInstructions",
+    method: "POST",
+    tags: ["Agent"],
+    summary: "Save your instructions for every conversation; empty clears them",
   });
 
   routeRegistry.registerRoute("/agent/skills", {
@@ -1595,7 +1641,7 @@ function startRun(context: HandlerContext): HttpResponse {
       maxAttempts: 1,
     });
     if (existing) {
-      reopenRun(existing, task.taskId, spoken);
+      reopenRun(userId, existing, task.taskId, spoken);
     } else {
       openRun(userId, runId, task.taskId, kind);
     }
@@ -2848,6 +2894,62 @@ const MAX_INSPECT_TURNS = 200;
 const MAX_INSPECT_PROMPTS = 20;
 
 /**
+ * The person's own instructions and the deployment's, for the inspect page.
+ */
+function readInstructions(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+  return json(200, {
+    own: ownInstructions(userId),
+    shared: tidyInstructions(
+      readAssetText(SHARED_INSTRUCTIONS_FILE) ?? "",
+      MAX_SHARED_INSTRUCTIONS_CHARS,
+    ),
+    sharedFile: SHARED_INSTRUCTIONS_FILE,
+    max: MAX_OWN_INSTRUCTIONS_CHARS,
+  });
+}
+
+/**
+ * Saves what the person tells the agent to do in every conversation; empty
+ * clears it. Taken up by the next prompt, not by a run that is working. No
+ * plan/act gate, for the reason the notes have none: this is the person, in
+ * their own request, editing their own text.
+ */
+function writeInstructions(context: HandlerContext): HttpResponse {
+  const userId = signedInUser(context);
+  if (!userId) return json(401, { error: "Sign in first." });
+
+  let text = "";
+  try {
+    const body = (context.request?.json() ?? {}) as { text?: string };
+    text = String(body.text ?? "")
+      .replace(/\r\n?/g, "\n")
+      .trim();
+  } catch (e) {
+    return json(400, { error: "Expected a JSON body." });
+  }
+  const problem = ownInstructionsProblem(text);
+  if (problem) return json(400, { error: problem });
+
+  try {
+    database.transaction(() => {
+      database.deleteWhere("instructions", { user_id: userId });
+      if (text) {
+        database.insert("instructions", {
+          user_id: userId,
+          body: text,
+          updated_ms: Date.now(),
+        });
+      }
+    });
+  } catch (e) {
+    return json(500, { error: "Could not save your instructions: " + e });
+  }
+  return json(200, { own: text });
+}
+
+/**
  * Everything one conversation sends the model, for the inspect page: each
  * version of the system prompt, tools and settings its turns sent, which
  * version each turn used and what it cost, and the conversation itself as the
@@ -3271,7 +3373,9 @@ function callModel(
   const kind: RunKind = kindOf(userId, runId);
   // Everything before the conversation, built once so what is sent and what
   // is kept for the inspect page are the same values.
-  const parts = summarising ? [] : systemPartsFor(skills, mode, kind);
+  const parts = summarising
+    ? []
+    : systemPartsFor(skills, mode, kind, frozenInstructions(userId, runId));
   const toolList = summarising ? undefined : toolsFor(skills, mode, kind);
   const settings = {
     model: MODEL,
@@ -3759,6 +3863,7 @@ function openRun(
   taskId: string,
   kind: string,
 ): void {
+  const instructions = instructionsNow(userId);
   // A run without a row still runs; it just cannot be cancelled or counted.
   // Losing the answer to keep the bookkeeping would be the wrong way round,
   // so a failure here is logged and not raised.
@@ -3775,6 +3880,8 @@ function openRun(
         run_kind: kind,
         task_id: taskId,
         steps: 0,
+        shared_instr: instructions.shared,
+        own_instr: instructions.own,
         created_ms: Date.now(),
         updated_ms: Date.now(),
       }),
@@ -3783,12 +3890,62 @@ function openRun(
 }
 
 /**
+ * The deployment's instructions and the person's as they are now, for a
+ * prompt to freeze. Either one unreadable is none: a turn without them is
+ * better than no turn.
+ */
+function instructionsNow(userId: string): Instructions {
+  return {
+    shared: tidyInstructions(
+      readAssetText(SHARED_INSTRUCTIONS_FILE) ?? "",
+      MAX_SHARED_INSTRUCTIONS_CHARS,
+    ),
+    own: ownInstructions(userId),
+  };
+}
+
+/** What the person has told the agent to do in every conversation. */
+function ownInstructions(userId: string): string {
+  try {
+    const rows = queryRows(
+      "instructions",
+      { user_id: userId },
+      1,
+      "id",
+      "desc",
+    ) as { body?: unknown }[];
+    return rows.length > 0
+      ? tidyInstructions(rows[0].body, MAX_OWN_INSTRUCTIONS_CHARS)
+      : "";
+  } catch (e) {
+    console.log("agent: could not read instructions: " + String(e));
+    return "";
+  }
+}
+
+/** The instructions the run's latest prompt froze. */
+function frozenInstructions(userId: string, runId: string): Instructions {
+  const row = runRow(userId, runId);
+  return {
+    shared: String(row?.shared_instr ?? ""),
+    own: String(row?.own_instr ?? ""),
+  };
+}
+
+/**
  * Give a finished conversation its next prompt: running again, with the turn
- * budget of a fresh prompt and no leftover failure counts. Back in plan mode,
+ * budget of a fresh prompt, no leftover failure counts and the instructions
+ * as they are now. Back in plan mode,
  * because an approval was for the plan it was given, not for what is asked
  * next.
  */
-function reopenRun(row: RunRow, taskId: string, spoken: number): void {
+function reopenRun(
+  userId: string,
+  row: RunRow,
+  taskId: string,
+  spoken: number,
+): void {
+  const instructions = instructionsNow(userId);
   writeRow(
     () =>
       database.update("runs", Number(row.id), {
@@ -3797,6 +3954,8 @@ function reopenRun(row: RunRow, taskId: string, spoken: number): void {
         task_id: taskId,
         steps: 0,
         step_base: spoken,
+        shared_instr: instructions.shared,
+        own_instr: instructions.own,
         nudges: 0,
         fail_sig: "",
         updated_ms: Date.now(),
@@ -4439,7 +4598,9 @@ function systemPartsFor(
   skills: Skill[],
   mode: RunMode,
   kind: RunKind,
+  instructions: Instructions,
 ): PromptPart[] {
+  const told = instructionParts(instructions.shared, instructions.own, kind);
   if (kind === "author") {
     return [
       {
@@ -4456,7 +4617,7 @@ function systemPartsFor(
         sep: "\n",
         text: "Answer by calling write_response; that is how the person sees what you say.",
       },
-    ];
+    ].concat(told);
   }
 
   const parts: PromptPart[] = [
@@ -4550,7 +4711,7 @@ function systemPartsFor(
         .join("\n"),
     });
   }
-  return parts;
+  return parts.concat(told);
 }
 
 // ============================================================================
@@ -7047,7 +7208,7 @@ function startTelegramRun(context: HandlerContext): void {
       maxAttempts: 1,
     });
     if (existing) {
-      reopenRun(existing, next.taskId, spoken);
+      reopenRun(userId, existing, next.taskId, spoken);
       return;
     }
     openRun(userId, runId, next.taskId, "chat");

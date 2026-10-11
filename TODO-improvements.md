@@ -30,7 +30,7 @@ assumed.
 | Memory the person can read | Built | `/agent/memories`, a panel above the log                                     |
 | Compaction                 | Built | `COMPACT_AT_TOKENS`, at the top of a turn and nowhere else                   |
 | Prompt caching             | Built | one breakpoint, at the end of the conversation                               |
-| Project instructions       | Ahead | an asset for the deployment's text, `personalStorage` for theirs             |
+| Project instructions       | Built | `INSTRUCTIONS.md` and the `instructions` table, frozen per prompt            |
 | What the model sees        | Built | `/agent/inspect`; `sent_prompts` keeps what each turn sent                   |
 | Skills a person can read   | Built | `/agent/inspect`, read-only; editing stays with `write_skill`                |
 | Attachments and images     | Built | `attachments.ts`; uploaded once to the person's Files API, held by `file_id` |
@@ -173,10 +173,9 @@ Roughly in the order it matters.
 
 ### Context
 
-- **Project instructions.** An asset for the deployment's own text and a
-  `personalStorage` entry for the person's, as two more parts in
-  `systemPartsFor`, so the inspect page shows them with the rest; the
-  person's own text could be edited there.
+- **Instructions per conversation.** The deployment and the person have
+  theirs; a conversation, or a project grouping several, has none. It waits
+  on deciding what a project is.
 - **Editing skills from the page.** For whoever can edit this script, with a
   skill's history and revert over `list_revisions` and `revert_script` — the
   checkpoints item below.

@@ -26,6 +26,8 @@ for anybody's tokens.
   version of the system prompt in its parts, the tools and the settings, the
   turns that sent each, and the messages. `GET /agent/inspect` is the page.
 - `GET /agent/skills` — every skill with its full text, read-only.
+- `GET|POST /agent/instructions` — the person's instructions for every
+  conversation, and the deployment's; posting empty text clears theirs.
 - `GET /agent/events` — SSE; activity as it happens, for this person only.
 - `GET /agent/history` — the log, so a refresh loses nothing.
 - `POST /agent/cancel` — stops a run; `POST /agent/say` speaks into one.
@@ -564,6 +566,31 @@ it in on the way out.
 Skills are shown and not edited here. A skill changes the agent for everyone,
 so changing one stays with `write_skill` and its approval, or with whoever can
 edit this script.
+
+## Instructions
+
+Two texts join the system prompt after everything the agent says itself:
+
+- **The deployment's,** in `agent/INSTRUCTIONS.md` — a private file, edited
+  by whoever can edit this script, at most 8,000 characters. No file is no
+  instructions.
+- **The person's own,** written in "Your instructions" on the inspect page
+  (also in the account menu), at most 4,000 characters.
+
+The deployment's come first and win where the two disagree; the person's
+yield to everything above them, so they shape style and preferences but cannot
+talk a run out of asking before it changes something. A run that builds a
+script gets the deployment's only, since it follows a fixed procedure.
+
+Both are **frozen when a prompt begins**, on the run's row (`shared_instr`,
+`own_instr`): an edit applies from the next prompt, never partway through a
+run, and the cached prefix does not move under a run that is working.
+
+The person's text is a table, `instructions`, rather than a `personalStorage`
+key. An approved `run_js` holds `write_storage`, so a page the model fetched
+could otherwise have it plant an instruction every later run obeys. Nothing
+the model runs holds `write_script_data`; only the person's own request writes
+the table. The model has no tool for it either.
 
 ## When a run misbehaves
 
