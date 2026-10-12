@@ -111,10 +111,14 @@ export const PLAN_CAPABILITIES: Capability[] = [
  * hold every person's rows, not just this one's), but this is the reason that
  * does not soften with time.
  *
- * `enqueue_tasks` and `send_messages` are absent for a smaller reason: a turn
- * that can start work is a turn that can outlive the approval it was given,
- * and neither has been asked for yet. They are available to add; the one above
- * is not.
+ * `enqueue_tasks` is absent for a smaller reason: a turn that can start work
+ * is a turn that can outlive the approval it was given, and it has not been
+ * asked for yet. It is available to add; the one above is not. Neither is
+ * `write_script_storage`, for the reason `write_script_data` is not:
+ * `scriptStorage` is state every person's runs read, and one person's
+ * approval is not a reason to change it.
+ *
+ * `write_storage` is the person's own `personalStorage` and nothing else.
  *
  * `write_storage` arriving without `read_storage` is the pair deliberately
  * broken rather than half-built. A write is not a way out, so exfiltration

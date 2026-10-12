@@ -110,17 +110,6 @@ Two things that belong on this list and have no section of their own.
 
 Roughly in the order it matters.
 
-### `write_storage` covers both stores
-
-An approved run holds `write_storage`, and the engine gates `scriptStorage`
-with it as well as the person's notes, so model-written code can write the
-script's state for everyone. Nothing this agent trusts is kept there — the
-skill index is a table and the webhook secret a script secret — and the
-backfill mark is the one value left, whose worst case is a skipped one-time
-migration. The general fix is the engine's: a person's approval is not a
-reason to write state every person shares, so `scriptStorage` writes want a
-capability of their own.
-
 ### Where `run_js` may send, what is left
 
 `run_js` passes `hosts` (`hosts.ts`): what the person named, their

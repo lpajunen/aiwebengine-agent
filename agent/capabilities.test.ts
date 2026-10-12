@@ -64,6 +64,10 @@ describe("what an approval buys", () => {
     expect(ACT_CAPABILITIES).not.toContain("write_script_data");
   });
 
+  test("never write_script_storage, which every person's runs read", () => {
+    expect(ACT_CAPABILITIES).not.toContain("write_script_storage");
+  });
+
   test("does not hand back the read that approval was never about", () => {
     expect(ACT_CAPABILITIES).not.toContain("read_storage");
     expect(ACT_CAPABILITIES).not.toContain("read_secrets");

@@ -427,9 +427,9 @@ existed, byte for byte, and is not offered `read_skill` at all.
 
 Two ceilings: the index names at most 64 skills, and a body is cut at 32,000
 characters. The index is rebuilt only when a skill file changes — it is kept
-in `scriptStorage` under a fingerprint of the skill files and their
-modification times, so the steady state is two asset reads a turn rather than
-one per skill.
+in the `skill_index` table under a fingerprint of the skill files and their
+modification times, so the steady state is two reads a turn rather than one
+per skill.
 
 ### Calling one by name
 

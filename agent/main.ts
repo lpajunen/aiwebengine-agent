@@ -1223,8 +1223,8 @@ function init(): void {
   // an instruction every later run obeys. Nothing the model runs holds
   // `write_script_data`, so only the person's own request writes this.
   // The skill index `loadSkills` builds, keyed by a fingerprint of the
-  // files. Here rather than in `scriptStorage`, which an approved `run_js`
-  // can write, since the index goes into every person's system prompt.
+  // files. It goes into every person's system prompt, so it lives where only
+  // this script's own code writes: no `run_js` holds `write_script_data`.
   database.ensureTable("skill_index", {
     columns: [
       { name: "mark_hash", type: "text" },
@@ -4453,10 +4453,9 @@ function listAssetInfo(): FileInfo[] {
  * full, so a hash collision costs a rebuild rather than serving a stale
  * library.
  *
- * A table and not `scriptStorage`, because this index goes into every
- * person's system prompt and an approved `run_js` holds `write_storage`,
- * which the engine also lets write `scriptStorage`. No `run_js` holds
- * `write_script_data`, so only this script's own code writes here.
+ * A table, because this index goes into every person's system prompt: no
+ * `run_js` holds `write_script_data`, so only this script's own code writes
+ * it.
  */
 function loadSkills(): Skill[] {
   const skillFiles: FileInfo[] = [];
@@ -7006,8 +7005,7 @@ function handleTelegram(context: HandlerContext): HttpResponse {
  * verify that a message came from the sender it names.
  *
  * Compared host-side by `crypto.secretEquals`, against a script secret: the
- * value never enters JavaScript, and nothing a run can write reaches it — not
- * `scriptStorage`, which an approved `run_js` can write. A webhook secret the
+ * value never enters JavaScript and no run can write it. A webhook secret the
  * model could set would be a way to send messages as anyone who has linked a
  * chat.
  */
