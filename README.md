@@ -782,3 +782,8 @@ npx tsc -p tsconfig.json
 engine itself at `/engine/types/v{version}/aiwebengine.d.ts` — refresh it from
 the engine you deploy to, since several of the limits in its comments are that
 deployment's configuration.
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at
+your option.
