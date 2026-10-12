@@ -683,17 +683,13 @@ write_secret script=<this script> key=TELEGRAM_BOT_TOKEN value=<token>
 ```
 
 **2. A webhook secret**, which Telegram echoes back on every call so the
-script can tell a real delivery from a forged one. It lives in `scriptStorage`
-for now; `crypto.secretEquals` could compare a stored secret host-side, and
-moving it there is open work (`TODO-improvements.md`). `run_js` holds no
-`read_storage`, so
-model-written code cannot read it back; what it is worth is bounded anyway,
-since a forged delivery still has to name a sender somebody has linked.
-Generate something long and random, then:
+script can tell a real delivery from a forged one. It is a script secret,
+compared host-side with `crypto.secretEquals`, so the value never enters
+JavaScript and nothing a run can write reaches it. Generate something long
+and random, then:
 
-```js
-// eval_script, as an administrator
-scriptStorage.setItem("telegram:webhook_secret", "<a long random string>");
+```text
+write_secret script=<this script> key=TELEGRAM_WEBHOOK_SECRET value=<a long random string>
 ```
 
 **3. Point Telegram at the route**, passing the same secret:
