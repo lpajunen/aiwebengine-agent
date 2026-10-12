@@ -1,6 +1,7 @@
 ---
 name: release-notes
 description: Generate release notes by reading recent commits, grouping by user-facing changes rather than files, and ending with action items.
+hosts: api.github.com
 ---
 
 ## When to use

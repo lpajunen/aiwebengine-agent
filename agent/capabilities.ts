@@ -56,8 +56,9 @@
  * - **`read_storage`.** It covers both stores: `personalStorage`, which is
  *   this person's notes, and `scriptStorage`, which holds the Telegram
  *   webhook's shared secret. Either beside `use_network` is private data and a
- *   way out inside one execution, and without a host list the way out has no
- *   destination: "may call the network" means "may call anything". Notes reach the loop through `recall` and `list_memories`
+ *   way out inside one execution. The host list narrows the way out to what
+ *   the person named, and a site they named may still be one anybody can
+ *   post to and read back from. Notes reach the loop through `recall` and `list_memories`
  *   instead. That costs a turn and buys the property worth having — code
  *   cannot walk the store by itself, so a note only reaches a URL if the
  *   *model* carries it there through the transcript, in text a person can read
@@ -73,11 +74,12 @@
  * What is left of the risk. Untrusted content arrives — through anything the
  * code fetches, and through a chat — and is read by a turn holding
  * `use_network`. Nothing beside it can *read* private data, so the trifecta is
- * two legs here rather than three. Closing the last one is naming the hosts
- * the code may reach: `sandbox.run` takes `hosts`, and choosing the list is the
- * first item of open work in `TODO-improvements.md`. Who sent a message is not
- * the question: a fetched page is untrusted content too, and an unknown sender
- * never gets a run, since `enqueueFrom` resolves a stranger to nobody.
+ * two legs here rather than three, and the third is bounded too: `run_js`
+ * passes `sandbox.run` the hosts the person or the deployment named
+ * (`hosts.ts`), so what a note can be carried to is not the fetched page's
+ * choice. Who sent a message is not the question: a fetched page is untrusted
+ * content too, and an unknown sender never gets a run, since `enqueueFrom`
+ * resolves a stranger to nobody.
  *
  * Intersected with `sandbox.held()` rather than passed as written: `run` throws
  * when asked to keep something the caller does not hold, and a delegation grant

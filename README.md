@@ -101,6 +101,18 @@ supplies the rest of. So code gets a note as a literal that a `recall`
 fetched, which costs a turn and means a note only leaves if the model itself
 carries it.
 
+Nor can it send anywhere it likes. `run_js` passes `sandbox.run` a `hosts`
+list, which the engine checks on every request and every redirect hop: the
+hosts the person named in this conversation's prompts, in what they said
+while it worked and in their notes on a decision, those named in their
+instructions and the deployment's, and those a skill declares (`hosts.ts`).
+What a page, a document or the model itself names adds nothing, so a fetched
+page can no longer choose where a note goes. A named host brings its `www.`
+twin and nothing wider. When code is refused a host, the model is told to ask
+the person, and their answer makes it reachable. No model provider is on the
+list: the code holds no key, and a provider's file store would be a way out
+like any other.
+
 The model is `claude-haiku-5-5`, chosen on cost and on fitting the turn budget.
 Moving to another tier is more than the `MODEL` string — the thinking form,
 `output_config.effort` and the server-side refusal fallback differ by tier, and
@@ -393,6 +405,12 @@ when the model asks for it. That is what makes a large library affordable —
 forty skills cost forty lines until one of them is wanted. A `SKILL.md` may
 point at files beside it (`policy.md` above) and `read_skill` will fetch those
 too, from that folder and nowhere else.
+
+A skill whose code calls an API names the host in its front matter —
+`hosts: api.github.com, *.example.com` — and `run_js` may then reach it on
+every run, whether or not the person mentioned it. It is the one place a
+wildcard is accepted, and `write_skill` cannot write the line, so only
+whoever deploys the script decides it.
 
 Write one with the engine's own asset tools:
 

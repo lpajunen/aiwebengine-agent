@@ -110,21 +110,27 @@ Two things that belong on this list and have no section of their own.
 
 Roughly in the order it matters.
 
-### Where `run_js` may send
+### What an approved `run_js` can write in `scriptStorage`
 
-Untrusted content reaches a run through anything `run_js` fetches, and the same
-call can send. **Exfiltration needs no write capability**, so the defence is the
-destination, not the data: `sandbox.run(source, { capabilities, hosts })` bounds
-where a sub-execution may go, checked on every redirect hop and on `McpClient`.
-`run_js` does not pass `hosts` yet. The list is the whole of the value — too
-wide buys nothing, too narrow stops the model doing what it was asked; the shape
-that probably fits is the model provider plus whatever the person's own prompt
-named.
+An approved run holds `write_storage`, and the engine gates both stores with
+it, so model-written code can write `scriptStorage` as well as the person's
+notes. The skill index is cached there under a key anyone can compute
+(`skills:` and a hash of the file list), and every later run, for every
+person, puts that index in its system prompt. So a page fetched during one
+approved run could leave instructions in everyone's next prompt. The Telegram
+webhook secret lives there too, which is the item below. Either the engine
+splits `write_storage` by store, or the agent keeps nothing in
+`scriptStorage` that a prompt or a check trusts. Skill hosts are already read
+from the files, not from this cache.
 
-Until then the rule `capabilitiesFor` encodes stands: **nothing that reads
-private data shares an execution with `use_network`** — which is why `run_js`
-holds no `read_storage`, and notes reach code only as literals the model
-carries through the transcript, in text the activity log shows.
+### Where `run_js` may send, what is left
+
+`run_js` passes `hosts` (`hosts.ts`): what the person named, their
+instructions, the deployment's, and each skill's `hosts:` line. Two limits
+stay. A host the person named may be a place anybody can post to and read
+back from, which is why `run_js` still holds no `read_storage`: **nothing
+that reads private data shares an execution with `use_network`**. And a host
+in text the person pasted counts as one they named.
 
 ### The Telegram webhook secret
 
@@ -183,8 +189,9 @@ Roughly in the order it matters.
 ### Tools
 
 - **Mounting a third-party MCP server.** `McpClient` is in the API. It imports
-  untrusted content into a run that can reach the network, so it comes after
-  the host list above.
+  untrusted content into a run that can reach the network. `McpClient` is
+  bounded by the same host list, so a server is mounted where the person
+  named it.
 - **No stored token for this engine's `/mcp`.** The engine's tools are reached
   through the `engine` global under the delegation grant. Mounting this
   engine's `/mcp` with `new McpClient(url, secret)` instead would let a
@@ -410,8 +417,8 @@ Not optional for this agent, because it has channels.
 data, untrusted content, and the ability to communicate externally. Any two are
 survivable; all three together are not. This agent has all three — private
 notes, anything `run_js` fetches or a channel delivers, and the network — which
-is why [where `run_js` may send](#where-run_js-may-send) is the first item of
-open work.
+is why `run_js` holds no `read_storage` and reaches only the hosts a person or
+the deployment named ([what is left](#where-run_js-may-send-what-is-left)).
 
 **CaMeL (DeepMind) and the dual-LLM pattern** are the defences that are
 structural — a separation that holds regardless of what the untrusted text says
