@@ -30,8 +30,8 @@ describe("what a planning turn may do", () => {
   });
 
   test("cannot read storage, which beside the network is a way out", () => {
-    // personalStorage is this person's notes and scriptStorage holds the
-    // Telegram webhook's shared secret. Either one plus use_network is
+    // personalStorage is this person's notes and scriptStorage is the
+    // script's own state for everyone. Either one plus use_network is
     // private data and an unbounded destination in a single execution.
     expect(PLAN_CAPABILITIES).not.toContain("read_storage");
   });

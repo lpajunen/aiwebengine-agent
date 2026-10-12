@@ -1222,6 +1222,17 @@ function init(): void {
   // `write_storage`: a page the model fetched could otherwise have it write
   // an instruction every later run obeys. Nothing the model runs holds
   // `write_script_data`, so only the person's own request writes this.
+  // The skill index `loadSkills` builds, keyed by a fingerprint of the
+  // files. Here rather than in `scriptStorage`, which an approved `run_js`
+  // can write, since the index goes into every person's system prompt.
+  database.ensureTable("skill_index", {
+    columns: [
+      { name: "mark_hash", type: "text" },
+      { name: "mark", type: "text" },
+      { name: "skills", type: "text" },
+    ],
+  });
+
   database.ensureTable("instructions", {
     columns: [
       { name: "user_id", type: "text" },
@@ -4435,11 +4446,17 @@ function listAssetInfo(): FileInfo[] {
  * Reading every SKILL.md to learn its description would be one asset read per
  * skill per turn, which is affordable at three skills and not at forty — and
  * "affordable at forty" is the entire argument for progressive disclosure. So
- * the built index is kept in `scriptStorage` under a fingerprint of the skill
- * files and their modification times: two reads per turn in the steady state,
- * and a rebuild exactly when a skill is added, edited or removed. The
- * fingerprint is stored alongside the index and compared in full, so a hash
- * collision costs a rebuild rather than serving a stale library.
+ * the built index is kept in the `skill_index` table under a fingerprint of
+ * the skill files and their modification times: two reads per turn in the
+ * steady state, and a rebuild exactly when a skill is added, edited or
+ * removed. The fingerprint is stored alongside the index and compared in
+ * full, so a hash collision costs a rebuild rather than serving a stale
+ * library.
+ *
+ * A table and not `scriptStorage`, because this index goes into every
+ * person's system prompt and an approved `run_js` holds `write_storage`,
+ * which the engine also lets write `scriptStorage`. No `run_js` holds
+ * `write_script_data`, so only this script's own code writes here.
  */
 function loadSkills(): Skill[] {
   const skillFiles: FileInfo[] = [];
@@ -4456,15 +4473,22 @@ function loadSkills(): Skill[] {
     marks.push(file.path + "@" + String(file.updatedAt ?? 0));
   }
   const mark = marks.join(",");
-  const key = "skills:" + shortHash(mark);
+  const key = shortHash(mark);
 
   try {
-    const stored = scriptStorage.getItem(key);
-    if (stored) {
-      const entry = JSON.parse(stored) as { mark?: string; skills?: Skill[] };
-      if (entry.mark === mark && Array.isArray(entry.skills)) {
-        return entry.skills;
-      }
+    const rows = queryRows(
+      "skill_index",
+      { mark_hash: key },
+      1,
+      "id",
+      "desc",
+    ) as {
+      mark?: unknown;
+      skills?: unknown;
+    }[];
+    if (rows.length > 0 && rows[0].mark === mark) {
+      const skills = JSON.parse(String(rows[0].skills ?? "")) as Skill[];
+      if (Array.isArray(skills)) return skills;
     }
   } catch (e) {
     // A cache that cannot be read is one to rebuild, not to fail over.
@@ -4483,7 +4507,16 @@ function loadSkills(): Skill[] {
   }
 
   try {
-    scriptStorage.setItem(key, JSON.stringify({ mark: mark, skills: skills }));
+    // One library at a time: the index of files that no longer exist is never
+    // asked for again.
+    database.transaction(() => {
+      database.deleteWhere("skill_index", { id: { $gt: 0 } });
+      database.insert("skill_index", {
+        mark_hash: key,
+        mark: mark,
+        skills: JSON.stringify(skills),
+      });
+    });
   } catch (e) {
     // Storing is an optimisation. Failing to store costs a rebuild next turn.
   }
@@ -6303,9 +6336,9 @@ function personsWords(userId: string, runId: string): string[] {
 }
 
 /**
- * Each skill's `hosts:` line, read from the files rather than from the cached
- * index: that cache is in `scriptStorage`, which an approved `run_js` can
- * write.
+ * Each skill's `hosts:` line, read from the files themselves: they are what
+ * the deployment wrote, and a list of where code may send is worth an asset
+ * read per skill.
  */
 function skillHosts(): string[] {
   const hosts: string[] = [];
@@ -6741,21 +6774,18 @@ const TELEGRAM_TOKEN_SECRET = "TELEGRAM_BOT_TOKEN";
 /**
  * The token Telegram echoes back in `X-Telegram-Bot-Api-Secret-Token`.
  *
- * In `scriptStorage`, which this script can read — and so anything running
- * as this script with `read_storage` can. `run_js` holds no `read_storage`.
- * `crypto.secretEquals` compares a stored secret without returning it, so
- * this can move to `secretStorage`; that is open work in
- * `TODO-improvements.md`, since it changes the setup instructions.
+ * A script secret, compared host-side by `crypto.secretEquals`, so the value
+ * never enters JavaScript. The webhook request has nobody signed in, so no
+ * person's secret of the same name can stand in for it.
  *
- * What it is worth is bounded, which is what made that survivable. It
- * authenticates inbound calls and unlocks nothing outbound: somebody holding
- * it can pretend to be Telegram, but `enqueueFrom` still refuses a sender
- * nobody has linked, the run still belongs to whoever linked it, and the
- * per-link budget still applies. Losing it means forged messages from a
- * sender who already trusts this bot — not access to the bot, and not access
- * to anybody's account.
+ * What it guards: somebody holding it can pretend to be Telegram. `enqueueFrom`
+ * still refuses a sender nobody has linked and the run still belongs to
+ * whoever linked it, so losing it means forged messages from a sender who
+ * already trusts this bot — not access to the bot, and not access to
+ * anybody's account. Forged messages from a linked sender are still messages
+ * as that person, which is why nothing a run can write may reach it.
  */
-const TELEGRAM_WEBHOOK_SECRET_KEY = "telegram:webhook_secret";
+const TELEGRAM_WEBHOOK_SECRET = "TELEGRAM_WEBHOOK_SECRET";
 
 /**
  * The API base, with the token where Telegram insists on having it.
@@ -6975,28 +7005,26 @@ function handleTelegram(context: HandlerContext): HttpResponse {
  * documentation is explicit that checking it is the script's job: it cannot
  * verify that a message came from the sender it names.
  *
- * Compared whole rather than in constant time. The comparison is against a
- * value an attacker cannot see and must guess in full, over a network path
- * whose jitter dwarfs the difference a short-circuiting compare leaks; and
- * the string comes out of `scriptStorage` on every call, so the timing is not
- * dominated by the compare in any case.
+ * Compared host-side by `crypto.secretEquals`, against a script secret: the
+ * value never enters JavaScript, and nothing a run can write reaches it — not
+ * `scriptStorage`, which an approved `run_js` can write. A webhook secret the
+ * model could set would be a way to send messages as anyone who has linked a
+ * chat.
  */
 function telegramCallIsGenuine(context: HandlerContext): boolean {
-  let expected = "";
-  try {
-    expected = String(scriptStorage.getItem(TELEGRAM_WEBHOOK_SECRET_KEY) ?? "");
-  } catch (e) {
-    return false;
-  }
-  // Unconfigured means closed. An engine with no secret stored must not
-  // accept every caller that omits the header.
-  if (!expected) return false;
-
   const headers = context.request?.headers;
   const offered = headers
     ? String(headers["x-telegram-bot-api-secret-token"] ?? "")
     : "";
-  return offered !== "" && offered === expected;
+  if (!offered) return false;
+  try {
+    return crypto.secretEquals(TELEGRAM_WEBHOOK_SECRET, offered);
+  } catch (e) {
+    // No secret stored is a deployment that was never finished, and closed:
+    // an engine without one must not accept every caller.
+    quietLog("agent: the Telegram webhook secret is not set: " + String(e));
+    return false;
+  }
 }
 
 /** A message from a person. */

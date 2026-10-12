@@ -54,8 +54,8 @@
  *   so granting it would let one person's turn read another's conversation and
  *   hand it back as a tool result.
  * - **`read_storage`.** It covers both stores: `personalStorage`, which is
- *   this person's notes, and `scriptStorage`, which holds the Telegram
- *   webhook's shared secret. Either beside `use_network` is private data and a
+ *   this person's notes, and `scriptStorage`, the script's own state for
+ *   everyone. Either beside `use_network` is private data and a
  *   way out inside one execution. The host list narrows the way out to what
  *   the person named, and a site they named may still be one anybody can
  *   post to and read back from. Notes reach the loop through `recall` and `list_memories`

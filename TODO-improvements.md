@@ -110,18 +110,16 @@ Two things that belong on this list and have no section of their own.
 
 Roughly in the order it matters.
 
-### What an approved `run_js` can write in `scriptStorage`
+### `write_storage` covers both stores
 
-An approved run holds `write_storage`, and the engine gates both stores with
-it, so model-written code can write `scriptStorage` as well as the person's
-notes. The skill index is cached there under a key anyone can compute
-(`skills:` and a hash of the file list), and every later run, for every
-person, puts that index in its system prompt. So a page fetched during one
-approved run could leave instructions in everyone's next prompt. The Telegram
-webhook secret lives there too, which is the item below. Either the engine
-splits `write_storage` by store, or the agent keeps nothing in
-`scriptStorage` that a prompt or a check trusts. Skill hosts are already read
-from the files, not from this cache.
+An approved run holds `write_storage`, and the engine gates `scriptStorage`
+with it as well as the person's notes, so model-written code can write the
+script's state for everyone. Nothing this agent trusts is kept there — the
+skill index is a table and the webhook secret a script secret — and the
+backfill mark is the one value left, whose worst case is a skipped one-time
+migration. The general fix is the engine's: a person's approval is not a
+reason to write state every person shares, so `scriptStorage` writes want a
+capability of their own.
 
 ### Where `run_js` may send, what is left
 
@@ -131,13 +129,6 @@ stay. A host the person named may be a place anybody can post to and read
 back from, which is why `run_js` still holds no `read_storage`: **nothing
 that reads private data shares an execution with `use_network`**. And a host
 in text the person pasted counts as one they named.
-
-### The Telegram webhook secret
-
-`TELEGRAM_WEBHOOK_SECRET_KEY` lives in `scriptStorage` so the handler can
-compare it. `crypto.secretEquals` compares a stored secret host-side, in
-constant time, without returning it, so the secret can move to
-`secretStorage`. It changes the setup instructions, so it goes with them.
 
 ### Tests that run where the code runs
 
