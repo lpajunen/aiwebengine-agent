@@ -172,12 +172,6 @@ Roughly in the order it matters.
   untrusted content into a run that can reach the network. `McpClient` is
   bounded by the same host list, so a server is mounted where the person
   named it.
-- **No stored token for this engine's `/mcp`.** The engine's tools are reached
-  through the `engine` global under the delegation grant. Mounting this
-  engine's `/mcp` with `new McpClient(url, secret)` instead would let a
-  delegated turn hold, through a stored credential, authority the grant did not
-  give it; the engine side of that is the first Security item in its
-  `ROADMAP.md`.
 - **Subagents** — an isolated context whose tool output never enters the
   parent's transcript — and **background work** — start something long, keep
   talking, be told when it lands. Both need the run to suspend and be resumed,
