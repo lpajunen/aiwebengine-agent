@@ -1131,6 +1131,10 @@ function init(): void {
   // Column names are validated against `^[a-z][a-z0-9_]*$` *and* refused when
   // they are SQL reserved words, which is why this is `speaker` rather than
   // the obvious `role`.
+  //
+  // Every table keyed by a person names `user_id` as its `person`, so
+  // deleting their account erases their conversations, runs and usage with
+  // it.
   database.ensureTable("messages", {
     columns: [
       { name: "user_id", type: "text" },
@@ -1139,6 +1143,7 @@ function init(): void {
       { name: "blocks", type: "text" },
       { name: "created_ms", type: "bigint" },
     ],
+    person: "user_id",
   });
 
   database.ensureTable("activities", {
@@ -1152,6 +1157,7 @@ function init(): void {
       // which pictures it can show. Empty for every other kind.
       { name: "detail", type: "text" },
     ],
+    person: "user_id",
   });
 
   // The agent's own copy of each picture sent with a prompt, for the page to
@@ -1168,6 +1174,7 @@ function init(): void {
       { name: "preview", type: "text" },
       { name: "created_ms", type: "bigint" },
     ],
+    person: "user_id",
   });
 
   // A run's own row: what state it is in, and which queued task will take it
@@ -1215,6 +1222,7 @@ function init(): void {
       { name: "shared_instr", type: "text" },
       { name: "own_instr", type: "text" },
     ],
+    person: "user_id",
   });
 
   // What a person tells the agent to do in every conversation. A table
@@ -1239,6 +1247,7 @@ function init(): void {
       { name: "body", type: "text" },
       { name: "updated_ms", type: "bigint" },
     ],
+    person: "user_id",
   });
 
   // The scripts an authoring run created, which are the only ones its tools
@@ -1250,6 +1259,7 @@ function init(): void {
       { name: "script", type: "text" },
       { name: "created_ms", type: "bigint" },
     ],
+    person: "user_id",
   });
 
   // What the person said while the agent was working. A table rather than a
@@ -1263,6 +1273,7 @@ function init(): void {
       { name: "body", type: "text" },
       { name: "created_ms", type: "bigint" },
     ],
+    person: "user_id",
   });
 
   // A plan put to the person, and what they said about it. A table rather
@@ -1288,6 +1299,7 @@ function init(): void {
       { name: "created_ms", type: "bigint" },
       { name: "decided_ms", type: "bigint" },
     ],
+    person: "user_id",
   });
 
   // Column names avoid anything SQL might claim: `output` and `usage` are
@@ -1306,6 +1318,7 @@ function init(): void {
       { name: "prompt_mark", type: "text" },
       { name: "created_ms", type: "bigint" },
     ],
+    person: "user_id",
   });
 
   // What a turn sent before the conversation — the system prompt in its
@@ -1323,6 +1336,7 @@ function init(): void {
       { name: "settings", type: "text" },
       { name: "created_ms", type: "bigint" },
     ],
+    person: "user_id",
   });
 
   backfillRuns();
