@@ -1,4 +1,5 @@
 /// <reference path="../types/aiwebengine.d.ts" />
+// Follow check: this line arrives through the engine's scheduled follow.
 
 import {
   frameData,
