@@ -1,0 +1,4 @@
+# The oldest engine script API these scripts work with, as a date. An engine
+# reports its own as script_api in /health, and refuses to pull a repository
+# that needs a newer one.
+2026-10-12
