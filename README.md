@@ -375,13 +375,18 @@ fetched page is.
 
 A skill is a folder of instructions the agent reads when it decides the work
 calls for them. They are assets of this script, so a deployment grows its own
-library without touching `main.ts`:
+library without touching `main.ts`. Those that come with the agent are under
+`skills/`; those it writes for itself are under `learned/`:
 
 ```
 skills/refunds/SKILL.md
 skills/refunds/policy.md
 skills/invoices/SKILL.md
+learned/weekly-report/SKILL.md
 ```
+
+Both are read the same way. When the two hold a skill of the same name, the
+one under `skills/` is used.
 
 A `SKILL.md` carries a description in front matter, and the instructions after
 it:
@@ -409,10 +414,13 @@ too, from that folder and nowhere else.
 A skill whose code calls an API names the host in its front matter —
 `hosts: api.github.com, *.example.com` — and `run_js` may then reach it on
 every run, whether or not the person mentioned it. It is the one place a
-wildcard is accepted, and `write_skill` cannot write the line, so only
+wildcard is accepted, and it is read only from skills under `skills/`:
+`write_skill` cannot write the line, and a learned skill's is ignored, so only
 whoever deploys the script decides it.
 
-Write one with the engine's own asset tools:
+Write one with the engine's own asset tools — under `learned/` on an engine that
+follows this repository, since a file under `skills/` that the repository lacks
+blocks its next pull:
 
 ```
 write_file script=<this script> name="skills/refunds/SKILL.md" content="---
@@ -464,53 +472,34 @@ That is the engine's rule holding rather than a gap, and the refusal says so.
 
 ### Promoting one into the repository
 
-**A skill the agent writes blocks the next `pull_from_git`.** Git sync is a
-sync rather than an append — a file the repository does not have is a file the
-engine should not keep — so a pull refuses a script changed here since it was
-last synced, and names the files. `force` pulls anyway and removes what the
-agent wrote; the script's revisions still hold it.
+A skill the agent writes goes under `learned/`, and the repository ignores
+`agent/learned/` (`.aiwebengineignore`). A file at a path the repository
+ignores is the engine's to keep: a pull leaves it where it is and is not refused
+over it, and a push does not publish it. So an engine that follows this
+repository keeps following it after the agent writes a skill, and keeps the
+skill.
 
-So treat an agent-written skill as a **proposal**. Keep the ones worth keeping
-by committing them:
+That makes an agent-written skill this deployment's own until somebody ships
+it. Ship the ones worth keeping by committing them under `skills/`:
 
 ```bash
-# 1. Read what the agent wrote
-read_file script=<this script> path="skills/<name>/SKILL.md"
+# 1. Read what the agent wrote — GET /agent/skills lists every skill, with
+#    learned: true on the agent's own
+read_file script=<this script> path="learned/<name>/SKILL.md"
 
 # 2. Put it in the repository, editing it on the way through
 agent/skills/<name>/SKILL.md
 
-# 3. Commit, push, pull — the pull now preserves it rather than deleting it
+# 3. Commit and push; every engine following the repository takes it
 ```
 
-The layout needs no configuration: `agent/` is the script because it holds
-`main.ts`, so everything under it lands as an asset at the same relative path,
-and `agent/skills/<name>/SKILL.md` becomes `skills/<name>/SKILL.md`.
+Once the repository's copy arrives, it is the one used, and the learned one can
+be deleted with `delete_file`. The agent says where it wrote one when it does —
+the activity reads `Wrote the skill "x" under learned/ … To ship it with the
+agent, commit it to agent/skills/x/SKILL.md`.
 
-### Knowing there is one to promote
-
-**Neither the revision history nor the git status will tell you**, and that is
-worth knowing before you go looking. An asset written from JavaScript records
-no revision and does not move the binding off `in_sync` — written one and
-watched both report nothing — so a skill sitting only in the asset store is
-invisible to `list_revisions` and `get_git_status` alike, right up to the pull
-that deletes it.
-
-What does tell you is the asset list, compared against the repository:
-
-```bash
-# what the engine has
-list_files script=<this script>     # skills/<name>/SKILL.md entries
-
-# what the repository has
-ls agent/skills/
-```
-
-Anything in the first and not the second is unpromoted, and will go on the
-next deploy. The agent also says so when it writes one — the activity reads
-`Wrote the skill "x". It lives in this engine's assets — commit it to
-agent/skills/x/SKILL.md to keep it` — which is the moment you are most likely
-to be looking.
+`write_skill` refuses the name of a skill that came from the repository: that
+one changes there, where everyone following it gets the change.
 
 Editing on the way through is the point rather than a chore. The first skill
 this agent wrote for itself instructed it to run `git log` — which it cannot

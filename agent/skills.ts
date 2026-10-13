@@ -13,7 +13,20 @@
  * cannot `export`.
  */
 
+/** The skills that come with this agent, from its repository. */
 export const SKILLS_PREFIX = "skills/";
+
+/**
+ * The skills the agent writes itself, with `write_skill`.
+ *
+ * A directory of their own because the repository ignores it
+ * (`.aiwebengineignore`), and a file at a path the repository ignores is the
+ * engine's to keep: a pull leaves it where it is and is not refused over it.
+ * Written under `skills/`, the first one would stop this agent following its
+ * repository until somebody pushed it or pulled it away.
+ */
+export const LEARNED_PREFIX = "learned/";
+
 export const SKILL_FILE = "SKILL.md";
 
 /**
@@ -27,19 +40,34 @@ export const SKILL_FILE = "SKILL.md";
  */
 export const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
-/** Where a skill's own file lives. */
-export function skillAssetPath(name: string): string {
-  return SKILLS_PREFIX + name + "/" + SKILL_FILE;
+/** Where a skill the agent writes keeps its own file. */
+export function learnedSkillPath(name: string): string {
+  return LEARNED_PREFIX + name + "/" + SKILL_FILE;
+}
+
+/** The prefix an asset's skill lives under, or null if it is under neither. */
+function skillPrefixOf(assetName: string): string | null {
+  if (assetName.indexOf(SKILLS_PREFIX) === 0) return SKILLS_PREFIX;
+  if (assetName.indexOf(LEARNED_PREFIX) === 0) return LEARNED_PREFIX;
+  return null;
 }
 
 /** The skill an asset belongs to, or null if it is not a skill's SKILL.md. */
 export function skillNameOf(assetName: string): string | null {
-  if (assetName.indexOf(SKILLS_PREFIX) !== 0) return null;
-  const rest = assetName.slice(SKILLS_PREFIX.length);
+  const prefix = skillPrefixOf(assetName);
+  if (prefix === null) return null;
+  const rest = assetName.slice(prefix.length);
   const cut = rest.indexOf("/");
   if (cut <= 0) return null;
   if (rest.slice(cut + 1) !== SKILL_FILE) return null;
   return rest.slice(0, cut);
+}
+
+/** The folder a skill's SKILL.md sits in, or null if it is not one. */
+export function skillFolderOf(assetName: string): string | null {
+  const name = skillNameOf(assetName);
+  const prefix = skillPrefixOf(assetName);
+  return name === null || prefix === null ? null : prefix + name + "/";
 }
 
 /**

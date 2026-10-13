@@ -29,14 +29,16 @@ import {
   stepsSincePrompt,
 } from "./budget.ts";
 import {
+  LEARNED_PREFIX,
   SKILLS_PREFIX,
   SKILL_FILE,
   SKILL_NAME_PATTERN,
   frontMatterValue,
+  learnedSkillPath,
   renderSkillFile,
   shortHash,
-  skillAssetPath,
   skillBody,
+  skillFolderOf,
   skillNameOf,
 } from "./skills.ts";
 import { onlyReads, parseArgs } from "./engine.ts";
@@ -501,6 +503,10 @@ const MAX_SKILL_DESCRIPTION_CHARS = 200;
 interface Skill {
   name: string;
   description: string;
+  /** Where its files are: `skills/<name>/` or `learned/<name>/`. */
+  folder: string;
+  /** Written by the agent, rather than shipped with it. */
+  learned: boolean;
 }
 
 // ============================================================================
@@ -3078,7 +3084,7 @@ function readSkills(context: HandlerContext): HttpResponse {
 
   const assets = listAssetInfo();
   const skills = loadSkills().map((skill) => {
-    const folder = SKILLS_PREFIX + skill.name + "/";
+    const folder = skill.folder;
     const text = readAssetText(folder + SKILL_FILE);
     const body = text === null ? "" : skillBody(text);
     const others: string[] = [];
@@ -3090,6 +3096,7 @@ function readSkills(context: HandlerContext): HttpResponse {
     return {
       name: skill.name,
       description: skill.description,
+      learned: skill.learned,
       body: body.slice(0, MAX_SKILL_CHARS),
       cut: body.length > MAX_SKILL_CHARS,
       files: others,
@@ -4485,7 +4492,8 @@ function loadSkills(): Skill[] {
   for (const file of capped) {
     marks.push(file.path + "@" + String(file.updatedAt ?? 0));
   }
-  const mark = marks.join(",");
+  // The version leads so an index cached in an older shape is rebuilt.
+  const mark = "v2;" + marks.join(",");
   const key = shortHash(mark);
 
   try {
@@ -4507,17 +4515,27 @@ function loadSkills(): Skill[] {
     // A cache that cannot be read is one to rebuild, not to fail over.
   }
 
-  const skills: Skill[] = [];
+  // A skill that comes with the agent wins over one it wrote under the same
+  // name: the repository's copy is the one somebody reviewed.
+  const byName: Record<string, Skill> = {};
   for (const file of capped) {
     const name = skillNameOf(file.path);
-    if (name === null) continue;
+    const folder = skillFolderOf(file.path);
+    if (name === null || folder === null) continue;
+    const learned = folder.indexOf(LEARNED_PREFIX) === 0;
+    if (byName[name] && !byName[name].learned) continue;
     const text = readAssetText(file.path);
     if (text === null) continue;
-    skills.push({
+    byName[name] = {
       name: name,
       description: frontMatterValue(text, "description") || "(no description)",
-    });
+      folder: folder,
+      learned: learned,
+    };
   }
+  const skills = Object.keys(byName)
+    .sort()
+    .map((name) => byName[name]);
 
   try {
     // One library at a time: the index of files that no longer exist is never
@@ -5009,8 +5027,15 @@ function writeSkillTool(
   // and silently: the parser reads one line per key.
   const oneLine = description.replace(/\s+/g, " ").trim();
 
-  const known = loadSkills().map((s) => s.name);
+  const library = loadSkills();
+  const known = library.map((s) => s.name);
   const replacing = known.indexOf(lower) !== -1;
+  if (library.some((s) => s.name === lower && !s.learned)) {
+    return {
+      content: `"${lower}" comes with this agent from its repository, so it changes there, not here. Tell the person what you would change, or write it under a new name.`,
+      isError: true,
+    };
+  }
 
   return requestApprovalTool(
     userId,
@@ -5069,9 +5094,11 @@ function readSkillTool(
     };
   }
 
-  const assetName = SKILLS_PREFIX + resolved + "/" + file;
+  const folder =
+    skills.filter((s) => s.name === resolved)[0]?.folder ??
+    SKILLS_PREFIX + resolved + "/";
+  const assetName = folder + file;
   const siblings: string[] = [];
-  const folder = SKILLS_PREFIX + resolved + "/";
   let exists = false;
   for (const asset of listAssetInfo()) {
     if (asset.path === assetName) exists = true;
@@ -6352,11 +6379,15 @@ function personsWords(userId: string, runId: string): string[] {
  * Each skill's `hosts:` line, read from the files themselves: they are what
  * the deployment wrote, and a list of where code may send is worth an asset
  * read per skill.
+ *
+ * Only from the skills that come with the agent. A host is a decision for
+ * whoever deploys it, and a learned skill is one the agent wrote.
  */
 function skillHosts(): string[] {
   const hosts: string[] = [];
   let seen = 0;
   for (const asset of listAssetInfo()) {
+    if (asset.path.indexOf(SKILLS_PREFIX) !== 0) continue;
     if (skillNameOf(asset.path) === null) continue;
     if (++seen > MAX_SKILLS) break;
     const text = readAssetText(asset.path);
@@ -6486,7 +6517,7 @@ function performSkillWrite(
   const file = renderSkillFile(name, args.description, args.body);
 
   try {
-    files.write(skillAssetPath(name), file);
+    files.write(learnedSkillPath(name), file);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     const why =
@@ -6505,8 +6536,8 @@ function performSkillWrite(
     userId,
     runId,
     "tool",
-    `Wrote the skill "${name}". It lives in this engine's assets — commit it to ` +
-      `agent/skills/${name}/SKILL.md to keep it, if this deployment syncs from a repository.`,
+    `Wrote the skill "${name}" under learned/, which this engine keeps across pulls ` +
+      `from the repository. To ship it with the agent, commit it to agent/skills/${name}/SKILL.md.`,
   );
   return `the skill "${name}" is written`;
 }

@@ -8,14 +8,15 @@
  */
 
 import {
-  SKILLS_PREFIX,
+  LEARNED_PREFIX,
   SKILL_FILE,
   SKILL_NAME_PATTERN,
   frontMatterValue,
+  learnedSkillPath,
   renderSkillFile,
   shortHash,
-  skillAssetPath,
   skillBody,
+  skillFolderOf,
   skillNameOf,
 } from "./skills.ts";
 
@@ -50,8 +51,15 @@ describe("what a skill may be called", () => {
 });
 
 describe("skillNameOf", () => {
-  test("names the skill a SKILL.md belongs to", () => {
+  test("names the skill a SKILL.md belongs to, shipped or learned", () => {
     expect(skillNameOf("skills/email/SKILL.md")).toBe("email");
+    expect(skillNameOf("learned/email/SKILL.md")).toBe("email");
+  });
+
+  test("knows which folder each lives in", () => {
+    expect(skillFolderOf("skills/email/SKILL.md")).toBe("skills/email/");
+    expect(skillFolderOf("learned/email/SKILL.md")).toBe("learned/email/");
+    expect(skillFolderOf("learned/email/notes.md")).toBe(null);
   });
 
   test("is null for anything that is not one", () => {
@@ -60,15 +68,18 @@ describe("skillNameOf", () => {
     expect(skillNameOf("other/email/SKILL.md")).toBe(null);
     expect(skillNameOf("skills//SKILL.md")).toBe(null);
     expect(skillNameOf("skills/a/b/SKILL.md")).toBe(null);
+    expect(skillNameOf("learned/SKILL.md")).toBe(null);
   });
 
   test("round-trips with the path the writer uses", () => {
     // The one pairing that has to hold: what write_skill stores is what the
     // index later recognises as a skill.
-    expect(skillAssetPath("weekly-report")).toBe(
-      SKILLS_PREFIX + "weekly-report/" + SKILL_FILE,
+    expect(learnedSkillPath("weekly-report")).toBe(
+      LEARNED_PREFIX + "weekly-report/" + SKILL_FILE,
     );
-    expect(skillNameOf(skillAssetPath("weekly-report"))).toBe("weekly-report");
+    expect(skillNameOf(learnedSkillPath("weekly-report"))).toBe(
+      "weekly-report",
+    );
   });
 });
 

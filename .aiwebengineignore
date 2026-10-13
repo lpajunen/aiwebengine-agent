@@ -1,0 +1,5 @@
+# Skills the agent writes itself (write_skill). The engine keeps a file at a
+# path the repository ignores: a pull leaves these where they are and is not
+# refused over them, and a push does not publish them. To ship one with the
+# agent, move it to agent/skills/.
+agent/learned/
