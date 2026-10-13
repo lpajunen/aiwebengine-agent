@@ -127,7 +127,8 @@ export interface GitPush {
  * talked into publishing somebody's code to one of its choosing. Only a script
  * that is `ahead` is pushed. Every other state has a different next step, and
  * none of them is one an author run takes: `behind` and `diverged` need the
- * person to decide which side wins.
+ * person to decide which side wins. Nor is a script pulled at a tag or a
+ * commit: a push needs a branch, and choosing one is the person's.
  */
 export function gitPush(
   script: string,
@@ -157,6 +158,15 @@ export function gitPush(
   }
   const repo = String(status.repo ?? "");
   const branch = String(status.branch ?? "");
+  const pinned = refName(status.ref);
+  if (repo && !branch && pinned) {
+    return {
+      ok: false,
+      why:
+        `Not pushed: "${script}" was pulled from ${repo} at ${pinned}, which a push cannot move. ` +
+        "The person has to push it themselves with push_to_git, naming the branch; the script then follows that branch.",
+    };
+  }
   if (!repo || !branch) {
     return { ok: false, why: "The engine did not say where it tracks." };
   }
@@ -165,6 +175,15 @@ export function gitPush(
     .trim()
     .slice(0, 200);
   return { ok: true, change: { script, repo, branch, message } };
+}
+
+/** A stored git ref as a person reads it: "tag v1", "commit 1a2b3c4". */
+function refName(raw: unknown): string {
+  const ref = String(raw ?? "");
+  if (ref.startsWith("refs/tags/")) return "tag " + ref.slice(10);
+  if (ref.startsWith("refs/heads/")) return "branch " + ref.slice(11);
+  if (/^[0-9a-f]{40}$/.test(ref)) return "commit " + ref.slice(0, 7);
+  return ref;
 }
 
 /** What the person is asked to approve for a push. */

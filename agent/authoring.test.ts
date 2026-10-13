@@ -556,6 +556,21 @@ describe("git", () => {
     const behind = gitPush("garden", { ...ahead, state: "behind" }, {});
     expect(!behind.ok && behind.why).toContain("pull");
   });
+  test("a script pulled at a tag or a commit is left to the person", () => {
+    for (const [ref, says] of [
+      ["refs/tags/v1", "tag v1"],
+      ["1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", "commit 1a2b3c4"],
+    ]) {
+      const asked = gitPush(
+        "garden",
+        { state: "ahead", repo: "me/garden", ref, branch: null },
+        { branch: "main" },
+      );
+      expect(asked.ok).toBe(false);
+      expect(!asked.ok && asked.why).toContain(says);
+      expect(!asked.ok && asked.why).toContain("naming the branch");
+    }
+  });
   test("an ahead script that says nowhere is refused", () => {
     expect(gitPush("garden", { state: "ahead" }, {}).ok).toBe(false);
   });
