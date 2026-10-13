@@ -464,11 +464,11 @@ That is the engine's rule holding rather than a gap, and the refusal says so.
 
 ### Promoting one into the repository
 
-**A skill the agent writes does not survive the next `pull_from_git`.** Git
-sync is a sync rather than an append — a file the repository does not have is
-a file the engine should not keep — so a deploy removes anything the agent
-wrote into the asset store. Nothing is wrong when that happens; it is the
-deployment model doing what it says.
+**A skill the agent writes blocks the next `pull_from_git`.** Git sync is a
+sync rather than an append — a file the repository does not have is a file the
+engine should not keep — so a pull refuses a script changed here since it was
+last synced, and names the files. `force` pulls anyway and removes what the
+agent wrote; the script's revisions still hold it.
 
 So treat an agent-written skill as a **proposal**. Keep the ones worth keeping
 by committing them:
