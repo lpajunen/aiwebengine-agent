@@ -57,7 +57,9 @@ each task the runner removes the `skills/` files the task added and reports one
 it changed (a pull from the repository restores that). `AGENT_SCRIPT` names the
 agent script (default `agent`).
 
-`ENGINE_COOKIE` is the `Cookie` header of a signed-in browser session. That
+`ENGINE_COOKIE` is the `Cookie` header of a signed-in browser session, and
+`ENGINE_USER_AGENT` is that browser's `User-Agent`: the engine binds a cookie
+session to it, so a request that sends another is signed out. That
 person needs the editor role, must have stored an Anthropic key and granted the
 agent permission to work while they are away (the page at `/agent` does both),
 and pays for the run. Results go to `eval/results/<time>.json` with the pass

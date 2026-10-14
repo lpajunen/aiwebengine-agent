@@ -2,6 +2,7 @@
 // Runs the evaluation suite against a deployed agent.
 //
 //   ENGINE_URL=https://engine.example ENGINE_COOKIE='__Host-session=...' \
+//     ENGINE_USER_AGENT='<the signed-in browser's User-Agent>' \
 //     node eval/run.mjs [--only site-01,tool-02] [--keep] [--timeout 600]
 //
 // For each task it deletes any leftover script, sends the request to the
@@ -40,6 +41,9 @@ const engine = (process.env.ENGINE_URL ?? "").replace(/\/$/, "");
 const manage = (process.env.MANAGE_URL ?? engine).replace(/\/$/, "");
 const agentScript = process.env.AGENT_SCRIPT ?? "agent";
 const cookie = process.env.ENGINE_COOKIE ?? "";
+// A cookie session is bound to the User-Agent it was minted with, and a
+// mismatch ends it. Node would send its own, so the browser's goes here.
+const userAgent = process.env.ENGINE_USER_AGENT ?? "";
 if (!engine || !cookie) {
   console.error(
     "Set ENGINE_URL and ENGINE_COOKIE (the signed-in session cookie).",
@@ -62,6 +66,7 @@ async function call(path, init = {}) {
     ...init,
     headers: {
       cookie,
+      ...(userAgent ? { "user-agent": userAgent } : {}),
       "content-type": "application/json",
       ...(init.headers ?? {}),
     },
