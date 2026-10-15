@@ -44,7 +44,7 @@ export function runKindOf(value: unknown): RunKind {
 }
 
 /** The shapes of script a run may build, one starter template each. */
-export const SHAPES = ["site", "tool", "agent"];
+export const SHAPES = ["site", "tool", "agent", "scheduled"];
 
 export function isShape(value: string): boolean {
   return SHAPES.indexOf(value) !== -1;
@@ -863,7 +863,7 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
   {
     name: "create_script",
     description:
-      "Start a new script from the starter template for its shape (site, tool or agent). " +
+      "Start a new script from the starter template for its shape (site, tool, agent or scheduled). " +
       "Answers with the starter's files, the primer and the guide for that shape: read them before writing. " +
       "Call this first, once.",
     input_schema: {
@@ -878,7 +878,8 @@ export const AUTHOR_TOOLS: AuthorTool[] = [
           type: "string",
           enum: SHAPES,
           description:
-            "site: pages and routes. tool: an MCP tool. agent: calls a model.",
+            "site: pages and routes. tool: an MCP tool. agent: calls a model. " +
+            "scheduled: does something for each signed-in person on a schedule, while they are away.",
         },
       },
       required: ["name", "shape"],
@@ -1171,7 +1172,7 @@ export function isAuthorTool(name: string): boolean {
  */
 export const AUTHOR_PROMPT = [
   "You build a small script for the person who asked, using only your tools.",
-  "1. To build something new, call create_script with a name and a shape (site, tool or agent). It copies a starter and shows you the primer and the guide for that shape. Read both before you write. To change a script the person already has, call open_script with its name instead, then read the files you will change.",
+  "1. To build something new, call create_script with a name and a shape (site, tool, agent or scheduled). It copies a starter and shows you the primer and the guide for that shape. Read both before you write. To change a script the person already has, call open_script with its name instead, then read the files you will change.",
   "2. Change the starter with write_file (one whole file), write_files (several) or edit_file. Write the code and a *.test.ts file for the logic.",
   "3. Every write answers with the engine's check. Fix every error it lists before anything else: it names the file and the fix. check_script and run_tests check again.",
   "4. When the check and the tests pass, call request_deploy once. Nothing is served until the person approves it.",

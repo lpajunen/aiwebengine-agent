@@ -1,0 +1,29 @@
+{
+  "id": "scheduled-01",
+  "shape": "scheduled",
+  "title": "A daily journal prompt",
+  "script": "eval-scheduled-01",
+  "request": "Build a daily journal prompt. A signed-in person chooses a time of day and a\ntime zone on the page at /eval-scheduled-01, and every day at that time a\nscheduled run stores the day's prompt in their personal storage; the page shows\nthe latest one. A visitor who is not signed in sees a link to sign in, and a\nPOST to /eval-scheduled-01/schedule from them answers 401. The prompts are, in\norder: \"What made you smile today?\", \"What did you learn today?\", \"What will\nyou do differently tomorrow?\". Put the choice in lib/prompts.ts as an exported\nfunction promptFor(day: number): string that answers the prompt for that day\nnumber, starting again from the first after the last, and write tests for it.",
+  "probes": [
+    {
+      "method": "GET",
+      "path": "/eval-scheduled-01",
+      "status": 200,
+      "bodyIncludes": ["/auth/login"]
+    },
+    {
+      "method": "POST",
+      "path": "/eval-scheduled-01/schedule",
+      "status": 401
+    }
+  ],
+  "registrations": [
+    { "kind": "route", "name": "/eval-scheduled-01", "method": "GET" },
+    {
+      "kind": "route",
+      "name": "/eval-scheduled-01/schedule",
+      "method": "POST"
+    }
+  ],
+  "minTests": 1
+}

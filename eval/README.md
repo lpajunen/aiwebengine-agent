@@ -10,14 +10,15 @@ into the task.
 ## Tasks
 
 `tasks/<id>/task.json` holds the request and the checks; `acceptance.test.ts`,
-when present, is the hidden test. Ten tasks to start; the plan calls for about
+when present, is the hidden test. Eleven tasks to start; the plan calls for about
 ten per shape.
 
-| Shape | Tasks                                                                             |
-| ----- | --------------------------------------------------------------------------------- |
-| site  | `site-01` two-page site, `-02` sign-up page, `-03` status board, `-04` counter    |
-| tool  | `tool-01` length converter, `-02` text statistics, `-03` API wrapper, `-04` dates |
-| agent | `agent-01` FAQ bot, `-02` release-notes agent                                     |
+| Shape     | Tasks                                                                             |
+| --------- | --------------------------------------------------------------------------------- |
+| site      | `site-01` two-page site, `-02` sign-up page, `-03` status board, `-04` counter    |
+| tool      | `tool-01` length converter, `-02` text statistics, `-03` API wrapper, `-04` dates |
+| agent     | `agent-01` FAQ bot, `-02` release-notes agent                                     |
+| scheduled | `scheduled-01` daily journal prompt                                               |
 
 A task passes when every check holds:
 

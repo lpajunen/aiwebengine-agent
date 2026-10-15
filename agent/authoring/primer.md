@@ -146,6 +146,11 @@ if (!res.ok)
 const data = res.json();
 ```
 
+Binary data travels as base64. `{ binary: true }` returns a body as
+`bodyBase64`; `bodyBase64` in the options sends bytes; and
+`form: [{ name, value }, { name, base64, filename, contentType }]` sends
+`multipart/form-data` (leave `Content-Type` out — the engine sets it).
+
 Never write a key, token or password into a file. A person stores secrets
 separately; ask for the name and use it.
 
@@ -242,7 +247,7 @@ steps, and answer with an error rather than loop.
 
 ## Not in this primer
 
-Streams, scheduled jobs and tasks, `database` schemas, delegation, outbound MCP
-clients, sandboxed code and elevation. Read their sections of
-`aiwebengine.d.ts` before using one, and ask the person before changing a
-database schema.
+Streams, scheduled jobs and tasks, `database` schemas, delegation and personal
+schedules, outbound MCP clients, sandboxed code and elevation. Read their
+sections of `aiwebengine.d.ts` before using one, and ask the person before
+changing a database schema.

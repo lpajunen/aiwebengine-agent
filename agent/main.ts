@@ -80,6 +80,7 @@ import {
   revertScriptArgs,
   notOpenable,
   isShape,
+  SHAPES,
   leftoverPlaceholders,
   looseEdit,
   nearestRegion,
@@ -5889,7 +5890,9 @@ function createScriptTool(
   const problem = scriptNameProblem(name);
   if (problem) return failed(problem);
   if (!isShape(shape)) {
-    return failed(`shape must be one of: site, tool, agent. Got "${shape}".`);
+    return failed(
+      `shape must be one of: ${SHAPES.join(", ")}. Got "${shape}".`,
+    );
   }
   if (createdScripts(userId, runId).length > 0) {
     return failed(
