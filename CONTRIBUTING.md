@@ -16,7 +16,7 @@ engine it runs on, and the rules for changing it:
 ## Before a pull request
 
 ```bash
-npx tsc -p tsconfig.json     # typecheck against types/aiwebengine.d.ts
+make verify     # formatting, Markdown and types against the engine's API: what CI runs
 ```
 
 - Install the changed scripts on an engine (`pull_from_git`) and try them

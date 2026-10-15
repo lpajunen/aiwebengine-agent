@@ -1,0 +1,10 @@
+name: Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    uses: lpajunen/aiwebengine/.github/workflows/script-repository.yml@main

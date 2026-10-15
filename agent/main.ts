@@ -5406,8 +5406,7 @@ function appCallTool(
 // ============================================================================
 
 type EngineAnswer =
-  | { ok: true; value: Record<string, any> }
-  | { ok: false; error: string };
+  { ok: true; value: Record<string, any> } | { ok: false; error: string };
 
 /**
  * One engine operation, with refusals told apart from answers.

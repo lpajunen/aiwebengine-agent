@@ -2,7 +2,12 @@ import { textStats } from "./lib/stats.ts";
 
 describe("textStats", () => {
   test("counts a simple sentence", () => {
-    expect(textStats("The quick brown fox.")).toEqual({ words: 4, characters: 20, sentences: 1, longestWord: "quick" });
+    expect(textStats("The quick brown fox.")).toEqual({
+      words: 4,
+      characters: 20,
+      sentences: 1,
+      longestWord: "quick",
+    });
   });
   test("counts several sentences", () => {
     const s = textStats("Hi! Is it ready? Yes.");
@@ -14,6 +19,11 @@ describe("textStats", () => {
     expect(textStats("Don't stop").longestWord).toBe("Don't");
   });
   test("empty text has nothing", () => {
-    expect(textStats("")).toEqual({ words: 0, characters: 0, sentences: 0, longestWord: "" });
+    expect(textStats("")).toEqual({
+      words: 0,
+      characters: 0,
+      sentences: 0,
+      longestWord: "",
+    });
   });
 });

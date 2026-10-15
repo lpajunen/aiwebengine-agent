@@ -764,13 +764,13 @@ set_script_limits script=<this script> jobTimeoutMs=120000
 ## Typechecking
 
 ```bash
-npx tsc -p tsconfig.json
+make verify      # formatting, Markdown and types: what CI runs
 ```
 
-`types/aiwebengine.d.ts` is a snapshot. The authoritative copy is served by the
-engine itself at `/engine/types/v{version}/aiwebengine.d.ts` — refresh it from
-the engine you deploy to, since several of the limits in its comments are that
-deployment's configuration.
+`types/aiwebengine.d.ts` is generated, not committed: `make types` takes it
+from the engine image built from `main`, `make types TYPES_FROM=../aiwebengine`
+from an engine checkout. The targets are the engine's script kit; see
+[.aiwebengine/README.md](.aiwebengine/README.md).
 
 ## License
 
