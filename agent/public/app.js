@@ -951,7 +951,7 @@ function showGrant(auth) {
     el.grantLink.title = auth.expired
       ? "Your permission has expired, so runs cannot start."
       : "This agent has no permission to work while you are away yet.";
-    el.grantLink.textContent = "Give permission";
+    el.grantLink.textContent = "Permissions";
     return;
   }
 
@@ -973,7 +973,7 @@ function showGrant(auth) {
       ? " It can use your other apps' tools."
       : " To let it use your other apps, add \u201cUse your other apps' tools\u201d.") +
     " Changes apply to the next run you start.";
-  el.grantLink.textContent = "Change permissions";
+  el.grantLink.textContent = "Permissions";
 }
 
 /** A scope as the consent page words it, so the two pages agree. */
